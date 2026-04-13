@@ -1,0 +1,953 @@
+import { useState, useCallback, useEffect, useRef } from 'react'
+import { v4 as uuid } from 'uuid'
+import Markdown from 'react-markdown'
+import { useLibraryStore } from '../../store/libraryStore'
+import { useUiStore } from '../../store/uiStore'
+import type { Annotation, HistoryEntry, BlockRef } from '../../types/library'
+
+// Map entry types to display info
+function getTypeDisplay(type: HistoryEntry['type']) {
+  const map: Record<string, { label: string; color: string; bgClass: string }> = {
+    note: { label: '我', color: 'var(--accent)', bgClass: 'user-note' },
+    annotation: { label: '我', color: 'var(--accent)', bgClass: 'user-note' },
+    question: { label: '我', color: 'var(--accent)', bgClass: 'user-note' },
+    stance: { label: '我', color: 'var(--accent)', bgClass: 'user-note' },
+    link: { label: '关联', color: '#5B9BD5', bgClass: 'user-link' },
+    ai_interpretation: { label: 'AI', color: 'var(--success)', bgClass: 'ai-response' },
+    ai_qa: { label: 'AI', color: 'var(--warning)', bgClass: 'ai-qa' },
+    ai_feedback: { label: 'AI', color: '#9DB5B2', bgClass: 'ai-feedback' },
+  }
+  return map[type] || map.note
+}
+
+// ===== Single history entry =====
+function HistoryEntryItem({
+  entry,
+  onEdit,
+  onDelete,
+  onCite,
+}: {
+  entry: HistoryEntry
+  onEdit: (id: string, content: string) => void
+  onDelete: (id: string) => void
+  onCite?: (entry: HistoryEntry) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [editText, setEditText] = useState(entry.content)
+
+  const display = getTypeDisplay(entry.type)
+
+  const handleSave = () => {
+    onEdit(entry.id, editText)
+    setEditing(false)
+  }
+
+  return (
+    <div className={`history-entry ${display.bgClass}`}>
+      <div className="history-entry-header">
+        <span style={{ fontSize: 11, fontWeight: 500, color: entry.author === 'user' ? 'var(--accent)' : 'var(--success)' }}>
+          {entry.author === 'user' ? '我' : 'AI'}
+        </span>
+        <div className="history-entry-actions">
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            {new Date(entry.createdAt).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+          </span>
+          {!editing && (
+            <>
+              {onCite && <button className="btn btn-sm btn-icon" onClick={() => onCite(entry)} title="引用此块">引用</button>}
+              <button className="btn btn-sm btn-icon" onClick={() => { setEditText(entry.content); setEditing(true) }}>编辑</button>
+              <button className="btn btn-sm btn-icon" onClick={() => onDelete(entry.id)}>删除</button>
+            </>
+          )}
+        </div>
+      </div>
+      {entry.contextText && (
+        <div style={{
+          fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6,
+          padding: '4px 8px', background: 'rgba(200,149,108,0.1)', borderRadius: 4,
+          borderLeft: '2px solid var(--accent)',
+        }}>
+          <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>引用：</span>
+          「{entry.contextText.substring(0, 80)}{entry.contextText.length > 80 ? '...' : ''}」
+        </div>
+      )}
+      {entry.type === 'ai_qa' && entry.userQuery && (
+        <div style={{ fontSize: 12, color: 'var(--accent)', marginBottom: 6, fontWeight: 500 }}>
+          问：{entry.userQuery}
+        </div>
+      )}
+      {entry.linkedRef && (
+        <div style={{ fontSize: 11, color: '#5B9BD5', marginBottom: 6, fontStyle: 'italic' }}>
+          关联：「{entry.linkedRef.selectedText?.substring(0, 60)}...」
+        </div>
+      )}
+      {editing ? (
+        <div>
+          <textarea
+            value={editText}
+            onChange={e => setEditText(e.target.value)}
+            style={{
+              width: '100%', minHeight: 80, padding: 8, border: '1px solid var(--border)',
+              borderRadius: 4, fontSize: 13, fontFamily: 'var(--font)', resize: 'vertical'
+            }}
+          />
+          <div style={{ display: 'flex', gap: 6, marginTop: 6, justifyContent: 'flex-end' }}>
+            <button className="btn btn-sm" onClick={() => setEditing(false)}>取消</button>
+            <button className="btn btn-sm btn-primary" onClick={handleSave}>保存</button>
+          </div>
+        </div>
+      ) : entry.author === 'ai' ? (
+        <div className="annotation-markdown"><Markdown>{entry.content}</Markdown></div>
+      ) : (
+        <div style={{ whiteSpace: 'pre-wrap' }}>{entry.content}</div>
+      )}
+      {entry.editedAt && (
+        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>已编辑</div>
+      )}
+    </div>
+  )
+}
+
+// ===== AI Instant Feedback bubble =====
+function FeedbackBubble({ text, loading, onKeep, onDismiss }: {
+  text: string | null
+  loading: boolean
+  onKeep: () => void
+  onDismiss: () => void
+}) {
+  if (!loading && !text) return null
+
+  return (
+    <div style={{
+      padding: '10px 14px', margin: '0 14px 10px',
+      background: '#F5F8F5', borderRadius: 8,
+      border: '1px solid #E0E8E0',
+      fontSize: 13, lineHeight: 1.7, color: 'var(--text-secondary)',
+      flexShrink: 0,
+    }}>
+      {loading ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-muted)' }}>
+          <span className="loading-spinner" />
+          AI 正在思考...
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: 10, color: '#9DB5B2', fontWeight: 600, marginBottom: 4 }}>AI 即时反馈</div>
+          <div style={{ whiteSpace: 'pre-wrap' }}>{text}</div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 8, justifyContent: 'flex-end' }}>
+            <button className="btn btn-sm" onClick={onDismiss} style={{ fontSize: 11 }}>忽略</button>
+            <button className="btn btn-sm" onClick={onKeep} style={{ fontSize: 11, color: 'var(--success)' }}>保留到历史链</button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ===== Block cite dropdown: cite a specific HistoryEntry to a memo =====
+function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, onDone }: {
+  historyEntry: HistoryEntry
+  annotation: Annotation
+  entryId: string
+  entryTitle: string
+  onDone: () => void
+}) {
+  const { library, addBlockToMemo } = useLibraryStore()
+  const ref = useRef<HTMLDivElement>(null)
+  const memos = library?.memos || []
+
+  useEffect(() => {
+    const handler = (e: globalThis.MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onDone()
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [onDone])
+
+  const handleCite = async (memoId: string) => {
+    const block: BlockRef = {
+      entryId,
+      entryTitle,
+      annotationId: annotation.id,
+      historyEntryId: historyEntry.id,
+      selectedText: annotation.anchor.selectedText,
+      blockContent: historyEntry.content.substring(0, 300),
+      blockAuthor: historyEntry.author,
+    }
+    await addBlockToMemo(memoId, block)
+    onDone()
+  }
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: 'absolute', right: 0, top: '100%', zIndex: 100,
+        background: 'var(--bg)', border: '1px solid var(--border)',
+        borderRadius: 6, boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+        padding: '4px 0', minWidth: 160, marginTop: 4,
+      }}
+    >
+      <div style={{ padding: '4px 12px', fontSize: 10, color: 'var(--text-muted)', fontWeight: 500 }}>
+        引用到笔记
+      </div>
+      {memos.length === 0 ? (
+        <div style={{ padding: '6px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
+          请先创建思考笔记
+        </div>
+      ) : memos.map(m => (
+        <div
+          key={m.id}
+          onClick={() => handleCite(m.id)}
+          style={{ padding: '6px 12px', fontSize: 12, cursor: 'pointer' }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        >
+          {m.title}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ===== Main Panel =====
+export default function AnnotationPanel() {
+  const { currentEntry, currentPdfMeta, updatePdfMeta, library } = useLibraryStore()
+  const { textSelection, activeAnnotationId, setTextSelection, setActiveAnnotation } = useUiStore()
+  const [noteInput, setNoteInput] = useState('')
+  const [aiLoading, setAiLoading] = useState(false)
+  const { selectedAiModel: aiModel, setSelectedAiModel: setAiModel } = useUiStore()
+  const [configuredProviders, setConfiguredProviders] = useState<Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>>([])
+
+  // Load configured AI providers
+  useEffect(() => {
+    if (window.electronAPI?.aiGetConfigured) {
+      window.electronAPI.aiGetConfigured().then(setConfiguredProviders).catch(() => {})
+    }
+  }, [])
+  const [citingEntry, setCitingEntry] = useState<{ historyEntry: HistoryEntry; annotation: Annotation } | null>(null)
+
+  // Instant feedback state
+  const [feedbackText, setFeedbackText] = useState<string | null>(null)
+  const [feedbackLoading, setFeedbackLoading] = useState(false)
+  const feedbackAnnotationId = useRef<string | null>(null)
+
+  const historyEndRef = useRef<HTMLDivElement>(null)
+
+  // Load annotations from other entries
+  interface OtherEntryAnnotations {
+    entryId: string
+    entryTitle: string
+    annotations: Annotation[]
+  }
+  const [otherEntryAnnotations, setOtherEntryAnnotations] = useState<OtherEntryAnnotations[]>([])
+
+  useEffect(() => {
+    if (!library || !currentEntry) { setOtherEntryAnnotations([]); return }
+    let cancelled = false
+
+    async function loadOthers() {
+      const others: OtherEntryAnnotations[] = []
+      for (const entry of library!.entries) {
+        if (entry.id === currentEntry!.id) continue
+        try {
+          const meta = await window.electronAPI.loadPdfMeta(entry.id)
+          if (meta && meta.annotations && meta.annotations.length > 0) {
+            others.push({
+              entryId: entry.id,
+              entryTitle: entry.title,
+              annotations: meta.annotations,
+            })
+          }
+        } catch { /* skip */ }
+      }
+      if (!cancelled) setOtherEntryAnnotations(others)
+    }
+    loadOthers()
+    return () => { cancelled = true }
+  }, [library?.entries.length, currentEntry?.id])
+
+  // Jump to another entry's annotation
+  const handleJumpToOtherAnnotation = useCallback((entryId: string, annotationId: string) => {
+    const entry = library?.entries.find(e => e.id === entryId)
+    if (entry) {
+      useLibraryStore.getState().openEntry(entry)
+      setTimeout(() => {
+        useUiStore.getState().setActiveAnnotation(annotationId)
+      }, 300)
+    }
+  }, [library])
+
+  // Find the active annotation
+  const activeAnnotation = currentPdfMeta?.annotations.find(a => a.id === activeAnnotationId)
+  const selectionAnnotation = textSelection
+    ? currentPdfMeta?.annotations.find(a =>
+        a.anchor.pageNumber === textSelection.pageNumber &&
+        a.anchor.selectedText === textSelection.text
+      )
+    : null
+  const displayAnnotation = activeAnnotation || selectionAnnotation
+
+  // Detect if user selected NEW text while viewing an existing annotation
+  const hasNewContext = !!(
+    displayAnnotation &&
+    textSelection &&
+    textSelection.text !== displayAnnotation.anchor.selectedText
+  )
+  const newContextText = hasNewContext ? textSelection!.text : null
+
+  // Scroll to bottom when new entries added
+  useEffect(() => {
+    historyEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [displayAnnotation?.historyChain.length])
+
+  // Clear feedback when switching annotation
+  useEffect(() => {
+    setFeedbackText(null)
+    setFeedbackLoading(false)
+  }, [displayAnnotation?.id])
+
+  // ===== Trigger instant feedback =====
+  const triggerFeedback = useCallback(async (userNote: string, annotationId: string, selectedText: string) => {
+    if (!window.electronAPI?.glmInstantFeedback) {
+      console.warn('[instant-feedback] glmInstantFeedback not available in electronAPI')
+      return
+    }
+    const { glmApiKeyStatus } = useUiStore.getState()
+    if (glmApiKeyStatus !== 'set') {
+      console.warn('[instant-feedback] API key not set, skipping')
+      return
+    }
+
+    setFeedbackLoading(true)
+    setFeedbackText(null)
+    feedbackAnnotationId.current = annotationId
+
+    try {
+      // Gather other annotations from current PDF as context
+      const otherAnnotations: Array<{ text: string; note: string; entryTitle: string }> = []
+      const entryTitle = currentEntry?.title || ''
+
+      if (currentPdfMeta) {
+        for (const ann of currentPdfMeta.annotations) {
+          if (ann.id === annotationId) continue
+          for (const h of ann.historyChain) {
+            if (h.author === 'user') {
+              otherAnnotations.push({
+                text: ann.anchor.selectedText.substring(0, 100),
+                note: h.content.substring(0, 200),
+                entryTitle
+              })
+            }
+          }
+        }
+      }
+
+      // Get OCR context
+      let ocrContext = ''
+      if (currentEntry?.absPath) {
+        try {
+          const ocr = await window.electronAPI.readOcrText(currentEntry.absPath)
+          if (ocr.exists && ocr.text) {
+            ocrContext = ocr.text.substring(0, 1000)
+          }
+        } catch { /* ignore */ }
+      }
+
+      const result = await window.electronAPI.glmInstantFeedback(
+        userNote, selectedText, ocrContext, otherAnnotations
+      )
+
+      // Only show if we're still on the same annotation
+      if (feedbackAnnotationId.current === annotationId) {
+        if (result.success && result.text) {
+          setFeedbackText(result.text)
+        } else if (!result.success) {
+          console.warn('[instant-feedback] API error:', result.error)
+          setFeedbackText(null)
+        } else {
+          setFeedbackText(null)
+        }
+        setFeedbackLoading(false)
+      }
+    } catch (err) {
+      console.error('[instant-feedback] Exception:', err)
+      setFeedbackLoading(false)
+    }
+  }, [currentEntry, currentPdfMeta])
+
+  // ===== Keep feedback as history entry =====
+  const handleKeepFeedback = useCallback(async () => {
+    if (!feedbackText || !displayAnnotation) return
+
+    const entry: HistoryEntry = {
+      id: uuid(),
+      type: 'ai_feedback',
+      content: feedbackText,
+      author: 'ai',
+      createdAt: new Date().toISOString()
+    }
+
+    await updatePdfMeta(meta => ({
+      ...meta,
+      annotations: meta.annotations.map(a =>
+        a.id === displayAnnotation.id
+          ? { ...a, historyChain: [...a.historyChain, entry], updatedAt: new Date().toISOString() }
+          : a
+      )
+    }))
+
+    setFeedbackText(null)
+  }, [feedbackText, displayAnnotation, updatePdfMeta])
+
+  // ===== Add note =====
+  const handleAddNote = useCallback(async () => {
+    if (!noteInput.trim()) return
+    // Need either an existing annotation or a text selection to create one
+    if (!displayAnnotation && !textSelection) return
+
+    const newEntry: HistoryEntry = {
+      id: uuid(),
+      type: 'note',
+      content: noteInput.trim(),
+      author: 'user',
+      createdAt: new Date().toISOString(),
+      // Record the additional context text if user selected new text
+      ...(newContextText ? { contextText: newContextText } : {}),
+    }
+
+    let targetAnnotationId: string
+
+    if (displayAnnotation) {
+      // Append to existing annotation's history chain
+      await updatePdfMeta(meta => ({
+        ...meta,
+        annotations: meta.annotations.map(a =>
+          a.id === displayAnnotation.id
+            ? { ...a, historyChain: [...a.historyChain, newEntry], updatedAt: new Date().toISOString() }
+            : a
+        )
+      }))
+      targetAnnotationId = displayAnnotation.id
+    } else {
+      // Create new annotation from text selection
+      const newAnnotation: Annotation = {
+        id: uuid(),
+        anchor: {
+          pageNumber: textSelection!.pageNumber,
+          startOffset: textSelection!.startOffset,
+          endOffset: textSelection!.endOffset,
+          selectedText: textSelection!.text
+        },
+        historyChain: [newEntry],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+      await updatePdfMeta(meta => ({
+        ...meta,
+        annotations: [...meta.annotations, newAnnotation]
+      }))
+      targetAnnotationId = newAnnotation.id
+      setActiveAnnotation(newAnnotation.id)
+    }
+
+    const savedNote = noteInput.trim()
+    const savedText = newContextText || displayAnnotation?.anchor.selectedText || textSelection?.text || ''
+    setNoteInput('')
+
+    // Trigger instant feedback after saving
+    triggerFeedback(savedNote, targetAnnotationId, savedText)
+  }, [textSelection, noteInput, displayAnnotation, newContextText, updatePdfMeta, setActiveAnnotation, triggerFeedback])
+
+  // ===== AI interpret =====
+  const handleAiInterpret = useCallback(async () => {
+    // Use new context text if available, otherwise original anchor text
+    const interpretText = newContextText || displayAnnotation?.anchor.selectedText || textSelection?.text
+    if (!interpretText) return
+    setAiLoading(true)
+
+    const result = await window.electronAPI.glmInterpret(interpretText, '')
+
+    const entry: HistoryEntry = {
+      id: uuid(),
+      type: 'ai_interpretation',
+      content: result.success ? result.text! : `错误：${result.error}`,
+      contextSent: interpretText,
+      author: 'ai',
+      createdAt: new Date().toISOString(),
+      ...(newContextText ? { contextText: newContextText } : {}),
+    }
+
+    if (displayAnnotation) {
+      await updatePdfMeta(meta => ({
+        ...meta,
+        annotations: meta.annotations.map(a =>
+          a.id === displayAnnotation.id
+            ? { ...a, historyChain: [...a.historyChain, entry], updatedAt: new Date().toISOString() }
+            : a
+        )
+      }))
+    } else if (textSelection) {
+      const newAnnotation: Annotation = {
+        id: uuid(),
+        anchor: {
+          pageNumber: textSelection.pageNumber,
+          startOffset: textSelection.startOffset,
+          endOffset: textSelection.endOffset,
+          selectedText: textSelection.text
+        },
+        historyChain: [entry],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+      await updatePdfMeta(meta => ({
+        ...meta,
+        annotations: [...meta.annotations, newAnnotation]
+      }))
+      setActiveAnnotation(newAnnotation.id)
+    }
+
+    setAiLoading(false)
+  }, [textSelection, newContextText, displayAnnotation, updatePdfMeta, setActiveAnnotation])
+
+  // ===== AI dialogue (unified: works with or without existing annotation) =====
+  const handleAskQuestionWithText = useCallback(async (text: string) => {
+    if (!text.trim()) return
+    if (!displayAnnotation && !textSelection) return
+    setAiLoading(true)
+
+    const anchorText = displayAnnotation?.anchor.selectedText || textSelection?.text || ''
+    let contextForAi = anchorText
+    if (newContextText) {
+      contextForAi += `\n\n[用户补充的上下文文本]\n${newContextText}`
+    }
+
+    const historyChain = displayAnnotation?.historyChain || []
+
+    const result = await window.electronAPI.glmAsk(
+      text.trim(),
+      contextForAi,
+      historyChain,
+      aiModel
+    )
+
+    const entry: HistoryEntry = {
+      id: uuid(),
+      type: 'ai_qa',
+      content: result.success ? result.text! : `错误：${result.error}`,
+      userQuery: text.trim(),
+      author: 'ai',
+      createdAt: new Date().toISOString(),
+      ...(newContextText ? { contextText: newContextText } : {}),
+    }
+
+    if (displayAnnotation) {
+      // Append to existing annotation
+      await updatePdfMeta(meta => ({
+        ...meta,
+        annotations: meta.annotations.map(a =>
+          a.id === displayAnnotation.id
+            ? { ...a, historyChain: [...a.historyChain, entry], updatedAt: new Date().toISOString() }
+            : a
+        )
+      }))
+    } else if (textSelection) {
+      // Create new annotation with this AI response
+      const newAnnotation: Annotation = {
+        id: uuid(),
+        anchor: {
+          pageNumber: textSelection.pageNumber,
+          startOffset: textSelection.startOffset,
+          endOffset: textSelection.endOffset,
+          selectedText: textSelection.text,
+        },
+        historyChain: [entry],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }
+      await updatePdfMeta(meta => ({
+        ...meta,
+        annotations: [...meta.annotations, newAnnotation]
+      }))
+      setActiveAnnotation(newAnnotation.id)
+    }
+
+    setNoteInput('')
+    setAiLoading(false)
+  }, [displayAnnotation, textSelection, newContextText, aiModel, updatePdfMeta, setActiveAnnotation])
+
+  // Convenience wrapper
+  const handleAskQuestion = useCallback(() => {
+    handleAskQuestionWithText(noteInput)
+  }, [noteInput, handleAskQuestionWithText])
+
+  // ===== Edit / Delete =====
+  const handleEdit = useCallback(async (entryId: string, newContent: string) => {
+    if (!displayAnnotation) return
+    await updatePdfMeta(meta => ({
+      ...meta,
+      annotations: meta.annotations.map(a =>
+        a.id === displayAnnotation.id
+          ? {
+              ...a,
+              historyChain: a.historyChain.map(e =>
+                e.id === entryId
+                  ? { ...e, originalContent: e.originalContent || e.content, content: newContent, editedAt: new Date().toISOString() }
+                  : e
+              ),
+              updatedAt: new Date().toISOString()
+            }
+          : a
+      )
+    }))
+  }, [displayAnnotation, updatePdfMeta])
+
+  const handleDelete = useCallback(async (entryId: string) => {
+    if (!displayAnnotation) return
+    await updatePdfMeta(meta => ({
+      ...meta,
+      annotations: meta.annotations.map(a =>
+        a.id === displayAnnotation.id
+          ? { ...a, historyChain: a.historyChain.filter(e => e.id !== entryId), updatedAt: new Date().toISOString() }
+          : a
+      ).filter(a => a.historyChain.length > 0)
+    }))
+    if (displayAnnotation.historyChain.length <= 1) {
+      setActiveAnnotation(null)
+    }
+  }, [displayAnnotation, updatePdfMeta, setActiveAnnotation])
+
+  const { toggleAnnotationPanel, clearAnnotationFocus } = useUiStore()
+
+  // ===== Delete entire annotation (whole chain) =====
+  const [confirmDeleteChain, setConfirmDeleteChain] = useState(false)
+  const handleDeleteChain = useCallback(async () => {
+    if (!displayAnnotation) return
+    await updatePdfMeta(meta => ({
+      ...meta,
+      annotations: meta.annotations.filter(a => a.id !== displayAnnotation.id)
+    }))
+    clearAnnotationFocus()
+    setConfirmDeleteChain(false)
+  }, [displayAnnotation, updatePdfMeta, clearAnnotationFocus])
+
+  // ===== Annotation list helper =====
+  const renderAnnotationItem = (ann: Annotation, onClick: () => void, sourceLabel?: string, entryId?: string, entryTitle?: string) => {
+    const lastEntry = ann.historyChain[ann.historyChain.length - 1]
+    const display = lastEntry ? getTypeDisplay(lastEntry.type) : null
+    return (
+      <div
+        key={ann.id}
+        className="annotation-list-item"
+        draggable
+        onDragStart={e => {
+          // Carry annotation data for memo drop
+          e.dataTransfer.setData('annotation-drag', JSON.stringify({
+            entryId: entryId || currentEntry?.id || '',
+            entryTitle: entryTitle || currentEntry?.title || '',
+            annotationId: ann.id,
+            selectedText: ann.anchor.selectedText,
+            historyChain: ann.historyChain.map(h => ({
+              id: h.id, type: h.type, content: h.content.substring(0, 300),
+              author: h.author, userQuery: h.userQuery,
+            })),
+          }))
+          e.dataTransfer.effectAllowed = 'copy'
+        }}
+        style={{
+          padding: '8px 10px', marginBottom: 4, borderRadius: 6,
+          cursor: 'grab', fontSize: 12, background: 'var(--bg-warm)',
+          borderLeft: `3px solid ${display?.color || 'var(--border)'}`,
+          position: 'relative',
+        }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
+      >
+        <div onClick={onClick} style={{ cursor: 'pointer' }}>
+          {sourceLabel && (
+            <div style={{ fontSize: 9, color: 'var(--accent)', fontWeight: 500, marginBottom: 2, opacity: 0.8 }}>
+              {sourceLabel}
+            </div>
+          )}
+          <div style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 28 }}>
+            「{ann.anchor.selectedText.substring(0, 40)}{ann.anchor.selectedText.length > 40 ? '...' : ''}」
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+            p.{ann.anchor.pageNumber} · {ann.historyChain.length} 条记录
+          </div>
+        </div>
+        {/* Delete button only for current entry's annotations */}
+        {!sourceLabel && (
+          <div className="annotation-list-actions" style={{
+            position: 'absolute', right: 6, top: 0, bottom: 0,
+            display: 'flex', alignItems: 'center', gap: 2, opacity: 0, transition: 'opacity 0.15s',
+          }}>
+            <button
+              className="btn btn-sm btn-icon"
+              title="删除此注释"
+              style={{ padding: '3px 5px', color: 'var(--text-muted)' }}
+              onClick={(e) => {
+                e.stopPropagation()
+                updatePdfMeta(meta => ({
+                  ...meta,
+                  annotations: meta.annotations.filter(a => a.id !== ann.id)
+                }))
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              </svg>
+            </button>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const totalOtherAnnotations = otherEntryAnnotations.reduce((sum, e) => sum + e.annotations.length, 0)
+
+  // ===== Empty state (all annotations list) =====
+  if (!textSelection && !activeAnnotationId) {
+    const hasCurrentAnnotations = currentPdfMeta && currentPdfMeta.annotations.length > 0
+    const hasAny = hasCurrentAnnotations || totalOtherAnnotations > 0
+
+    return (
+      <div className="annotation-panel">
+        <div className="annotation-panel-header">
+          <span>注释</span>
+          <button className="btn btn-sm btn-icon" onClick={toggleAnnotationPanel} title="关闭面板">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        {hasAny ? (
+          <div style={{ flex: 1, overflow: 'auto', padding: 10 }}>
+            {/* Current entry's annotations */}
+            {hasCurrentAnnotations && (
+              <>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 4px 10px', fontWeight: 500 }}>
+                  本文献的注释 ({currentPdfMeta!.annotations.length})
+                </div>
+                {currentPdfMeta!.annotations.map(ann =>
+                  renderAnnotationItem(ann, () => setActiveAnnotation(ann.id))
+                )}
+              </>
+            )}
+
+            {/* Divider + Other entries' annotations */}
+            {totalOtherAnnotations > 0 && (
+              <>
+                <div style={{
+                  margin: '16px 0 12px', padding: '10px 0 0',
+                  borderTop: '2px solid var(--border-light)',
+                  fontSize: 11, color: 'var(--text-muted)', fontWeight: 500,
+                }}>
+                  其他文献的注释 ({totalOtherAnnotations})
+                </div>
+                {otherEntryAnnotations.map(other => (
+                  <div key={other.entryId}>
+                    <div style={{
+                      fontSize: 10, color: 'var(--accent)', fontWeight: 600,
+                      padding: '6px 4px 4px', opacity: 0.7,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      📄 {other.entryTitle}
+                    </div>
+                    {other.annotations.map(ann =>
+                      renderAnnotationItem(
+                        ann,
+                        () => handleJumpToOtherAnnotation(other.entryId, ann.id),
+                        other.entryTitle,
+                        other.entryId,
+                        other.entryTitle,
+                      )
+                    )}
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        ) : (
+          <div className="empty-state">
+            <span style={{ fontSize: 13 }}>选中 PDF 中的文字</span>
+            <span style={{ fontSize: 12 }}>即可添加注释或提问</span>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // ===== Active annotation view =====
+  return (
+    <div className="annotation-panel">
+      <div className="annotation-panel-header">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <button className="btn btn-sm btn-icon" onClick={clearAnnotationFocus} title="返回全部注释">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="15 18 9 12 15 6"/>
+            </svg>
+          </button>
+          <span>{displayAnnotation ? '历史链' : '新注释'}</span>
+        </div>
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          {displayAnnotation && (
+            confirmDeleteChain ? (
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center', fontSize: 11 }}>
+                <button className="btn btn-sm" style={{ fontSize: 11, color: 'var(--danger)' }} onClick={handleDeleteChain}>
+                  确认删除
+                </button>
+                <button className="btn btn-sm" style={{ fontSize: 11 }} onClick={() => setConfirmDeleteChain(false)}>
+                  取消
+                </button>
+              </div>
+            ) : (
+              <button
+                className="btn btn-sm btn-icon"
+                onClick={() => setConfirmDeleteChain(true)}
+                title="删除整条历史链"
+                style={{ color: 'var(--text-muted)' }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                </svg>
+              </button>
+            )
+          )}
+          <button className="btn btn-sm btn-icon" onClick={toggleAnnotationPanel} title="关闭面板">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* Selected text preview */}
+      {(textSelection || displayAnnotation) && (
+        <div style={{
+          padding: '10px 16px', background: 'var(--bg-warm)', borderBottom: '1px solid var(--border-light)',
+          fontSize: 12, color: 'var(--text-secondary)', flexShrink: 0,
+        }}>
+          <div style={{ maxHeight: 60, overflow: 'auto' }}>
+            「{displayAnnotation?.anchor.selectedText || textSelection?.text}」
+          </div>
+          {/* Show newly selected context text */}
+          {hasNewContext && newContextText && (
+            <div style={{
+              marginTop: 8, padding: '6px 10px', borderRadius: 4,
+              background: 'rgba(200,149,108,0.12)', border: '1px solid rgba(200,149,108,0.25)',
+            }}>
+              <div style={{ fontSize: 10, color: 'var(--accent)', fontWeight: 500, marginBottom: 2 }}>
+                + 补充选中
+              </div>
+              <div style={{ maxHeight: 40, overflow: 'auto', fontSize: 12 }}>
+                「{newContextText}」
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* History chain */}
+      <div className="history-chain">
+        {displayAnnotation?.historyChain.map(entry => (
+          <HistoryEntryItem
+            key={entry.id}
+            entry={entry}
+            onEdit={handleEdit}
+            onDelete={handleDelete}
+            onCite={displayAnnotation ? (he) => setCitingEntry({ historyEntry: he, annotation: displayAnnotation }) : undefined}
+          />
+        ))}
+        {/* AI loading indicator */}
+        {aiLoading && (
+          <div className="history-entry ai-response" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-muted)' }}>
+              <span className="loading-spinner" />
+              AI 正在思考...
+            </div>
+            <button
+              className="btn btn-sm"
+              style={{ fontSize: 11 }}
+              onClick={() => setAiLoading(false)}
+            >
+              取消
+            </button>
+          </div>
+        )}
+        <div ref={historyEndRef} />
+
+        {/* Block cite dropdown */}
+        {citingEntry && (
+          <div style={{ position: 'relative' }}>
+            <BlockCiteDropdown
+              historyEntry={citingEntry.historyEntry}
+              annotation={citingEntry.annotation}
+              entryId={currentEntry?.id || ''}
+              entryTitle={currentEntry?.title || ''}
+              onDone={() => setCitingEntry(null)}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* AI Instant Feedback bubble */}
+      <FeedbackBubble
+        text={feedbackText}
+        loading={feedbackLoading}
+        onKeep={handleKeepFeedback}
+        onDismiss={() => { setFeedbackText(null); setFeedbackLoading(false) }}
+      />
+
+      {/* Unified input area */}
+      <div className="ai-chat-input">
+        <textarea
+          placeholder={hasNewContext ? '针对补充选中的文本写下想法...' : '写下想法 / 向 AI 提要求...'}
+          value={noteInput}
+          onChange={e => setNoteInput(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); handleAddNote() }
+          }}
+        />
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <select
+              value={aiModel}
+              onChange={e => setAiModel(e.target.value)}
+              style={{
+                fontSize: 10, padding: '4px 4px', border: '1px solid var(--border)',
+                borderRadius: 4, background: 'var(--bg-warm)', color: 'var(--text-secondary)',
+                outline: 'none', cursor: 'pointer', maxWidth: 100,
+              }}
+            >
+              {configuredProviders.length > 0 ? (
+                configuredProviders.map(p => (
+                  <optgroup key={p.id} label={p.name}>
+                    {p.models.map(m => (
+                      <option key={`${p.id}:${m.id}`} value={`${p.id}:${m.id}`}>{m.name}</option>
+                    ))}
+                  </optgroup>
+                ))
+              ) : (
+                <option value="glm:glm-4-flash">请先配置 Key</option>
+              )}
+            </select>
+            <button
+              className="btn btn-sm"
+              onClick={handleAskQuestion}
+              disabled={aiLoading || !noteInput.trim()}
+              style={{ fontSize: 12, padding: '6px 18px' }}
+            >
+              {aiLoading ? '...' : '发送 AI'}
+            </button>
+          </div>
+          <button className="btn btn-sm btn-primary" onClick={handleAddNote} disabled={!noteInput.trim() || (!displayAnnotation && !textSelection)}
+            style={{ fontSize: 12, padding: '6px 14px' }}>
+            保存笔记 <span style={{ fontSize: 9, opacity: 0.5 }}>Ctrl+↵</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}

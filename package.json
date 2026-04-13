@@ -1,0 +1,75 @@
+{
+  "name": "shijuan",
+  "version": "1.0.0",
+  "description": "拾卷 ShiJuan - 智能文献管理与阅读笔记工具",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "pack": "electron-vite build && electron-builder --dir",
+    "dist": "electron-vite build && electron-builder",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "build": {
+    "appId": "com.shijuan.app",
+    "productName": "拾卷",
+    "directories": {
+      "output": "C:/Users/18475/OneDrive/Desktop/拾卷-build"
+    },
+    "files": [
+      "out/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "拾卷"
+    },
+    "portable": {
+      "artifactName": "拾卷-${version}-便携版.exe"
+    }
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "epubjs": "^0.3.93",
+    "mammoth": "^1.12.0",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "react-pdf": "^9.2.1",
+    "react-resizable-panels": "^2.1.7",
+    "rehype-raw": "^7.0.0",
+    "uuid": "^11.1.0",
+    "vditor": "^3.11.2",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@electron-toolkit/preload": "^3.0.1",
+    "@electron-toolkit/utils": "^3.0.0",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^34.2.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^3.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}
