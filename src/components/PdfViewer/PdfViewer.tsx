@@ -410,15 +410,17 @@ function useAnnotationHighlights(
 }
 
 // OCR Content component with per-page sections and markdown rendering
-function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText, marks }: {
+function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText, marks, onRemoveMark }: {
   text: string
   annotations: Array<{ id: string; selectedText: string }>
   onAnnotationClick: (id: string) => void
   activeSelectionText?: string
   marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
+  onRemoveMark?: (id: string) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const cleaned = useMemo(() => cleanOcrText(text), [text])
+  const [markMenu, setMarkMenu] = useState<{ x: number; y: number; markId: string; markType: string } | null>(null)
 
   // Split by page markers if present: "=== 第 N 页 ==="
   const hasPageMarkers = /=== 第 \d+ 页 ===/.test(cleaned)
@@ -454,8 +456,21 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
       span.className = t.type === 'bold'
         ? 'ocr-mark mark-bold'
         : `ocr-mark mark-underline-${t.color || 'yellow'}`
+      span.dataset.markId = t.id
+      span.dataset.markType = t.type
       return span
     }, 'ocr-mark')
+
+    // Right-click on marks to remove
+    const handleMarkContext = (e: MouseEvent) => {
+      const el = (e.target as HTMLElement).closest('.ocr-mark') as HTMLElement | null
+      if (!el?.dataset.markId) return
+      e.preventDefault()
+      e.stopPropagation()
+      setMarkMenu({ x: e.clientX, y: e.clientY, markId: el.dataset.markId, markType: el.dataset.markType || '' })
+    }
+    container.addEventListener('contextmenu', handleMarkContext)
+    return () => container.removeEventListener('contextmenu', handleMarkContext)
   }, [marks, cleaned])
 
   // Highlight active selection text
@@ -530,6 +545,31 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
           </Markdown>
         </div>
       ))}
+
+      {/* Mark right-click menu */}
+      {markMenu && (
+        <div
+          style={{
+            position: 'fixed', left: markMenu.x, top: markMenu.y, zIndex: 1000,
+            background: 'var(--bg)', border: '1px solid var(--border)',
+            borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+            padding: '4px 0', minWidth: 120,
+          }}
+          onMouseLeave={() => setMarkMenu(null)}
+        >
+          <div
+            onClick={() => {
+              onRemoveMark?.(markMenu.markId)
+              setMarkMenu(null)
+            }}
+            style={{ padding: '7px 14px', fontSize: 12, cursor: 'pointer', color: 'var(--danger)' }}
+            onMouseEnter={e => (e.currentTarget.style.background = '#fef2f2')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          >
+            {markMenu.markType === 'bold' ? '取消高亮' : '取消划线'}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -900,7 +940,18 @@ export default function PdfViewer() {
   // Text selection → show floating toolbar
   const handleMouseUp = useCallback((e: React.MouseEvent | any) => {
     const selection = window.getSelection()
-    if (!selection || selection.isCollapsed) { return }
+    if (!selection || selection.isCollapsed) {
+      // Clicked without selecting — clear textSelection if no annotation was created for it
+      const { textSelection: ts, activeAnnotationId: aid } = useUiStore.getState()
+      if (ts && !aid) {
+        // Check if an annotation exists for this selection text
+        const hasAnnotation = currentPdfMeta?.annotations.some(a => a.anchor.selectedText === ts.text)
+        if (!hasAnnotation) {
+          setTextSelection(null)
+        }
+      }
+      return
+    }
     const text = selection.toString().trim()
     if (!text || text.length < 2) return
 
@@ -934,17 +985,22 @@ export default function PdfViewer() {
   // Toolbar action: create annotation with color
   const handleToolbarAnnotate = useCallback((color: string) => {
     if (!toolbar) return
+    // Clear any active annotation so this creates a NEW annotation, not appending
+    setActiveAnnotation(null)
     setTextSelection({ pageNumber: toolbar.pageNumber, text: toolbar.text, startOffset: 0, endOffset: toolbar.text.length })
-    // Store color for the annotation to be created
     useUiStore.getState().setAnnotationColor(color)
     setToolbar(null)
-  }, [toolbar, setTextSelection])
+  }, [toolbar, setTextSelection, setActiveAnnotation])
 
   // Toolbar action: append to existing annotation
   const handleToolbarAppend = useCallback((annotationId: string) => {
+    // Pass the selected text as supplementary context for the target annotation
+    if (toolbar) {
+      setTextSelection({ pageNumber: toolbar.pageNumber, text: toolbar.text, startOffset: 0, endOffset: toolbar.text.length })
+    }
     setActiveAnnotation(annotationId)
     setToolbar(null)
-  }, [setActiveAnnotation])
+  }, [setActiveAnnotation, toolbar, setTextSelection])
 
   // Append current selected text as a link to another entry's annotation
   const handleToolbarAppendOther = useCallback(async (targetEntryId: string, targetAnnotationId: string) => {
@@ -1342,6 +1398,12 @@ export default function PdfViewer() {
               marks={(currentPdfMeta?.marks || []).map(m => ({
                 id: m.id, type: m.type, color: m.color, selectedText: m.selectedText
               }))}
+              onRemoveMark={(markId) => {
+                updatePdfMeta(meta => ({
+                  ...meta,
+                  marks: (meta.marks || []).filter(m => m.id !== markId),
+                }))
+              }}
             />
           </div>
         </div>

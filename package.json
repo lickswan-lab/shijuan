@@ -1,6 +1,6 @@
 {
   "name": "shijuan",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "拾卷 ShiJuan - 智能文献管理与阅读笔记工具",
   "main": "./out/main/index.js",
   "scripts": {
