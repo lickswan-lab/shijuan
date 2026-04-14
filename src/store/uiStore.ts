@@ -31,6 +31,11 @@ interface UiState {
   // Reading log
   activeReadingLogDate: string | null
 
+  // Current document full text (for AI context)
+  currentDocText: string | null
+  // AI context window size (chars before + after selection)
+  aiContextWindow: number   // 1000 / 2000 / 5000 / 10000 / -1 (full)
+
   // AI model
   selectedAiModel: string
 
@@ -49,6 +54,8 @@ interface UiState {
   setActiveMemo: (id: string | null) => void
   setSidebarTab: (tab: 'library' | 'memos' | 'reading-log') => void
   setActiveReadingLogDate: (date: string | null) => void
+  setCurrentDocText: (text: string | null) => void
+  setAiContextWindow: (size: number) => void
   setSelectedAiModel: (model: string) => void
   setAnnotationColor: (color: string) => void
 }
@@ -64,6 +71,8 @@ export const useUiStore = create<UiState>((set) => ({
   activeMemoId: null,
   sidebarTab: 'library',
   activeReadingLogDate: null,
+  currentDocText: null,
+  aiContextWindow: (() => { try { const v = localStorage.getItem('sj-aiContextWindow'); return v ? Number(v) : 2000 } catch { return 2000 } })(),
   selectedAiModel: 'glm:glm-4-flash',
   annotationColor: 'yellow',
 
@@ -78,6 +87,8 @@ export const useUiStore = create<UiState>((set) => ({
   setActiveMemo: (id) => set({ activeMemoId: id, activeReadingLogDate: null, ...(id ? { sidebarTab: 'memos' as const } : {}) }),
   setSidebarTab: (tab) => set({ sidebarTab: tab }),
   setActiveReadingLogDate: (date) => set({ activeReadingLogDate: date, activeMemoId: null }),
+  setCurrentDocText: (text) => set({ currentDocText: text }),
+  setAiContextWindow: (size) => { set({ aiContextWindow: size }); try { localStorage.setItem('sj-aiContextWindow', String(size)) } catch {} },
   setSelectedAiModel: (model) => set({ selectedAiModel: model }),
   setAnnotationColor: (color) => set({ annotationColor: color })
 }))

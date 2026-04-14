@@ -231,7 +231,8 @@ function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, onDo
 export default function AnnotationPanel() {
   const { currentEntry, currentPdfMeta, updatePdfMeta, library } = useLibraryStore()
   const { textSelection, activeAnnotationId, setTextSelection, setActiveAnnotation } = useUiStore()
-  const [panelWidth, setPanelWidth] = useState(340)
+  const [panelWidth, _setPanelWidth] = useState(() => { try { const v = localStorage.getItem('sj-annPanelWidth'); return v ? Number(v) : 340 } catch { return 340 } })
+  const setPanelWidth = (w: number) => { _setPanelWidth(w); try { localStorage.setItem('sj-annPanelWidth', String(w)) } catch {} }
   const resizingRef = useRef(false)
 
   // Resize handler
@@ -577,8 +578,38 @@ export default function AnnotationPanel() {
     const historyChain = displayAnnotation?.historyChain || []
 
     // Build messages for streaming call (same logic as glm-ask handler)
+    // Build system prompt with surrounding context window
+    const docText = useUiStore.getState().currentDocText
+    const docTitle = useLibraryStore.getState().currentEntry?.title || ''
+    const contextWindow = useUiStore.getState().aiContextWindow
+
+    let surroundingContext = ''
+    if (docText && anchorText) {
+      if (contextWindow === -1) {
+        // Full document
+        surroundingContext = docText
+      } else {
+        // Find selected text position, extract window before and after
+        const cleanAnchor = anchorText.replace(/\s+/g, '')
+        const cleanDoc = docText.replace(/\s+/g, '')
+        const pos = cleanDoc.indexOf(cleanAnchor)
+        if (pos >= 0) {
+          const ratio = docText.length / cleanDoc.length
+          const origPos = Math.floor(pos * ratio)
+          const start = Math.max(0, origPos - contextWindow)
+          const end = Math.min(docText.length, origPos + anchorText.length + contextWindow)
+          surroundingContext = (start > 0 ? '[...] ' : '') + docText.substring(start, end) + (end < docText.length ? ' [...]' : '')
+        }
+      }
+    }
+
+    let systemContent = `你是一位非常熟悉文献「${docTitle}」的学术导师。请基于文献上下文回答用户关于选中文本的问题。\n\n用户选中的文本：\n「${contextForAi}」`
+    if (surroundingContext) {
+      systemContent += `\n\n选中文本的前后上下文（来自同一篇文献）：\n${surroundingContext}`
+    }
+
     const messages: Array<{ role: string; content: string }> = [
-      { role: 'system', content: `你是学术文献阅读助手。用户正在阅读一段学术文本，请基于文本内容回答用户的问题。\n\n参考文本：\n「${contextForAi}」` }
+      { role: 'system', content: systemContent }
     ]
     for (const entry of historyChain) {
       if (entry.type === 'ai_qa') {

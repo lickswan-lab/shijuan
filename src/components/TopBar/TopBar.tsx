@@ -160,6 +160,45 @@ export default function TopBar() {
               </div>
             ))}
 
+            {/* AI Context Window Setting */}
+            <div style={{
+              padding: '12px 14px', marginBottom: 8, borderRadius: 8,
+              border: '1px solid var(--border)', background: 'var(--bg-warm)',
+            }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)', marginBottom: 8 }}>
+                AI 上下文范围
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+                AI 回答时参考选中文字前后多少字的文献内容。范围越大理解越完整，但消耗更多 token。
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {[
+                  { label: '1000字', value: 1000 },
+                  { label: '2000字', value: 2000 },
+                  { label: '5000字', value: 5000 },
+                  { label: '10000字', value: 10000 },
+                  { label: '全文', value: -1 },
+                ].map(opt => {
+                  const active = useUiStore.getState().aiContextWindow === opt.value
+                  return (
+                    <button
+                      key={opt.value}
+                      onClick={() => useUiStore.getState().setAiContextWindow(opt.value)}
+                      style={{
+                        padding: '5px 12px', fontSize: 12, borderRadius: 6, cursor: 'pointer',
+                        border: active ? '1.5px solid var(--accent)' : '1px solid var(--border)',
+                        background: active ? 'var(--accent-soft)' : 'var(--bg)',
+                        color: active ? 'var(--accent-hover)' : 'var(--text-secondary)',
+                        fontWeight: active ? 600 : 400,
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
               <button className="btn" onClick={() => setShowSettings(false)}>关闭</button>
             </div>

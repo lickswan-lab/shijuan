@@ -777,12 +777,21 @@ export default function PdfViewer() {
   const [editMode, setEditMode] = useState(false)
   const [editContent, setEditContent] = useState('')
   const [editDirty, setEditDirty] = useState(false)
-  const [ocrFontSize, setOcrFontSize] = useState(16)
-  const [ocrFontWeight, setOcrFontWeight] = useState(400)
-  const [ocrColorDepth, setOcrColorDepth] = useState(80)
-  const [ocrBgHue, setOcrBgHue] = useState(40)       // hue: 0-360
-  const [ocrBgSat, setOcrBgSat] = useState(30)       // saturation: 0-100
-  const [ocrBgLight, setOcrBgLight] = useState(97)    // lightness: 85-100
+  // Persisted reading preferences
+  const lsGet = (key: string, def: number) => { try { const v = localStorage.getItem(key); return v !== null ? Number(v) : def } catch { return def } }
+  const lsSet = (key: string, v: number, setter: (v: number) => void) => { setter(v); try { localStorage.setItem(key, String(v)) } catch {} }
+  const [ocrFontSize, _setOcrFontSize] = useState(() => lsGet('sj-fontSize', 16))
+  const [ocrFontWeight, _setOcrFontWeight] = useState(() => lsGet('sj-fontWeight', 400))
+  const [ocrColorDepth, _setOcrColorDepth] = useState(() => lsGet('sj-colorDepth', 80))
+  const [ocrBgHue, _setOcrBgHue] = useState(() => lsGet('sj-bgHue', 40))
+  const [ocrBgSat, _setOcrBgSat] = useState(() => lsGet('sj-bgSat', 30))
+  const [ocrBgLight, _setOcrBgLight] = useState(() => lsGet('sj-bgLight', 97))
+  const setOcrFontSize = (v: number) => lsSet('sj-fontSize', v, _setOcrFontSize)
+  const setOcrFontWeight = (v: number) => lsSet('sj-fontWeight', v, _setOcrFontWeight)
+  const setOcrColorDepth = (v: number) => lsSet('sj-colorDepth', v, _setOcrColorDepth)
+  const setOcrBgHue = (v: number) => lsSet('sj-bgHue', v, _setOcrBgHue)
+  const setOcrBgSat = (v: number) => lsSet('sj-bgSat', v, _setOcrBgSat)
+  const setOcrBgLight = (v: number) => lsSet('sj-bgLight', v, _setOcrBgLight)
   const [showBgPicker, setShowBgPicker] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -856,7 +865,15 @@ export default function PdfViewer() {
       setPdfFileUrl(fileUrl)
     }
 
-    if (scrollRef.current) scrollRef.current.scrollTop = 0
+    // Restore scroll position after content renders (delayed to let async content load)
+    setTimeout(() => {
+      if (scrollRef.current) {
+        try {
+          const saved = localStorage.getItem(`sj-scroll-${currentEntry.id}`)
+          scrollRef.current.scrollTop = saved ? Number(saved) : 0
+        } catch { scrollRef.current.scrollTop = 0 }
+      }
+    }, 300)
 
     // Load HTML content for HTML files
     if (['html', 'htm'].includes(ext)) {
@@ -867,11 +884,13 @@ export default function PdfViewer() {
     }
 
     // Check for existing OCR text file, default to OCR view if available (PDF only)
+    const setDocText = useUiStore.getState().setCurrentDocText
+    setDocText(null)
     window.electronAPI.readOcrText(currentEntry.absPath).then((result) => {
       if (result.exists && result.text) {
         setOcrFullText(result.text)
         setOcrFilePath(result.path)
-        // Only auto-switch to OCR for PDF files; HTML/text render natively
+        setDocText(result.text)
         if (ext === 'pdf') setViewMode('ocr')
         else setViewMode('pdf')
       } else {
@@ -880,6 +899,42 @@ export default function PdfViewer() {
         setViewMode('pdf')
       }
     })
+
+    // Also load text for non-PDF formats
+    if (['txt', 'md'].includes(ext)) {
+      window.electronAPI.readFileBuffer(currentEntry.absPath).then(buf => {
+        setDocText(new TextDecoder('utf-8').decode(buf))
+      }).catch(() => {})
+    } else if (['docx', 'doc'].includes(ext)) {
+      import('mammoth').then(async mammoth => {
+        const buf = await window.electronAPI.readFileBuffer(currentEntry.absPath)
+        const result = await mammoth.extractRawText({ arrayBuffer: buf.buffer })
+        setDocText(result.value)
+      }).catch(() => {})
+    } else if (['html', 'htm'].includes(ext)) {
+      window.electronAPI.readFileBuffer(currentEntry.absPath).then(buf => {
+        const html = new TextDecoder('utf-8').decode(buf)
+        const tmp = document.createElement('div')
+        tmp.innerHTML = html
+        setDocText(tmp.textContent || tmp.innerText || '')
+      }).catch(() => {})
+    }
+  }, [currentEntry?.id])
+
+  // Save scroll position on scroll (throttled)
+  useEffect(() => {
+    const el = scrollRef.current
+    const entryId = currentEntry?.id
+    if (!el || !entryId) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const handler = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        try { localStorage.setItem(`sj-scroll-${entryId}`, String(el.scrollTop)) } catch {}
+      }, 300)
+    }
+    el.addEventListener('scroll', handler, { passive: true })
+    return () => { el.removeEventListener('scroll', handler); if (timer) clearTimeout(timer) }
   }, [currentEntry?.id])
 
   const onDocumentLoadSuccess = useCallback(({ numPages: n }: { numPages: number }) => {
