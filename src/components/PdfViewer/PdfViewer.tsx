@@ -279,14 +279,18 @@ function findAndWrapAll(
     // Re-collect text nodes each iteration (DOM changes between iterations)
     const textNodes = collectTextNodes(container)
 
-    // Build flat string from all text nodes (whitespace-collapsed)
-    const nodeRanges: Array<{ node: Text; start: number; end: number }> = []
+    // Build flat string + map each flat char back to (nodeIndex, rawOffset)
+    const charMap: Array<{ ni: number; offset: number }> = []
     let flat = ''
-    for (const node of textNodes) {
+    for (let ni = 0; ni < textNodes.length; ni++) {
+      const node = textNodes[ni]
       if (skipClass && (node.parentNode as HTMLElement)?.classList?.contains(skipClass)) continue
-      const start = flat.length
-      flat += (node.textContent || '').replace(/\s+/g, '')
-      nodeRanges.push({ node, start, end: flat.length })
+      const raw = node.textContent || ''
+      for (let ri = 0; ri < raw.length; ri++) {
+        if (/\s/.test(raw[ri])) continue // skip whitespace in flat string
+        charMap.push({ ni, offset: ri })
+        flat += raw[ri]
+      }
     }
 
     const flatIdx = flat.indexOf(searchText)
@@ -294,52 +298,43 @@ function findAndWrapAll(
 
     const flatEnd = flatIdx + searchText.length
 
-    // Map flat position back to a single text node (find the node containing flatIdx)
-    let bestNode: Text | null = null
-    let bestNodeOffset = 0
-    for (const nr of nodeRanges) {
-      if (nr.start <= flatIdx && nr.end > flatIdx) {
-        bestNode = nr.node
-        // Calculate offset within this node's raw text
-        const rawText = nr.node.textContent || ''
-        let ri = 0, fi = nr.start
-        while (fi < flatIdx && ri < rawText.length) {
-          if (/\s/.test(rawText[ri])) { ri++; continue }
-          ri++; fi++
-        }
-        bestNodeOffset = ri
-        break
+    // Collect which nodes are involved and their raw start/end offsets
+    const segments: Array<{ node: Text; startOffset: number; endOffset: number }> = []
+    let currentNi = -1
+    let segStart = 0
+    let segEnd = 0
+
+    for (let fi = flatIdx; fi < flatEnd; fi++) {
+      const cm = charMap[fi]
+      if (cm.ni !== currentNi) {
+        if (currentNi >= 0) segments.push({ node: textNodes[currentNi], startOffset: segStart, endOffset: segEnd + 1 })
+        currentNi = cm.ni
+        segStart = cm.offset
       }
+      segEnd = cm.offset
     }
-    if (!bestNode || !bestNode.isConnected) continue
+    if (currentNi >= 0) segments.push({ node: textNodes[currentNi], startOffset: segStart, endOffset: segEnd + 1 })
 
-    // Calculate how many raw chars to include to cover the searchText length
-    const rawText = bestNode.textContent || ''
-    let ri = bestNodeOffset, matchedChars = 0
-    while (matchedChars < searchText.length && ri < rawText.length) {
-      if (/\s/.test(rawText[ri])) { ri++; continue }
-      ri++; matchedChars++
-    }
+    if (segments.length === 0) continue
 
-    if (matchedChars < searchText.length) {
-      // Match spans beyond this text node — wrap what we can in this node
-      // This handles most cases since OCR text nodes are usually large
-    }
-
-    const endOffset = ri
-
+    // Wrap each segment (reverse order to preserve offsets)
     try {
-      const before = rawText.substring(0, bestNodeOffset)
-      const match = rawText.substring(bestNodeOffset, endOffset)
-      const after = rawText.substring(endOffset)
-      const parent = bestNode.parentNode!
+      for (let si = segments.length - 1; si >= 0; si--) {
+        const seg = segments[si]
+        if (!seg.node.isConnected) continue
+        const raw = seg.node.textContent || ''
+        const before = raw.substring(0, seg.startOffset)
+        const match = raw.substring(seg.startOffset, seg.endOffset)
+        const after = raw.substring(seg.endOffset)
+        const parent = seg.node.parentNode!
 
-      const wrapper = wrapFn(target)
-      wrapper.textContent = match
+        const wrapper = wrapFn(target)
+        wrapper.textContent = match
 
-      if (after) parent.insertBefore(document.createTextNode(after), bestNode.nextSibling)
-      parent.insertBefore(wrapper, bestNode.nextSibling)
-      if (before) { bestNode.textContent = before } else { parent.removeChild(bestNode) }
+        if (after) parent.insertBefore(document.createTextNode(after), seg.node.nextSibling)
+        parent.insertBefore(wrapper, seg.node.nextSibling)
+        if (before) { seg.node.textContent = before } else { parent.removeChild(seg.node) }
+      }
     } catch { /* DOM changed, skip */ }
   }
 }
@@ -1399,6 +1394,17 @@ export default function PdfViewer() {
                 id: m.id, type: m.type, color: m.color, selectedText: m.selectedText
               }))}
               onRemoveMark={(markId) => {
+                // Immediately remove from DOM for instant feedback
+                document.querySelectorAll(`.ocr-mark[data-mark-id="${markId}"]`).forEach(el => {
+                  try {
+                    const parent = el.parentNode
+                    if (parent) {
+                      while (el.firstChild) parent.insertBefore(el.firstChild, el)
+                      parent.removeChild(el)
+                    }
+                  } catch {}
+                })
+                // Then persist the removal
                 updatePdfMeta(meta => ({
                   ...meta,
                   marks: (meta.marks || []).filter(m => m.id !== markId),
