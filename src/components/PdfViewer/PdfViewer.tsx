@@ -456,13 +456,19 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
       return span
     }, 'ocr-mark')
 
-    // Right-click on marks to remove
+    // Right-click on marks — use coordinate hit-test since marks have pointer-events: none
     const handleMarkContext = (e: MouseEvent) => {
-      const el = (e.target as HTMLElement).closest('.ocr-mark') as HTMLElement | null
-      if (!el?.dataset.markId) return
-      e.preventDefault()
-      e.stopPropagation()
-      setMarkMenu({ x: e.clientX, y: e.clientY, markId: el.dataset.markId, markType: el.dataset.markType || '' })
+      const markEls = container.querySelectorAll('.ocr-mark[data-mark-id]')
+      for (const el of markEls) {
+        const rect = el.getBoundingClientRect()
+        if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+          const markEl = el as HTMLElement
+          e.preventDefault()
+          e.stopPropagation()
+          setMarkMenu({ x: e.clientX, y: e.clientY, markId: markEl.dataset.markId!, markType: markEl.dataset.markType || '' })
+          return
+        }
+      }
     }
     container.addEventListener('contextmenu', handleMarkContext)
     return () => container.removeEventListener('contextmenu', handleMarkContext)
@@ -777,6 +783,7 @@ export default function PdfViewer() {
   const [ocrBgHue, setOcrBgHue] = useState(40)       // hue: 0-360
   const [ocrBgSat, setOcrBgSat] = useState(30)       // saturation: 0-100
   const [ocrBgLight, setOcrBgLight] = useState(97)    // lightness: 85-100
+  const [showBgPicker, setShowBgPicker] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const library = useLibraryStore(s => s.library)
@@ -802,6 +809,19 @@ export default function PdfViewer() {
     load()
     return () => { cancelled = true }
   }, [library?.entries.length, currentEntry?.id])
+
+  // Memoize marks & annotations to prevent useEffect from re-running on every render
+  const annsJson = JSON.stringify((currentPdfMeta?.annotations || []).map(a => a.id + a.anchor.selectedText))
+  const memoizedAnnotations = useMemo(() => {
+    return (currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))
+  }, [annsJson])
+
+  const marksJson = JSON.stringify(currentPdfMeta?.marks || [])
+  const memoizedMarks = useMemo(() => {
+    return (currentPdfMeta?.marks || []).map(m => ({
+      id: m.id, type: m.type as 'underline' | 'bold', color: m.color, selectedText: m.selectedText
+    }))
+  }, [marksJson])
 
   const absPath = currentEntry?.absPath || ''
   const fileExt = absPath.split('.').pop()?.toLowerCase() || ''
@@ -1148,26 +1168,61 @@ export default function PdfViewer() {
 
             <span style={{ width: 1, height: 14, background: 'var(--border)', marginLeft: 4 }} />
 
-            {/* Background presets */}
-            {[
-              { label: '暖', h: 40, s: 30, l: 97 },
-              { label: '绿', h: 100, s: 25, l: 95 },
-              { label: '蓝', h: 210, s: 20, l: 96 },
-              { label: '灰', h: 0, s: 0, l: 94 },
-              { label: '暗', h: 30, s: 10, l: 88 },
-            ].map(p => (
+            {/* Background color dropdown */}
+            <div style={{ position: 'relative' }}>
               <button
-                key={p.label}
-                onClick={() => { setOcrBgHue(p.h); setOcrBgSat(p.s); setOcrBgLight(p.l) }}
-                title={`背景：${p.label}`}
+                onClick={() => setShowBgPicker(!showBgPicker)}
+                title="背景颜色"
                 style={{
-                  width: 16, height: 16, borderRadius: '50%', border: '1.5px solid var(--border)',
-                  background: `hsl(${p.h}, ${p.s}%, ${p.l}%)`, cursor: 'pointer', padding: 0, flexShrink: 0,
-                  outline: (ocrBgHue === p.h && ocrBgSat === p.s && ocrBgLight === p.l) ? '2px solid var(--accent)' : 'none',
-                  outlineOffset: 1,
+                  width: 22, height: 22, borderRadius: '50%', border: '1.5px solid var(--border)',
+                  background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
+                  cursor: 'pointer', padding: 0, flexShrink: 0,
+                  outline: showBgPicker ? '2px solid var(--accent)' : 'none', outlineOffset: 1,
                 }}
               />
-            ))}
+              {showBgPicker && (
+                <div style={{
+                  position: 'absolute', top: '100%', left: '50%', transform: 'translateX(-50%)',
+                  marginTop: 6, padding: '8px 6px',
+                  background: 'var(--bg)', border: '1px solid var(--border)',
+                  borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.1)',
+                  display: 'flex', flexDirection: 'column', gap: 4, zIndex: 100,
+                  animation: 'bgPickerIn 0.15s ease-out',
+                }}>
+                  {[
+                    { label: '暖', h: 40, s: 30, l: 97 },
+                    { label: '护眼', h: 128, s: 45, l: 88 },
+                    { label: '绿', h: 100, s: 25, l: 95 },
+                    { label: '蓝', h: 210, s: 20, l: 96 },
+                    { label: '灰', h: 0, s: 0, l: 94 },
+                    { label: '暗', h: 30, s: 10, l: 88 },
+                  ].map(p => {
+                    const active = ocrBgHue === p.h && ocrBgSat === p.s && ocrBgLight === p.l
+                    return (
+                      <button
+                        key={p.label}
+                        onClick={() => { setOcrBgHue(p.h); setOcrBgSat(p.s); setOcrBgLight(p.l); setShowBgPicker(false) }}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px',
+                          background: active ? 'var(--accent-soft)' : 'transparent',
+                          border: 'none', borderRadius: 4, cursor: 'pointer', whiteSpace: 'nowrap',
+                        }}
+                        onMouseEnter={e => { if (!active) e.currentTarget.style.background = 'var(--bg-hover)' }}
+                        onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent' }}
+                      >
+                        <span style={{
+                          width: 16, height: 16, borderRadius: '50%', flexShrink: 0,
+                          border: '1.5px solid var(--border)',
+                          background: `hsl(${p.h}, ${p.s}%, ${p.l}%)`,
+                          outline: active ? '2px solid var(--accent)' : 'none', outlineOffset: 1,
+                        }} />
+                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{p.label}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         ) : null}
 
@@ -1384,15 +1439,10 @@ export default function PdfViewer() {
 
             <OcrContent
               text={ocrFullText || ''}
-              annotations={(currentPdfMeta?.annotations || []).map(a => ({
-                id: a.id,
-                selectedText: a.anchor.selectedText,
-              }))}
+              annotations={memoizedAnnotations}
               onAnnotationClick={(id) => setActiveAnnotation(id)}
               activeSelectionText={toolbar?.text || textSelection?.text || undefined}
-              marks={(currentPdfMeta?.marks || []).map(m => ({
-                id: m.id, type: m.type, color: m.color, selectedText: m.selectedText
-              }))}
+              marks={memoizedMarks}
               onRemoveMark={(markId) => {
                 // Immediately remove from DOM for instant feedback
                 document.querySelectorAll(`.ocr-mark[data-mark-id="${markId}"]`).forEach(el => {
