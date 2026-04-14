@@ -140,12 +140,45 @@ function CitePanel({ memoId, onClose }: { memoId: string; onClose: () => void })
 
   const selectedEntry = entries.find(e => e.id === selectedEntryId)
 
-  // Load meta + OCR when entry selected
+  // Load meta + text content when entry selected
   useEffect(() => {
     if (!selectedEntryId) { setEntryMeta(null); setOcrText(null); return }
     window.electronAPI.loadPdfMeta(selectedEntryId).then(m => setEntryMeta(m))
     const entry = entries.find(e => e.id === selectedEntryId)
-    if (entry?.absPath) {
+    if (!entry?.absPath) return
+
+    const ext = entry.absPath.split('.').pop()?.toLowerCase() || ''
+
+    if (ext === 'pdf') {
+      // PDF: try OCR text
+      window.electronAPI.readOcrText(entry.absPath).then(r => {
+        setOcrText(r.exists && r.text ? r.text : null)
+      }).catch(() => setOcrText(null))
+    } else if (['html', 'htm', 'txt', 'md'].includes(ext)) {
+      // Text-based files: read directly
+      window.electronAPI.readFileBuffer(entry.absPath).then(buf => {
+        const decoder = new TextDecoder('utf-8')
+        let text = decoder.decode(buf)
+        // Strip HTML tags for HTML files to get plain text
+        if (['html', 'htm'].includes(ext)) {
+          text = text.replace(/<script[\s\S]*?<\/script>/gi, '')
+            .replace(/<style[\s\S]*?<\/style>/gi, '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ').trim()
+        }
+        setOcrText(text || null)
+      }).catch(() => setOcrText(null))
+    } else if (['docx', 'doc'].includes(ext)) {
+      // DOCX: convert with mammoth
+      import('mammoth').then(mammoth => {
+        window.electronAPI.readFileBuffer(entry.absPath).then(buf => {
+          mammoth.extractRawText({ arrayBuffer: buf.buffer }).then(result => {
+            setOcrText(result.value || null)
+          }).catch(() => setOcrText(null))
+        }).catch(() => setOcrText(null))
+      }).catch(() => setOcrText(null))
+    } else {
+      // Other: try OCR text as fallback
       window.electronAPI.readOcrText(entry.absPath).then(r => {
         setOcrText(r.exists && r.text ? r.text : null)
       }).catch(() => setOcrText(null))
@@ -281,7 +314,7 @@ function CitePanel({ memoId, onClose }: { memoId: string; onClose: () => void })
                   borderBottom: tab === 'text' ? '2px solid var(--accent)' : '2px solid transparent',
                 }}
               >
-                文本 {ocrText ? '' : '(无 OCR)'}
+                文本 {ocrText ? '' : '(无内容)'}
               </button>
             </div>
 

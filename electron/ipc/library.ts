@@ -35,6 +35,11 @@ function metaPath(entryId: string): string {
 
 export function registerLibraryIpc(): void {
 
+  // Show file in system file manager
+  ipcMain.on('show-item-in-folder', (_event, absPath: string) => {
+    shell.showItemInFolder(absPath)
+  })
+
   // Load the central library
   ipcMain.handle('load-library', async () => {
     await ensureDirs()
@@ -57,10 +62,10 @@ export function registerLibraryIpc(): void {
   const SUPPORTED_EXTS = ['.pdf', '.docx', '.doc', '.epub', '.html', '.htm', '.txt', '.md']
   const isSupported = (name: string) => SUPPORTED_EXTS.some(ext => name.toLowerCase().endsWith(ext))
 
-  // Import: open file picker for documents or folders
+  // Import: open file picker (files only, no directory — Windows doesn't support both)
   ipcMain.handle('import-files', async () => {
     const result = await dialog.showOpenDialog({
-      properties: ['openFile', 'openDirectory', 'multiSelections'],
+      properties: ['openFile', 'multiSelections'],
       filters: [
         { name: '文档', extensions: ['pdf', 'docx', 'doc', 'epub', 'html', 'htm', 'txt', 'md'] },
         { name: 'PDF', extensions: ['pdf'] },

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { v4 as uuid } from 'uuid'
-import type { Library, LibraryEntry, PdfMeta, VirtualFolder, Memo, BlockRef, MemoSnapshot } from '../types/library'
+import type { Library, LibraryEntry, PdfMeta, VirtualFolder, Memo, BlockRef, MemoSnapshot, MemoFolder, ReadingLog } from '../types/library'
 import { createDefaultLibrary, createDefaultPdfMeta } from '../types/library'
 
 interface LibraryState {
@@ -28,12 +28,21 @@ interface LibraryState {
   reorderEntry: (entryId: string, targetId: string, position: 'before' | 'after') => Promise<void>
 
   // Memo actions
-  createMemo: (title: string) => Promise<Memo>
+  createMemo: (title: string, folderId?: string) => Promise<Memo>
   updateMemo: (id: string, updates: Partial<Pick<Memo, 'title' | 'content'>>) => Promise<void>
   deleteMemo: (id: string) => Promise<void>
   addBlockToMemo: (memoId: string, block: BlockRef) => Promise<void>
   removeBlockFromMemo: (memoId: string, historyEntryId: string) => Promise<void>
   snapshotMemo: (id: string) => Promise<void>
+
+  // Memo folder actions
+  createMemoFolder: (name: string) => Promise<MemoFolder>
+  renameMemoFolder: (id: string, name: string) => Promise<void>
+  deleteMemoFolder: (id: string) => Promise<void>
+  moveMemoToFolder: (memoId: string, folderId: string | undefined) => Promise<void>
+
+  // Reading log actions
+  saveReadingLog: (log: ReadingLog) => void
 }
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
@@ -52,7 +61,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     // Patch older libraries missing new fields
     if (!library.memos) library.memos = []
     if (!library.folders) library.folders = []
-    // Patch individual memos that may lack new fields
+    if (!library.memoFolders) library.memoFolders = []
+    if (!library.readingLogs) library.readingLogs = []
     for (const memo of library.memos) {
       if (!memo.blocks) memo.blocks = []
       if (!memo.aiHistory) memo.aiHistory = []
@@ -60,21 +70,36 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       if (memo.content == null) memo.content = ''
       if (!memo.updatedAt) memo.updatedAt = memo.createdAt || new Date().toISOString()
     }
-    // Check for OCR files that exist but entry wasn't updated
-    for (const entry of library.entries) {
-      if (entry.ocrStatus !== 'complete' && entry.absPath) {
-        try {
-          const ocr = await window.electronAPI.readOcrText(entry.absPath)
-          if (ocr.exists && ocr.text) {
-            entry.ocrStatus = 'complete'
-            entry.ocrFilePath = ocr.path
-          }
-        } catch { /* ignore */ }
-      }
-    }
     library.lastOpenedAt = new Date().toISOString()
-    await window.electronAPI.saveLibrary(library)
+    // Show UI immediately
     set({ library, isLoading: false })
+
+    // All saves and scans happen in background, don't block UI
+    setTimeout(async () => {
+      try {
+        await window.electronAPI.saveLibrary(library)
+      } catch {}
+
+      // Scan OCR files in parallel
+      const unchecked = library.entries.filter(e => e.ocrStatus !== 'complete' && e.absPath)
+      if (unchecked.length > 0) {
+        const results = await Promise.allSettled(
+          unchecked.map(async entry => {
+            const ocr = await window.electronAPI.readOcrText(entry.absPath)
+            if (ocr.exists && ocr.text) {
+              entry.ocrStatus = 'complete'
+              entry.ocrFilePath = ocr.path
+              return true
+            }
+            return false
+          })
+        )
+        if (results.some(r => r.status === 'fulfilled' && r.value)) {
+          set({ library: { ...library } })
+          try { await window.electronAPI.saveLibrary(library) } catch {}
+        }
+      }
+    }, 100)
   },
 
   importFiles: async (folderId?: string) => {
@@ -295,12 +320,13 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   // ===== Memo actions =====
 
-  createMemo: async (title: string) => {
+  createMemo: async (title: string, folderId?: string) => {
     const { library } = get()
     if (!library) throw new Error('Library not loaded')
     if (!library.memos) library.memos = []
     const memo: Memo = {
       id: uuid(), title, content: '', blocks: [], aiHistory: [],
+      folderId,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       snapshots: []
     }
@@ -359,5 +385,64 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     memo.snapshots.push({ content: memo.content, savedAt: new Date().toISOString() })
     await window.electronAPI.saveLibrary(library)
     set({ library: { ...library } })
+  },
+
+  // ===== Memo folder actions =====
+
+  createMemoFolder: async (name: string) => {
+    const { library } = get()
+    if (!library) throw new Error('Library not loaded')
+    if (!library.memoFolders) library.memoFolders = []
+    const folder: MemoFolder = { id: uuid(), name, createdAt: new Date().toISOString() }
+    library.memoFolders.push(folder)
+    await window.electronAPI.saveLibrary(library)
+    set({ library: { ...library } })
+    return folder
+  },
+
+  renameMemoFolder: async (id: string, name: string) => {
+    const { library } = get()
+    if (!library) return
+    const f = (library.memoFolders || []).find(f => f.id === id)
+    if (f) f.name = name
+    await window.electronAPI.saveLibrary(library)
+    set({ library: { ...library } })
+  },
+
+  deleteMemoFolder: async (id: string) => {
+    const { library } = get()
+    if (!library) return
+    library.memoFolders = (library.memoFolders || []).filter(f => f.id !== id)
+    // Move memos in this folder back to root
+    for (const m of library.memos || []) {
+      if (m.folderId === id) m.folderId = undefined
+    }
+    await window.electronAPI.saveLibrary(library)
+    set({ library: { ...library } })
+  },
+
+  moveMemoToFolder: async (memoId: string, folderId: string | undefined) => {
+    const { library } = get()
+    if (!library) return
+    const memo = (library.memos || []).find(m => m.id === memoId)
+    if (memo) memo.folderId = folderId
+    await window.electronAPI.saveLibrary(library)
+    set({ library: { ...library } })
+  },
+
+  // ===== Reading log actions =====
+
+  saveReadingLog: (log: ReadingLog) => {
+    const { library } = get()
+    if (!library) return
+    if (!library.readingLogs) library.readingLogs = []
+    const idx = library.readingLogs.findIndex(l => l.date === log.date)
+    if (idx >= 0) {
+      library.readingLogs[idx] = log
+    } else {
+      library.readingLogs.unshift(log) // newest first
+    }
+    set({ library: { ...library } })
+    window.electronAPI.saveLibrary(library).catch(() => {})
   }
 }))

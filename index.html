@@ -3,10 +3,28 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>文献管理器</title>
+  <title>拾卷</title>
 </head>
 <body>
-  <div id="root"></div>
+  <div id="root">
+    <!-- Splash screen: visible until React mounts -->
+    <div id="splash" style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;background:#F7F3EA;font-family:-apple-system,'Microsoft YaHei',sans-serif;">
+      <div style="width:64px;height:64px;margin-bottom:20px;border-radius:16px;background:#FBF4E8;display:flex;align-items:center;justify-content:center;">
+        <svg width="36" height="36" viewBox="0 0 512 512" fill="none">
+          <rect x="115" y="160" width="36" height="180" rx="6" fill="#C8956C"/>
+          <rect x="160" y="130" width="32" height="210" rx="6" fill="#B5825A"/>
+          <rect x="200" y="180" width="38" height="160" rx="6" fill="#D4A373"/>
+          <rect x="247" y="145" width="30" height="195" rx="6" fill="#A0714E"/>
+          <rect x="285" y="165" width="35" height="175" rx="6" fill="#C8956C"/>
+          <rect x="328" y="120" width="33" height="220" rx="6" fill="#DDB892"/>
+          <rect x="369" y="190" width="30" height="150" rx="6" fill="#B5825A"/>
+          <rect x="90" y="340" width="332" height="12" rx="4" fill="#A0714E"/>
+        </svg>
+      </div>
+      <div style="font-size:22px;font-weight:700;color:#C8956C;letter-spacing:3px;margin-bottom:8px;">拾卷</div>
+      <div style="font-size:12px;color:#A89B8C;">正在加载...</div>
+    </div>
+  </div>
   <script type="module" src="/src/main.tsx"></script>
 </body>
 </html>

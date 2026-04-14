@@ -1,17 +1,72 @@
-import { useEffect } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import FileTree from './components/Sidebar/FileTree'
 import PdfViewer from './components/PdfViewer/PdfViewer'
 import AnnotationPanel from './components/AnnotationPanel/AnnotationPanel'
 import MemoEditor from './components/Memo/MemoEditor'
+import ReadingLogView from './components/ReadingLog/ReadingLogView'
 import TopBar from './components/TopBar/TopBar'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useLibraryStore } from './store/libraryStore'
 import { useUiStore } from './store/uiStore'
 import './styles/globals.css'
 
+// Shared position state for the floating toggle (persists across show/hide)
+const floatingTogglePos = { x: -1, y: -1 }
+
+function DraggableToggle({ onClick }: { onClick: () => void }) {
+  const [pos, setPos] = useState({ x: floatingTogglePos.x, y: floatingTogglePos.y })
+  const dragging = useRef(false)
+  const moved = useRef(false)
+  const startPos = useRef({ x: 0, y: 0, bx: 0, by: 0 })
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    dragging.current = true
+    moved.current = false
+    const rect = e.currentTarget.getBoundingClientRect()
+    startPos.current = { x: e.clientX, y: e.clientY, bx: rect.left, by: rect.top }
+
+    const onMove = (ev: MouseEvent) => {
+      if (!dragging.current) return
+      const dx = ev.clientX - startPos.current.x
+      const dy = ev.clientY - startPos.current.y
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved.current = true
+      const nx = Math.max(0, Math.min(window.innerWidth - 40, startPos.current.bx + dx))
+      const ny = Math.max(36, Math.min(window.innerHeight - 40, startPos.current.by + dy))
+      setPos({ x: nx, y: ny })
+      floatingTogglePos.x = nx
+      floatingTogglePos.y = ny
+    }
+    const onUp = () => {
+      dragging.current = false
+      if (!moved.current) onClick()
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [onClick])
+
+  const style: React.CSSProperties = pos.x >= 0
+    ? { position: 'fixed', left: pos.x, top: pos.y, right: 'auto', zIndex: 50, width: 36, height: 36, borderRadius: '50%', border: '1px solid var(--border)', background: 'var(--bg)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'grab', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }
+    : {}
+
+  return (
+    <button
+      className={pos.x < 0 ? 'floating-toggle' : ''}
+      style={style}
+      onMouseDown={handleMouseDown}
+      title="打开注释面板（可拖拽移动）"
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+      </svg>
+    </button>
+  )
+}
+
 export default function App() {
   const { library, initLibrary } = useLibraryStore()
-  const { setGlmApiKeyStatus, annotationPanelCollapsed, toggleAnnotationPanel, activeMemoId } = useUiStore()
+  const { setGlmApiKeyStatus, annotationPanelCollapsed, toggleAnnotationPanel, activeMemoId, activeReadingLogDate } = useUiStore()
 
   // Init library on mount
   useEffect(() => {
@@ -22,6 +77,17 @@ export default function App() {
       }).catch(() => setGlmApiKeyStatus('not-set'))
     } else {
       setGlmApiKeyStatus('not-set')
+    }
+
+    // Listen for midnight reading log generation
+    if (window.electronAPI?.onReadingLogGenerated) {
+      const cleanup = window.electronAPI.onReadingLogGenerated((log) => {
+        const { library } = useLibraryStore.getState()
+        if (library) {
+          useLibraryStore.getState().saveReadingLog(log)
+        }
+      })
+      return cleanup
     }
   }, [])
 
@@ -45,8 +111,12 @@ export default function App() {
           <FileTree />
         </ErrorBoundary>
 
-        {/* Main content: Memo editor or PDF viewer */}
-        {activeMemoId ? (
+        {/* Main content: Reading log / Memo editor / PDF viewer */}
+        {activeReadingLogDate ? (
+          <ErrorBoundary fallbackLabel="阅读日志">
+            <ReadingLogView />
+          </ErrorBoundary>
+        ) : activeMemoId ? (
           <>
             <ErrorBoundary fallbackLabel="思考笔记">
               <MemoEditor />
@@ -57,11 +127,7 @@ export default function App() {
               </ErrorBoundary>
             )}
             {annotationPanelCollapsed && (
-              <button onClick={toggleAnnotationPanel} title="打开注释面板" className="floating-toggle">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-                </svg>
-              </button>
+              <DraggableToggle onClick={toggleAnnotationPanel} />
             )}
           </>
         ) : (
@@ -75,11 +141,7 @@ export default function App() {
               </ErrorBoundary>
             )}
             {annotationPanelCollapsed && (
-              <button onClick={toggleAnnotationPanel} title="打开注释面板" className="floating-toggle">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-                </svg>
-              </button>
+              <DraggableToggle onClick={toggleAnnotationPanel} />
             )}
           </>
         )}

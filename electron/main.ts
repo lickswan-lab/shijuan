@@ -5,8 +5,9 @@ import { registerFileSystemIpc } from './ipc/fileSystem'
 import { registerLibraryIpc } from './ipc/library'
 import { registerAiApiIpc } from './ipc/aiApi'
 import { registerPdfOperationsIpc } from './ipc/pdfOperations'
+import { registerReadingLogIpc, startMidnightScheduler } from './ipc/readingLog'
 
-function createWindow(): void {
+function createWindow(): BrowserWindow {
   // Remove default menu bar
   Menu.setApplicationMenu(null)
 
@@ -16,6 +17,9 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     title: '拾卷',
+    icon: join(__dirname, '../../build/icon.png'),
+    show: false,
+    backgroundColor: '#F7F3EA',
     titleBarStyle: 'hidden',
     titleBarOverlay: {
       color: '#F7F3EA',
@@ -59,6 +63,8 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html')).catch(console.error)
   }
+
+  return mainWindow
 }
 
 // Register all IPC handlers
@@ -66,12 +72,17 @@ registerFileSystemIpc()
 registerLibraryIpc()
 registerAiApiIpc()
 registerPdfOperationsIpc()
+registerReadingLogIpc()
 
 app.whenReady().then(() => {
-  createWindow()
+  const mainWindow = createWindow()
+  startMidnightScheduler(mainWindow)
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (BrowserWindow.getAllWindows().length === 0) {
+      const win = createWindow()
+      startMidnightScheduler(win)
+    }
   })
 })
 

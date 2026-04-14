@@ -118,7 +118,7 @@ async function saveApiKeys() {
 
 // ===== Chat API call =====
 
-async function callChat(providerId: string, model: string, messages: Array<{ role: string; content: string }>): Promise<string> {
+export async function callChat(providerId: string, model: string, messages: Array<{ role: string; content: string }>): Promise<string> {
   const provider = PROVIDERS.find(p => p.id === providerId)
   if (!provider) throw new Error(`未知的 AI 供应商: ${providerId}`)
 
@@ -178,6 +178,130 @@ async function callClaude(key: string, model: string, messages: Array<{ role: st
 
   const data = await response.json()
   return data.content?.[0]?.text || ''
+}
+
+// ===== Streaming Chat =====
+
+export async function callChatStream(
+  providerId: string,
+  model: string,
+  messages: Array<{ role: string; content: string }>,
+  onChunk: (text: string) => void,
+): Promise<string> {
+  const provider = PROVIDERS.find(p => p.id === providerId)
+  if (!provider) throw new Error(`未知的 AI 供应商: ${providerId}`)
+
+  const key = apiKeys[providerId]
+  if (!key) throw new Error(`${provider.name} API Key 未设置。请在设置中配置。`)
+
+  if (providerId === 'claude') {
+    return callClaudeStream(key, model, messages, onChunk)
+  }
+
+  // OpenAI-compatible streaming
+  const response = await fetch(provider.chatUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...provider.authHeader(key),
+    },
+    body: JSON.stringify({ model, messages, stream: true }),
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`${provider.name} API error ${response.status}: ${text.substring(0, 200)}`)
+  }
+
+  return parseSSEStream(response, onChunk, (data) => {
+    return data.choices?.[0]?.delta?.content || ''
+  })
+}
+
+async function callClaudeStream(
+  key: string,
+  model: string,
+  messages: Array<{ role: string; content: string }>,
+  onChunk: (text: string) => void,
+): Promise<string> {
+  const systemMsg = messages.find(m => m.role === 'system')?.content || ''
+  const chatMessages = messages.filter(m => m.role !== 'system').map(m => ({
+    role: m.role as 'user' | 'assistant',
+    content: m.content,
+  }))
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 4096,
+      stream: true,
+      system: systemMsg,
+      messages: chatMessages,
+    }),
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`Claude API error ${response.status}: ${text.substring(0, 200)}`)
+  }
+
+  return parseSSEStream(response, onChunk, (data) => {
+    // Claude SSE: content_block_delta events have delta.text
+    if (data.type === 'content_block_delta') {
+      return data.delta?.text || ''
+    }
+    return ''
+  })
+}
+
+async function parseSSEStream(
+  response: Response,
+  onChunk: (text: string) => void,
+  extractText: (data: any) => string,
+): Promise<string> {
+  let full = ''
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  const body = response.body as any
+  if (!body) throw new Error('Response body is null')
+
+  // Node.js: response.body is an async iterable (ReadableStream)
+  try {
+    for await (const rawChunk of body) {
+      const text = typeof rawChunk === 'string' ? rawChunk : decoder.decode(rawChunk, { stream: true })
+      buffer += text
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || !trimmed.startsWith('data:')) continue
+        const payload = trimmed.slice(5).trim()
+        if (payload === '[DONE]') continue
+
+        try {
+          const data = JSON.parse(payload)
+          const chunk = extractText(data)
+          if (chunk) {
+            full += chunk
+            onChunk(chunk)
+          }
+        } catch { /* ignore parse errors */ }
+      }
+    }
+  } catch (err: any) {
+    // If async iteration fails, the partial text is still usable
+    if (!full) throw err
+  }
+
+  return full
 }
 
 // ===== GLM OCR (stays GLM-specific) =====
@@ -341,6 +465,29 @@ export function registerAiApiIpc(): void {
       const result = await callChat(providerId, model, messages)
       return { success: true, text: result }
     } catch (err: any) {
+      return { success: false, error: err.message }
+    }
+  })
+
+  // === Streaming chat ===
+
+  ipcMain.handle('ai-chat-stream', async (event, streamId: string, providerId: string, model: string, messages: Array<{ role: string; content: string }>) => {
+    try {
+      // Parse model spec if combined format
+      let pId = providerId
+      let mId = model
+      if (providerId.includes(':')) {
+        const [p, m] = providerId.split(':', 2)
+        pId = p; mId = m
+      }
+
+      const result = await callChatStream(pId, mId, messages, (chunk) => {
+        try { event.sender.send('ai-stream-chunk', streamId, chunk) } catch {}
+      })
+      event.sender.send('ai-stream-done', streamId, result)
+      return { success: true, text: result }
+    } catch (err: any) {
+      event.sender.send('ai-stream-error', streamId, err.message)
       return { success: false, error: err.message }
     }
   })

@@ -11,6 +11,10 @@ export interface Library {
   entries: LibraryEntry[]
   // Thinking memos
   memos: Memo[]
+  // Memo folders
+  memoFolders: MemoFolder[]
+  // Reading logs
+  readingLogs: ReadingLog[]
 }
 
 export interface VirtualFolder {
@@ -40,6 +44,7 @@ export interface PdfMeta {
   entryId: string          // Links to LibraryEntry.id
   pages: PageData[]
   annotations: Annotation[]
+  marks?: TextMark[]       // 划线/加重标记（无历史链）
   createdAt: string
   updatedAt: string
 }
@@ -59,8 +64,20 @@ export interface Annotation {
     selectedText: string
   }
   historyChain: HistoryEntry[]
+  style?: {
+    color?: string  // yellow/red/green/blue/purple/orange
+  }
   createdAt: string
   updatedAt: string
+}
+
+export interface TextMark {
+  id: string
+  type: 'underline' | 'bold'
+  color?: string              // 预设色名（划线用），加重无颜色
+  pageNumber: number
+  selectedText: string
+  createdAt: string
 }
 
 export interface HistoryEntry {
@@ -77,6 +94,7 @@ export interface HistoryEntry {
     selectedText?: string    // preview text from the linked annotation
   }
   author: 'user' | 'ai'
+  modelLabel?: string             // e.g. "GLM-5.1", "Claude Opus 4.6"
   editedAt?: string
   originalContent?: string
   createdAt: string
@@ -101,6 +119,8 @@ export interface Memo {
   id: string
   title: string
   content: string              // User's writing (markdown), can contain [[block:id]] references
+  filePath?: string            // Future: relative path for .md file storage
+  folderId?: string            // Memo folder ID
   blocks: BlockRef[]           // All blocks cited in this memo
   aiHistory: HistoryEntry[]    // AI conversations within memo writing
   createdAt: string
@@ -108,9 +128,38 @@ export interface Memo {
   snapshots: MemoSnapshot[]    // Version history
 }
 
+export interface MemoFolder {
+  id: string
+  name: string
+  createdAt: string
+}
+
 export interface MemoSnapshot {
   content: string
   savedAt: string
+}
+
+// ===== Reading Log =====
+
+export interface ReadingLogEvent {
+  id: string
+  timestamp: string                // ISO
+  type: 'open_doc' | 'annotate' | 'note' | 'question' | 'stance' | 'ai_interaction' | 'memo_create' | 'memo_edit' | 'mark_text'
+  entryId?: string
+  entryTitle?: string
+  memoId?: string
+  memoTitle?: string
+  detail: string                   // e.g. "在《论法的精神》第3页添加了注释"
+  selectedText?: string            // excerpt (≤80 chars)
+}
+
+export interface ReadingLog {
+  id: string
+  date: string                     // YYYY-MM-DD
+  events: ReadingLogEvent[]
+  aiSummary?: string               // Markdown
+  aiModel?: string
+  generatedAt: string
 }
 
 export interface FileTreeNode {
@@ -129,7 +178,9 @@ export function createDefaultLibrary(): Library {
     globalTags: [],
     folders: [],
     entries: [],
-    memos: []
+    memos: [],
+    memoFolders: [],
+    readingLogs: []
   }
 }
 

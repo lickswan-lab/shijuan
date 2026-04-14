@@ -59,7 +59,7 @@ function EntryItem({ entry, multiSelect, selected, onToggleSelect }: {
   onToggleSelect?: () => void
 }) {
   const { currentEntry, openEntry, removeEntry, deleteEntry, reorderEntry } = useLibraryStore()
-  const { setActiveMemo } = useUiStore()
+  const { setActiveMemo, setActiveReadingLogDate } = useUiStore()
   const isActive = currentEntry?.id === entry.id
   const [dropPos, setDropPos] = useState<'before' | 'after' | null>(null)
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null)
@@ -105,7 +105,7 @@ function EntryItem({ entry, multiSelect, selected, onToggleSelect }: {
         className={`tree-item ${isActive ? 'active' : ''} ${selected ? 'selected' : ''}`}
         onClick={() => {
           if (multiSelect) { onToggleSelect?.(); return }
-          setActiveMemo(null); openEntry(entry)
+          setActiveMemo(null); setActiveReadingLogDate(null); openEntry(entry)
         }}
         draggable={!multiSelect}
         onDragStart={handleDragStart}
@@ -159,6 +159,7 @@ function EntryItem({ entry, multiSelect, selected, onToggleSelect }: {
           onRemove={() => { removeEntry(entry.id); setMenuPos(null) }}
           onDeleteStep={() => setConfirmDelete(true)}
           onDeleteConfirm={() => { deleteEntry(entry.id); setMenuPos(null) }}
+          onShowInFolder={() => { window.electronAPI.showItemInFolder?.(entry.absPath) }}
         />
       )}
     </>
@@ -166,16 +167,16 @@ function EntryItem({ entry, multiSelect, selected, onToggleSelect }: {
 }
 
 // Two-step context menu for entry
-function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep, onDeleteConfirm }: {
+function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep, onDeleteConfirm, onShowInFolder }: {
   pos: MenuPos
   confirmDelete: boolean
   onClose: () => void
   onRemove: () => void
   onDeleteStep: () => void
   onDeleteConfirm: () => void
+  onShowInFolder: () => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
-
   useEffect(() => {
     const handler = (e: globalThis.MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose()
@@ -196,6 +197,15 @@ function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep,
     >
       {!confirmDelete ? (
         <>
+          <div
+            onClick={() => { onShowInFolder(); onClose() }}
+            style={{ padding: '7px 14px', fontSize: 12, cursor: 'pointer', color: 'var(--text)' }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          >
+            查看文件位置
+          </div>
+          <div style={{ height: 1, background: 'var(--border-light)', margin: '2px 0' }} />
           <div
             onClick={onRemove}
             style={{ padding: '7px 14px', fontSize: 12, cursor: 'pointer', color: 'var(--text)' }}
@@ -330,13 +340,14 @@ function FolderItem({ folder }: { folder: VirtualFolder }) {
 
 // ===== Library panel (file tree content) =====
 function LibraryPanel() {
-  const { library, importFiles, createFolder, moveEntryToFolder, removeEntry, deleteEntry } = useLibraryStore()
+  const { library, importFiles, importFolder, createFolder, moveEntryToFolder, removeEntry, deleteEntry } = useLibraryStore()
   const [searchQuery, setSearchQuery] = useState('')
   const [newFolderName, setNewFolderName] = useState<string | null>(null)
   const newFolderInputRef = useRef<HTMLInputElement>(null)
   const [multiSelect, setMultiSelect] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showMoveMenu, setShowMoveMenu] = useState(false)
+  const [confirmBatchDelete, setConfirmBatchDelete] = useState(false)
 
   const entries = library?.entries || []
   const folders = library?.folders || []
@@ -356,9 +367,11 @@ function LibraryPanel() {
   }
 
   const handleBatchDelete = () => {
+    if (!confirmBatchDelete) { setConfirmBatchDelete(true); return }
     selectedIds.forEach(id => deleteEntry(id))
     setSelectedIds(new Set())
     setMultiSelect(false)
+    setConfirmBatchDelete(false)
   }
 
   const handleBatchMove = (folderId: string | undefined) => {
@@ -428,7 +441,7 @@ function LibraryPanel() {
       <div style={{ padding: '6px 10px', display: 'flex', gap: 4, borderBottom: '1px solid var(--border-light)' }}>
         {multiSelect ? (
           <>
-            <button className="btn btn-sm" style={{ fontSize: 10 }} onClick={() => { setMultiSelect(false); setSelectedIds(new Set()) }}>
+            <button className="btn btn-sm" style={{ fontSize: 10 }} onClick={() => { setMultiSelect(false); setSelectedIds(new Set()); setConfirmBatchDelete(false) }}>
               取消
             </button>
             <button className="btn btn-sm" style={{ fontSize: 10 }} onClick={() => {
@@ -442,14 +455,17 @@ function LibraryPanel() {
           </>
         ) : (
           <>
-            <button className="btn btn-sm" style={{ flex: 1, justifyContent: 'center', fontSize: 11 }} onClick={() => importFiles()}>
-              导入
+            <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => importFiles()} title="导入文件">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
             </button>
-            <button className="btn btn-sm" style={{ flex: 1, justifyContent: 'center', fontSize: 11 }} onClick={handleNewFolder}>
-              新建分组
+            <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => importFolder()} title="导入文件夹">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="17" x2="12" y2="11"/><polyline points="9 14 12 11 15 14"/></svg>
             </button>
-            <button className="btn btn-sm" style={{ justifyContent: 'center', fontSize: 11 }} onClick={() => setMultiSelect(true)} title="多选">
-              多选
+            <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={handleNewFolder} title="新建分组">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+            </button>
+            <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => setMultiSelect(true)} title="多选">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="5" width="14" height="14" rx="2"/><polyline points="9 12 11 14 17 8"/></svg>
             </button>
           </>
         )}
@@ -490,8 +506,8 @@ function LibraryPanel() {
           <button className="btn btn-sm" style={{ fontSize: 10 }} onClick={handleBatchRemove}>
             移除
           </button>
-          <button className="btn btn-sm" style={{ fontSize: 10, color: 'var(--danger)' }} onClick={handleBatchDelete}>
-            删除
+          <button className="btn btn-sm" style={{ fontSize: 10, color: 'var(--danger)', fontWeight: confirmBatchDelete ? 600 : 400 }} onClick={handleBatchDelete}>
+            {confirmBatchDelete ? '确认删除?' : '删除'}
           </button>
         </div>
       )}

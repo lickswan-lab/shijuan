@@ -26,10 +26,16 @@ interface UiState {
 
   // Memo
   activeMemoId: string | null
-  sidebarTab: 'library' | 'memos'
+  sidebarTab: 'library' | 'memos' | 'reading-log'
+
+  // Reading log
+  activeReadingLogDate: string | null
 
   // AI model
   selectedAiModel: string
+
+  // Annotation color (for next annotation to be created)
+  annotationColor: string
 
   // Actions
   toggleSidebar: () => void
@@ -41,8 +47,10 @@ interface UiState {
   setShowSettings: (show: boolean) => void
   setGlmApiKeyStatus: (status: 'set' | 'not-set' | 'checking') => void
   setActiveMemo: (id: string | null) => void
-  setSidebarTab: (tab: 'library' | 'memos') => void
+  setSidebarTab: (tab: 'library' | 'memos' | 'reading-log') => void
+  setActiveReadingLogDate: (date: string | null) => void
   setSelectedAiModel: (model: string) => void
+  setAnnotationColor: (color: string) => void
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -55,7 +63,9 @@ export const useUiStore = create<UiState>((set) => ({
   glmApiKeyStatus: 'checking',
   activeMemoId: null,
   sidebarTab: 'library',
+  activeReadingLogDate: null,
   selectedAiModel: 'glm:glm-4-flash',
+  annotationColor: 'yellow',
 
   toggleSidebar: () => set(s => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   toggleAnnotationPanel: () => set(s => ({ annotationPanelCollapsed: !s.annotationPanelCollapsed })),
@@ -65,7 +75,9 @@ export const useUiStore = create<UiState>((set) => ({
   setSearchQuery: (query) => set({ searchQuery: query }),
   setShowSettings: (show) => set({ showSettings: show }),
   setGlmApiKeyStatus: (status) => set({ glmApiKeyStatus: status }),
-  setActiveMemo: (id) => set({ activeMemoId: id, ...(id ? { sidebarTab: 'memos' as const } : {}) }),
+  setActiveMemo: (id) => set({ activeMemoId: id, activeReadingLogDate: null, ...(id ? { sidebarTab: 'memos' as const } : {}) }),
   setSidebarTab: (tab) => set({ sidebarTab: tab }),
-  setSelectedAiModel: (model) => set({ selectedAiModel: model })
+  setActiveReadingLogDate: (date) => set({ activeReadingLogDate: date, activeMemoId: null }),
+  setSelectedAiModel: (model) => set({ selectedAiModel: model }),
+  setAnnotationColor: (color) => set({ annotationColor: color })
 }))

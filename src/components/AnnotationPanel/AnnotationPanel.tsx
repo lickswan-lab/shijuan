@@ -6,6 +6,21 @@ import { useUiStore } from '../../store/uiStore'
 import type { Annotation, HistoryEntry, BlockRef } from '../../types/library'
 
 // Map entry types to display info
+function getModelLabel(modelSpec: string): string {
+  // "glm:glm-5.1" → "GLM-5.1", "claude:claude-opus-4-6-..." → "Claude Opus 4.6"
+  const [, modelId] = modelSpec.includes(':') ? modelSpec.split(':', 2) : ['', modelSpec]
+  return modelId
+    .replace(/^glm-/, 'GLM-')
+    .replace(/^gpt-/, 'GPT-')
+    .replace(/^claude-/, 'Claude ')
+    .replace(/^gemini-/, 'Gemini ')
+    .replace(/^moonshot-/, 'Moonshot ')
+    .replace(/^deepseek-/, 'DeepSeek ')
+    .replace(/^doubao-/, '豆包 ')
+    .replace(/^kimi-/, 'Kimi ')
+    .replace(/-\d{8,}$/, '') // remove date suffixes like -20250414
+}
+
 function getTypeDisplay(type: HistoryEntry['type']) {
   const map: Record<string, { label: string; color: string; bgClass: string }> = {
     note: { label: '我', color: 'var(--accent)', bgClass: 'user-note' },
@@ -46,7 +61,7 @@ function HistoryEntryItem({
     <div className={`history-entry ${display.bgClass}`}>
       <div className="history-entry-header">
         <span style={{ fontSize: 11, fontWeight: 500, color: entry.author === 'user' ? 'var(--accent)' : 'var(--success)' }}>
-          {entry.author === 'user' ? '我' : 'AI'}
+          {entry.author === 'user' ? '我' : (entry.modelLabel || 'AI')}
         </span>
         <div className="history-entry-actions">
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
@@ -109,11 +124,12 @@ function HistoryEntryItem({
 }
 
 // ===== AI Instant Feedback bubble =====
-function FeedbackBubble({ text, loading, onKeep, onDismiss }: {
+function FeedbackBubble({ text, loading, onKeep, onDismiss, onExpand }: {
   text: string | null
   loading: boolean
   onKeep: () => void
   onDismiss: () => void
+  onExpand: (feedbackText: string) => void
 }) {
   if (!loading && !text) return null
 
@@ -136,7 +152,8 @@ function FeedbackBubble({ text, loading, onKeep, onDismiss }: {
           <div style={{ whiteSpace: 'pre-wrap' }}>{text}</div>
           <div style={{ display: 'flex', gap: 6, marginTop: 8, justifyContent: 'flex-end' }}>
             <button className="btn btn-sm" onClick={onDismiss} style={{ fontSize: 11 }}>忽略</button>
-            <button className="btn btn-sm" onClick={onKeep} style={{ fontSize: 11, color: 'var(--success)' }}>保留到历史链</button>
+            <button className="btn btn-sm" onClick={() => { onKeep(); onExpand(text!) }} style={{ fontSize: 11, color: 'var(--accent)' }}>追问</button>
+            <button className="btn btn-sm" onClick={onKeep} style={{ fontSize: 11, color: 'var(--success)' }}>保留</button>
           </div>
         </>
       )}
@@ -214,9 +231,37 @@ function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, onDo
 export default function AnnotationPanel() {
   const { currentEntry, currentPdfMeta, updatePdfMeta, library } = useLibraryStore()
   const { textSelection, activeAnnotationId, setTextSelection, setActiveAnnotation } = useUiStore()
+  const [panelWidth, setPanelWidth] = useState(340)
+  const resizingRef = useRef(false)
+
+  // Resize handler
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    resizingRef.current = true
+    const startX = e.clientX
+    const startWidth = panelWidth
+
+    const onMove = (ev: MouseEvent) => {
+      if (!resizingRef.current) return
+      const delta = startX - ev.clientX
+      setPanelWidth(Math.max(260, Math.min(600, startWidth + delta)))
+    }
+    const onUp = () => {
+      resizingRef.current = false
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+  }, [panelWidth])
   const [noteInput, setNoteInput] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
-  const { selectedAiModel: aiModel, setSelectedAiModel: setAiModel } = useUiStore()
+  const [streamingText, setStreamingText] = useState('')
+  const { selectedAiModel: aiModel, setSelectedAiModel: setAiModel, annotationColor } = useUiStore()
   const [configuredProviders, setConfiguredProviders] = useState<Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>>([])
 
   // Load configured AI providers
@@ -282,8 +327,9 @@ export default function AnnotationPanel() {
   const activeAnnotation = currentPdfMeta?.annotations.find(a => a.id === activeAnnotationId)
   const selectionAnnotation = textSelection
     ? currentPdfMeta?.annotations.find(a =>
-        a.anchor.pageNumber === textSelection.pageNumber &&
-        a.anchor.selectedText === textSelection.text
+        a.anchor.selectedText === textSelection.text ||
+        (a.anchor.pageNumber === textSelection.pageNumber &&
+         (a.anchor.selectedText.includes(textSelection.text) || textSelection.text.includes(a.anchor.selectedText)))
       )
     : null
   const displayAnnotation = activeAnnotation || selectionAnnotation
@@ -403,7 +449,6 @@ export default function AnnotationPanel() {
   // ===== Add note =====
   const handleAddNote = useCallback(async () => {
     if (!noteInput.trim()) return
-    // Need either an existing annotation or a text selection to create one
     if (!displayAnnotation && !textSelection) return
 
     const newEntry: HistoryEntry = {
@@ -412,23 +457,27 @@ export default function AnnotationPanel() {
       content: noteInput.trim(),
       author: 'user',
       createdAt: new Date().toISOString(),
-      // Record the additional context text if user selected new text
       ...(newContextText ? { contextText: newContextText } : {}),
     }
 
     let targetAnnotationId: string
 
-    if (displayAnnotation) {
-      // Append to existing annotation's history chain
+    // Try to find existing annotation for this text (covers async race condition)
+    const existingAnn = displayAnnotation || (textSelection
+      ? currentPdfMeta?.annotations.find(a => a.anchor.selectedText === textSelection.text)
+      : null)
+
+    if (existingAnn) {
       await updatePdfMeta(meta => ({
         ...meta,
         annotations: meta.annotations.map(a =>
-          a.id === displayAnnotation.id
+          a.id === existingAnn.id
             ? { ...a, historyChain: [...a.historyChain, newEntry], updatedAt: new Date().toISOString() }
             : a
         )
       }))
-      targetAnnotationId = displayAnnotation.id
+      targetAnnotationId = existingAnn.id
+      if (!activeAnnotationId) setActiveAnnotation(existingAnn.id)
     } else {
       // Create new annotation from text selection
       const newAnnotation: Annotation = {
@@ -440,6 +489,7 @@ export default function AnnotationPanel() {
           selectedText: textSelection!.text
         },
         historyChain: [newEntry],
+        style: { color: annotationColor },
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       }
@@ -497,6 +547,7 @@ export default function AnnotationPanel() {
           selectedText: textSelection.text
         },
         historyChain: [entry],
+        style: { color: annotationColor },
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       }
@@ -510,11 +561,12 @@ export default function AnnotationPanel() {
     setAiLoading(false)
   }, [textSelection, newContextText, displayAnnotation, updatePdfMeta, setActiveAnnotation])
 
-  // ===== AI dialogue (unified: works with or without existing annotation) =====
+  // ===== AI dialogue (streaming) =====
   const handleAskQuestionWithText = useCallback(async (text: string) => {
     if (!text.trim()) return
     if (!displayAnnotation && !textSelection) return
     setAiLoading(true)
+    setStreamingText('')
 
     const anchorText = displayAnnotation?.anchor.selectedText || textSelection?.text || ''
     let contextForAi = anchorText
@@ -524,35 +576,69 @@ export default function AnnotationPanel() {
 
     const historyChain = displayAnnotation?.historyChain || []
 
-    const result = await window.electronAPI.glmAsk(
-      text.trim(),
-      contextForAi,
-      historyChain,
-      aiModel
-    )
+    // Build messages for streaming call (same logic as glm-ask handler)
+    const messages: Array<{ role: string; content: string }> = [
+      { role: 'system', content: `你是学术文献阅读助手。用户正在阅读一段学术文本，请基于文本内容回答用户的问题。\n\n参考文本：\n「${contextForAi}」` }
+    ]
+    for (const entry of historyChain) {
+      if (entry.type === 'ai_qa') {
+        if (entry.userQuery) messages.push({ role: 'user', content: entry.userQuery })
+        messages.push({ role: 'assistant', content: entry.content })
+      } else if (['note', 'question', 'stance'].includes(entry.type)) {
+        messages.push({ role: 'user', content: `[我的笔记] ${entry.content}` })
+      } else if (entry.type === 'ai_interpretation' || entry.type === 'ai_feedback') {
+        messages.push({ role: 'assistant', content: entry.content })
+      }
+    }
+    messages.push({ role: 'user', content: text.trim() })
+
+    const streamId = uuid()
+    let fullText = ''
+
+    // Listen for streaming chunks
+    const cleanupChunk = window.electronAPI.onAiStreamChunk((sid, chunk) => {
+      if (sid !== streamId) return
+      fullText += chunk
+      setStreamingText(fullText)
+    })
+
+    try {
+      const result = await window.electronAPI.aiChatStream(streamId, aiModel, messages)
+      if (!result.success) fullText = `错误：${result.error}`
+    } catch (err: any) {
+      fullText = `错误：${err.message}`
+    } finally {
+      cleanupChunk()
+    }
+
+    setStreamingText('')
 
     const entry: HistoryEntry = {
       id: uuid(),
       type: 'ai_qa',
-      content: result.success ? result.text! : `错误：${result.error}`,
+      content: fullText,
       userQuery: text.trim(),
       author: 'ai',
+      modelLabel: getModelLabel(aiModel),
       createdAt: new Date().toISOString(),
       ...(newContextText ? { contextText: newContextText } : {}),
     }
 
-    if (displayAnnotation) {
-      // Append to existing annotation
+    const existingAnn = displayAnnotation || (textSelection
+      ? currentPdfMeta?.annotations.find(a => a.anchor.selectedText === textSelection.text)
+      : null)
+
+    if (existingAnn) {
       await updatePdfMeta(meta => ({
         ...meta,
         annotations: meta.annotations.map(a =>
-          a.id === displayAnnotation.id
+          a.id === existingAnn.id
             ? { ...a, historyChain: [...a.historyChain, entry], updatedAt: new Date().toISOString() }
             : a
         )
       }))
+      if (!activeAnnotationId) setActiveAnnotation(existingAnn.id)
     } else if (textSelection) {
-      // Create new annotation with this AI response
       const newAnnotation: Annotation = {
         id: uuid(),
         anchor: {
@@ -712,7 +798,9 @@ export default function AnnotationPanel() {
     const hasAny = hasCurrentAnnotations || totalOtherAnnotations > 0
 
     return (
-      <div className="annotation-panel">
+      <div style={{ display: 'flex', flexShrink: 0 }}>
+        <div onMouseDown={handleResizeStart} style={{ width: 4, cursor: 'col-resize', background: 'transparent', flexShrink: 0, transition: 'background 0.15s' }} onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent)')} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')} />
+        <div className="annotation-panel" style={{ width: panelWidth }}>
         <div className="annotation-panel-header">
           <span>注释</span>
           <button className="btn btn-sm btn-icon" onClick={toggleAnnotationPanel} title="关闭面板">
@@ -776,12 +864,15 @@ export default function AnnotationPanel() {
           </div>
         )}
       </div>
+      </div>
     )
   }
 
   // ===== Active annotation view =====
   return (
-    <div className="annotation-panel">
+    <div style={{ display: 'flex', flexShrink: 0 }}>
+      <div onMouseDown={handleResizeStart} style={{ width: 4, cursor: 'col-resize', background: 'transparent', flexShrink: 0, transition: 'background 0.15s' }} onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent)')} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')} />
+      <div className="annotation-panel" style={{ width: panelWidth }}>
       <div className="annotation-panel-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <button className="btn btn-sm btn-icon" onClick={clearAnnotationFocus} title="返回全部注释">
@@ -860,20 +951,20 @@ export default function AnnotationPanel() {
             onCite={displayAnnotation ? (he) => setCitingEntry({ historyEntry: he, annotation: displayAnnotation }) : undefined}
           />
         ))}
-        {/* AI loading indicator */}
+        {/* AI streaming / loading indicator */}
         {aiLoading && (
-          <div className="history-entry ai-response" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-muted)' }}>
-              <span className="loading-spinner" />
-              AI 正在思考...
-            </div>
-            <button
-              className="btn btn-sm"
-              style={{ fontSize: 11 }}
-              onClick={() => setAiLoading(false)}
-            >
-              取消
-            </button>
+          <div className="history-entry ai-response">
+            {streamingText ? (
+              <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', whiteSpace: 'pre-wrap' }}>
+                {streamingText}
+                <span className="streaming-cursor" />
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-muted)' }}>
+                <span className="loading-spinner" />
+                AI 正在思考...
+              </div>
+            )}
           </div>
         )}
         <div ref={historyEndRef} />
@@ -898,6 +989,12 @@ export default function AnnotationPanel() {
         loading={feedbackLoading}
         onKeep={handleKeepFeedback}
         onDismiss={() => { setFeedbackText(null); setFeedbackLoading(false) }}
+        onExpand={(fbText) => {
+          // Pre-fill the input with a follow-up question about the feedback
+          setNoteInput(`关于「${fbText.substring(0, 30)}...」，`)
+          setFeedbackText(null)
+          setFeedbackLoading(false)
+        }}
       />
 
       {/* Unified input area */}
@@ -948,6 +1045,7 @@ export default function AnnotationPanel() {
           </button>
         </div>
       </div>
+    </div>
     </div>
   )
 }

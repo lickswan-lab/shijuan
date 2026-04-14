@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { Library, PdfMeta, HistoryEntry } from '../src/types/library'
+import type { Library, PdfMeta, HistoryEntry, ReadingLogEvent, ReadingLog } from '../src/types/library'
 
 const electronAPI = {
   // Library (central storage)
@@ -27,6 +27,8 @@ const electronAPI = {
     ipcRenderer.invoke('read-file-buffer', filePath),
   deleteFile: (absPath: string): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('delete-file', absPath),
+  showItemInFolder: (absPath: string): void =>
+    ipcRenderer.send('show-item-in-folder', absPath),
 
   // Export
   exportFile: (defaultName: string, filters: Array<{ name: string; extensions: string[] }>, content: string | Buffer): Promise<{ success: boolean; path?: string; error?: string }> =>
@@ -66,6 +68,38 @@ const electronAPI = {
     ipcRenderer.invoke('glm-instant-feedback', userNote, selectedText, ocrContext, otherAnnotations),
   glmAsk: (question: string, selectedText: string, history: HistoryEntry[], model?: string): Promise<{ success: boolean; text?: string; error?: string }> =>
     ipcRenderer.invoke('glm-ask', question, selectedText, history, model),
+
+  // === Streaming AI ===
+  aiChatStream: (streamId: string, modelSpec: string, messages: Array<{ role: string; content: string }>): Promise<{ success: boolean; text?: string; error?: string }> =>
+    ipcRenderer.invoke('ai-chat-stream', streamId, modelSpec, '', messages),
+  onAiStreamChunk: (callback: (streamId: string, chunk: string) => void) => {
+    const handler = (_event: any, streamId: string, chunk: string) => callback(streamId, chunk)
+    ipcRenderer.on('ai-stream-chunk', handler)
+    return () => { ipcRenderer.removeListener('ai-stream-chunk', handler) }
+  },
+  onAiStreamDone: (callback: (streamId: string, fullText: string) => void) => {
+    const handler = (_event: any, streamId: string, fullText: string) => callback(streamId, fullText)
+    ipcRenderer.on('ai-stream-done', handler)
+    return () => { ipcRenderer.removeListener('ai-stream-done', handler) }
+  },
+  onAiStreamError: (callback: (streamId: string, error: string) => void) => {
+    const handler = (_event: any, streamId: string, error: string) => callback(streamId, error)
+    ipcRenderer.on('ai-stream-error', handler)
+    return () => { ipcRenderer.removeListener('ai-stream-error', handler) }
+  },
+
+  // === Reading Log ===
+  readingLogCollectEvents: (date: string): Promise<{ success: boolean; events: ReadingLogEvent[]; error?: string }> =>
+    ipcRenderer.invoke('reading-log-collect-events', date),
+  readingLogGenerateSummary: (params: { events: ReadingLogEvent[]; date: string; recentLogs: ReadingLog[]; model: string }): Promise<{ success: boolean; text?: string; error?: string }> =>
+    ipcRenderer.invoke('reading-log-generate-summary', params),
+  readingLogSave: (log: ReadingLog): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('reading-log-save', log),
+  onReadingLogGenerated: (callback: (log: ReadingLog) => void) => {
+    const handler = (_event: any, log: ReadingLog) => callback(log)
+    ipcRenderer.on('reading-log-generated', handler)
+    return () => { ipcRenderer.removeListener('reading-log-generated', handler) }
+  },
 }
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI)
