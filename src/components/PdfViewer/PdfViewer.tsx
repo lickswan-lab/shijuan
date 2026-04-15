@@ -38,14 +38,17 @@ function cleanOcrText(raw: string): string {
     // Bare superscripts without $ wrapper: ^{83} or ^83
     .replace(/\^{?\{(\d+)\}?}/g, (_m, n) => toSuper(n))
     .replace(/\^(\d{1,3})(?=\D|$)/g, (_m, n) => toSuper(n))
-    // Wrap bare LaTeX commands (not inside $) in $ for remark-math:
-    // Match sequences starting with \ followed by known math commands and their args
-    .replace(/(?<!\$)(\\(?:frac|partial|left|right|sqrt|sum|int|prod|lim|infty|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|omega|pi|phi|psi|nabla|cdot|times|div|pm|mp|leq|geq|neq|approx|equiv|subset|supset|cap|cup|in|notin|forall|exists|rightarrow|leftarrow|Rightarrow|Leftarrow|vec|hat|bar|dot|tilde|overline|underline)(?:\s*[\{^_][\s\S]*?)?)(?=[\u4e00-\u9fff\s,，。.;；:：!！?？)]|$)/gm, (match) => {
-      // Only wrap if it looks like a real LaTeX expression (has braces or operators)
-      if (match.includes('{') || match.includes('^') || match.includes('_')) {
-        return ` $${match.trim()}$ `
-      }
-      return match
+    // Wrap bare LaTeX expressions (not inside $) in $ for remark-math
+    // Strategy: find lines containing bare \ commands with braces, wrap the entire LaTeX segment
+    .replace(/^(.*?)(\\(?:frac|partial|sqrt|sum|int|prod|lim|nabla|vec|hat|bar|overline|underline)\s*\{[\s\S]*?\}(?:\s*\{[^}]*\})*(?:\s*[,，.。])?)/gm, (full, before, latex) => {
+      // Check if already inside $ delimiters
+      const dollarsBefore = (before.match(/\$/g) || []).length
+      if (dollarsBefore % 2 === 1) return full  // inside $ pair, don't wrap
+      return `${before} $${latex.trim()}$ `
+    })
+    // Also wrap simpler bare LaTeX like \partial x or \alpha
+    .replace(/(?<!\$)\\(partial|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|omega|pi|phi|psi|infty|cdot|times|div|pm|mp|leq|geq|neq|approx|equiv|forall|exists)(?=[^a-zA-Z])/g, (match) => {
+      return ` $${match}$ `
     })
     // Clean up excessive blank lines
     .replace(/\n{3,}/g, '\n\n')
