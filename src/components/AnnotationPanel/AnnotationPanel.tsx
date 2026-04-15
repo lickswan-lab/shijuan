@@ -372,6 +372,10 @@ export default function AnnotationPanel() {
   const [noteInput, setNoteInput] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
   const [streamingText, setStreamingText] = useState('')
+  // Socratic mode: AI asks guiding questions instead of direct answers
+  const [socraticMode, setSocraticMode] = useState(() => {
+    try { return localStorage.getItem('sj-socraticMode') === 'true' } catch { return false }
+  })
   const { selectedAiModel: aiModel, setSelectedAiModel: setAiModel, annotationColor } = useUiStore()
   const [configuredProviders, setConfiguredProviders] = useState<Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>>([])
 
@@ -746,7 +750,9 @@ export default function AnnotationPanel() {
       }
     }
 
-    let systemContent = `你是一位非常熟悉文献「${docTitle}」的学术导师。请基于文献上下文回答用户关于选中文本的问题。\n\n用户选中的文本：\n「${contextForAi}」`
+    let systemContent = socraticMode
+      ? `你是一位苏格拉底式的学术导师，正在辅导学生阅读文献「${docTitle}」。\n\n核心原则：\n- 绝不直接给出答案，而是通过1-2个精准的追问引导学生自己思考\n- 追问要针对学生问题的核心假设、隐含前提或推理漏洞\n- 如果学生说"直接告诉我"，才给出正面回答\n- 追问结尾可以给出一个小提示方向（但不能是答案本身）\n\n用户选中的文本：\n「${contextForAi}」`
+      : `你是一位非常熟悉文献「${docTitle}」的学术导师。请基于文献上下文回答用户关于选中文本的问题。\n\n用户选中的文本：\n「${contextForAi}」`
     if (surroundingContext) {
       systemContent += `\n\n选中文本的前后上下文（来自同一篇文献）：\n${surroundingContext}`
     }
@@ -1193,6 +1199,24 @@ export default function AnnotationPanel() {
         />
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, gap: 6 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            {/* Socratic mode toggle */}
+            <button
+              onClick={() => {
+                const next = !socraticMode
+                setSocraticMode(next)
+                try { localStorage.setItem('sj-socraticMode', String(next)) } catch {}
+              }}
+              title={socraticMode ? '苏格拉底模式已开启：AI 用追问引导思考（点击关闭）' : '开启苏格拉底模式：AI 不直接回答，用反问引导你推导'}
+              style={{
+                padding: '3px 6px', fontSize: 10, border: '1px solid var(--border)',
+                borderRadius: 4, cursor: 'pointer',
+                background: socraticMode ? 'var(--accent)' : 'transparent',
+                color: socraticMode ? '#fff' : 'var(--text-muted)',
+                transition: 'all 0.2s',
+              }}
+            >
+              {socraticMode ? '🏛 追问' : '🏛'}
+            </button>
             <select
               value={aiModel}
               onChange={e => setAiModel(e.target.value)}
