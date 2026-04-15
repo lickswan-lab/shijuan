@@ -1972,6 +1972,51 @@ export default function PdfViewer() {
           )
         )}
 
+        {/* 读后反刍: generate structured review memo from annotations */}
+        {currentPdfMeta && currentPdfMeta.annotations.length >= 2 && (
+          <button className="btn btn-sm" style={{ marginLeft: 8, fontSize: 11 }}
+            title="基于本文献的所有注释，AI 生成一份结构化的反刍笔记"
+            onClick={async () => {
+              const annotations = currentPdfMeta.annotations
+              if (annotations.length < 2) return
+
+              const title = currentEntry?.title || '未知文献'
+              const annSummary = annotations.map((a, i) => {
+                const notes = a.historyChain
+                  .filter(h => h.author === 'user')
+                  .map(h => h.content)
+                  .join('; ')
+                return `${i + 1}. 「${a.anchor.selectedText.slice(0, 60)}」${notes ? ` — 笔记: ${notes.slice(0, 100)}` : ''}`
+              }).join('\n')
+
+              // Create memo with AI-generated review
+              const model = useUiStore.getState().selectedAiModel
+              const streamId = uuid()
+              let fullText = ''
+              const cleanup = window.electronAPI.onAiStreamChunk((sid: string, chunk: string) => { if (sid === streamId) fullText += chunk })
+
+              try {
+                await window.electronAPI.aiChatStream(streamId, model, [
+                  { role: 'system', content: `你是学术阅读助手。用户读完了文献「${title}」并留下了一些注释。请基于这些注释生成一份结构化的「读后反刍」笔记。\n\n格式要求：\n1. **核心论点**（1-2句概括文献主旨）\n2. **我的标注与思考**（按注释整理，保留用户原话）\n3. **疑问与待深入**（从注释中提炼出值得继续探索的问题）\n4. **下次阅读时思考**（3个引导性问题）\n\n用「你」称呼用户。` },
+                  { role: 'user', content: `文献：${title}\n\n我的 ${annotations.length} 条注释：\n${annSummary}` },
+                ])
+              } finally { cleanup() }
+
+              if (fullText) {
+                const memoContent = `# 读后反刍：${title}\n\n${fullText}`
+                const { createMemo } = useLibraryStore.getState()
+                const memo = await createMemo()
+                if (memo) {
+                  await useLibraryStore.getState().updateMemo(memo.id, { content: memoContent, title: `反刍：${title}` })
+                  useUiStore.getState().setActiveMemo(memo.id)
+                }
+              }
+            }}
+          >
+            反刍
+          </button>
+        )}
+
         {/* Immersive mode toggle — hidden for now, feature in development */}
         {false && <button
           className="btn btn-sm"
