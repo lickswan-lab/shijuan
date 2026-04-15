@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, shell } from 'electron'
+import { app, BrowserWindow, Menu, shell, ipcMain } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 import { registerFileSystemIpc } from './ipc/fileSystem'
@@ -39,6 +39,17 @@ function createWindow(): BrowserWindow {
 
   mainWindow.on('ready-to-show', () => {
     mainWindow.show()
+  })
+
+  // Dark mode: update title bar overlay color
+  ipcMain.on('set-title-bar-theme', (_event, dark: boolean) => {
+    try {
+      mainWindow.setTitleBarOverlay({
+        color: dark ? '#1a1a20' : '#F7F3EA',
+        symbolColor: dark ? '#e0ddd5' : '#3D3529',
+      })
+      mainWindow.setBackgroundColor(dark ? '#1a1a20' : '#F7F3EA')
+    } catch {}
   })
 
   // Open external links in system browser

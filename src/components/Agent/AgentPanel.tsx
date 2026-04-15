@@ -2,6 +2,8 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import ReactMarkdown from 'react-markdown'
 import rehypeRaw from 'rehype-raw'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
 import type { AgentMessage, AgentConversation, HermesSkill, HermesInsight } from '../../types/library'
@@ -341,7 +343,7 @@ ${memory.slice(-3000)}`
                     ? { background: 'var(--accent)', color: '#fff', borderBottomRightRadius: 2 }
                     : { background: 'var(--bg-warm)', color: 'var(--text)', border: '1px solid var(--border-light)', borderBottomLeftRadius: 2 }),
                 }}>
-                  {msg.role === 'assistant' ? <ReactMarkdown rehypePlugins={[rehypeRaw]}>{msg.content}</ReactMarkdown> : <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>}
+                  {msg.role === 'assistant' ? <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>{msg.content}</ReactMarkdown> : <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>}
                 </div>
               </div>
             ))}
@@ -350,7 +352,7 @@ ${memory.slice(-3000)}`
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
                 {toolStatus && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}><span className="loading-spinner" style={{ width: 10, height: 10 }} />{toolStatus}</div>}
                 <div style={{ maxWidth: '90%', padding: '8px 12px', borderRadius: 10, background: 'var(--bg-warm)', border: '1px solid var(--border-light)', borderBottomLeftRadius: 2, fontSize: 13, lineHeight: 1.7 }}>
-                  {streamingText ? <><ReactMarkdown rehypePlugins={[rehypeRaw]}>{cleanResponse(streamingText)}</ReactMarkdown><span className="streaming-cursor" /></> : <span style={{ color: 'var(--text-muted)' }}>{toolStatus ? '处理中...' : '思考中...'}</span>}
+                  {streamingText ? <><ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>{cleanResponse(streamingText)}</ReactMarkdown><span className="streaming-cursor" /></> : <span style={{ color: 'var(--text-muted)' }}>{toolStatus ? '处理中...' : '思考中...'}</span>}
                 </div>
               </div>
             )}
@@ -393,7 +395,7 @@ ${memory.slice(-3000)}`
 
             {generatingInsight && streamingText && (
               <div style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--bg-warm)', border: '1px solid var(--border-light)', fontSize: 12, lineHeight: 1.8 }}>
-                <ReactMarkdown rehypePlugins={[rehypeRaw]}>{streamingText}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>{streamingText}</ReactMarkdown>
                 <span className="streaming-cursor" />
               </div>
             )}
@@ -401,7 +403,7 @@ ${memory.slice(-3000)}`
             {!generatingInsight && insight && (
               <div style={{ padding: '10px 12px', borderRadius: 8, background: 'linear-gradient(135deg, var(--accent-soft), var(--bg-warm))', border: '1px solid var(--border-light)' }}>
                 <div style={{ fontSize: 12, lineHeight: 1.8, color: 'var(--text)' }}>
-                  <ReactMarkdown rehypePlugins={[rehypeRaw]}>{insight.content}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>{insight.content}</ReactMarkdown>
                 </div>
                 <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 6 }}>
                   基于 {insight.basedOn} 条行为记录 · {new Date(insight.generatedAt).toLocaleString('zh-CN')}

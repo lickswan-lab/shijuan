@@ -1,6 +1,8 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import Markdown from 'react-markdown'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import 'react-pdf/dist/esm/Page/TextLayer.css'
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css'
 import { useLibraryStore } from '../../store/libraryStore'
@@ -522,7 +524,7 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
   return (
     <div className="ocr-markdown-content" ref={containerRef}>
       {sections.map((pageText, i) => (
-        <div key={i} style={{ marginBottom: 28 }}>
+        <div key={i} data-page-number={i + 1} style={{ marginBottom: 28 }}>
           {sections.length > 1 && (
             <div style={{
               fontSize: 12, color: '#bbb', marginBottom: 10,
@@ -534,6 +536,8 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
             </div>
           )}
           <Markdown
+            remarkPlugins={[remarkMath]}
+            rehypePlugins={[rehypeKatex]}
             components={{
               img: ({ src, alt }) => {
                 // Hide bbox image references
@@ -701,12 +705,19 @@ function EpubViewer({ absPath, onTextSelect }: {
 }
 
 // DOCX viewer: convert to HTML using mammoth
-function DocxViewer({ absPath, onTextSelect }: {
+function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationClick, onRemoveMark, activeSelectionText }: {
   absPath: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
+  annotations?: Array<{ id: string; selectedText: string }>
+  marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
+  onAnnotationClick?: (id: string) => void
+  onRemoveMark?: (id: string) => void
+  activeSelectionText?: string
 }) {
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [markMenu, setMarkMenu] = useState<{ x: number; y: number; markId: string; markType: string } | null>(null)
 
   useEffect(() => {
     async function convert() {
@@ -722,30 +733,73 @@ function DocxViewer({ absPath, onTextSelect }: {
     convert()
   }, [absPath])
 
-  const handleMouseUp = useCallback(() => {
-    const sel = window.getSelection()
-    if (!sel || sel.isCollapsed) return
-    const text = sel.toString().trim()
-    if (text && text.length >= 2) {
-      onTextSelect({ pageNumber: 1, text, startOffset: 0, endOffset: text.length })
+  // Highlight annotations
+  useAnnotationHighlights(containerRef, annotations || [], onAnnotationClick || (() => {}), [html, annotations])
+
+  // Render marks
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container || !marks || marks.length === 0) return
+    container.querySelectorAll('.ocr-mark').forEach(el => {
+      try { const p = el.parentNode; if (p) { while (el.firstChild) p.insertBefore(el.firstChild, el); p.removeChild(el) } } catch {}
+    })
+    try { container.normalize() } catch {}
+    const targets = marks.map(m => ({ text: m.selectedText, id: m.id, type: m.type, color: m.color }))
+    findAndWrapAll(container, targets, (target) => {
+      const t = target as typeof targets[number]
+      const span = document.createElement('span')
+      span.className = t.type === 'bold' ? 'ocr-mark mark-bold' : `ocr-mark mark-underline-${t.color || 'yellow'}`
+      span.dataset.markId = t.id; span.dataset.markType = t.type
+      return span
+    }, 'ocr-mark')
+    const handleCtx = (e: MouseEvent) => {
+      container.querySelectorAll('.ocr-mark[data-mark-id]').forEach(el => {
+        const r = el.getBoundingClientRect()
+        if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+          e.preventDefault(); e.stopPropagation()
+          setMarkMenu({ x: e.clientX, y: e.clientY, markId: (el as HTMLElement).dataset.markId!, markType: (el as HTMLElement).dataset.markType || '' })
+        }
+      })
     }
-  }, [onTextSelect])
+    container.addEventListener('contextmenu', handleCtx)
+    return () => container.removeEventListener('contextmenu', handleCtx)
+  }, [marks, html])
 
   if (error) return <div className="empty-state"><span>DOCX 解析失败：{error}</span></div>
   if (!html) return <div className="empty-state"><span className="loading-spinner" /><span>正在转换 DOCX...</span></div>
 
   return (
-    <div
-      onMouseUp={handleMouseUp}
-      style={{ maxWidth: 800, margin: '0 auto', padding: '32px 40px 80px', fontSize: 'inherit', fontWeight: 'inherit', color: 'inherit', lineHeight: 2, fontFamily: 'var(--font-serif)' }}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <>
+      <div ref={containerRef}
+        style={{ maxWidth: 800, margin: '0 auto', padding: '32px 40px 80px', fontSize: 'inherit', fontWeight: 'inherit', color: 'inherit', lineHeight: 2, fontFamily: 'var(--font-serif)', position: 'relative' }}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+      {markMenu && (
+        <div style={{ position: 'fixed', left: markMenu.x, top: markMenu.y, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, boxShadow: '0 2px 8px rgba(0,0,0,0.15)', zIndex: 100, padding: 4 }}>
+          <button onClick={() => { onRemoveMark?.(markMenu.markId); setMarkMenu(null) }}
+            style={{ padding: '4px 12px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--danger)', width: '100%', textAlign: 'left' }}>
+            取消{markMenu.markType === 'bold' ? '加粗' : '划线'}
+          </button>
+          <button onClick={() => setMarkMenu(null)} style={{ padding: '4px 12px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', width: '100%', textAlign: 'left' }}>关闭</button>
+        </div>
+      )}
+    </>
   )
 }
 
 // Simple text file reader
-function TextFileContent({ absPath }: { absPath: string }) {
+function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRemoveMark, activeSelectionText }: {
+  absPath: string
+  annotations?: Array<{ id: string; selectedText: string }>
+  onAnnotationClick?: (id: string) => void
+  marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
+  onRemoveMark?: (id: string) => void
+  activeSelectionText?: string
+}) {
   const [text, setText] = useState<string | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [markMenu, setMarkMenu] = useState<{ x: number; y: number; markId: string; markType: string } | null>(null)
+
   useEffect(() => {
     window.electronAPI.readFileBuffer(absPath).then(buf => {
       const decoder = new TextDecoder('utf-8')
@@ -753,10 +807,405 @@ function TextFileContent({ absPath }: { absPath: string }) {
     }).catch(() => setText('无法读取文件'))
   }, [absPath])
 
+  // Highlight annotations
+  useAnnotationHighlights(containerRef, annotations || [], onAnnotationClick || (() => {}), [text, annotations])
+
+  // Render marks (underline/bold)
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container || !marks || marks.length === 0) return
+
+    container.querySelectorAll('.ocr-mark').forEach(el => {
+      try {
+        const parent = el.parentNode
+        if (parent) { while (el.firstChild) parent.insertBefore(el.firstChild, el); parent.removeChild(el) }
+      } catch {}
+    })
+    try { container.normalize() } catch {}
+
+    const targets = marks.map(m => ({ text: m.selectedText, id: m.id, type: m.type, color: m.color }))
+    findAndWrapAll(container, targets, (target) => {
+      const t = target as typeof targets[number]
+      const span = document.createElement('span')
+      span.className = t.type === 'bold' ? 'ocr-mark mark-bold' : `ocr-mark mark-underline-${t.color || 'yellow'}`
+      span.dataset.markId = t.id
+      span.dataset.markType = t.type
+      return span
+    }, 'ocr-mark')
+
+    const handleMarkContext = (e: MouseEvent) => {
+      const markEls = container.querySelectorAll('.ocr-mark[data-mark-id]')
+      for (const el of markEls) {
+        const rect = el.getBoundingClientRect()
+        if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+          e.preventDefault(); e.stopPropagation()
+          setMarkMenu({ x: e.clientX, y: e.clientY, markId: (el as HTMLElement).dataset.markId!, markType: (el as HTMLElement).dataset.markType || '' })
+          return
+        }
+      }
+    }
+    container.addEventListener('contextmenu', handleMarkContext)
+    return () => container.removeEventListener('contextmenu', handleMarkContext)
+  }, [marks, text])
+
+  // Highlight active selection
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    container.querySelectorAll('.active-selection-highlight').forEach(el => {
+      const parent = el.parentNode
+      if (parent) { while (el.firstChild) parent.insertBefore(el.firstChild, el); parent.removeChild(el) }
+    })
+    if (!activeSelectionText) return
+    try { container.normalize() } catch {}
+    findAndWrapAll(container, [{ text: activeSelectionText }], () => {
+      const span = document.createElement('span')
+      span.className = 'active-selection-highlight'
+      span.style.cssText = 'background: rgba(200, 149, 108, 0.25); border-radius: 2px;'
+      return span
+    })
+  }, [activeSelectionText, text])
+
   if (!text) return <div style={{ color: 'var(--text-muted)' }}>加载中...</div>
   return (
-    <div className="ocr-markdown-content" style={{ fontSize: 14, lineHeight: 2 }}>
-      <Markdown>{text}</Markdown>
+    <div ref={containerRef} className="ocr-markdown-content" style={{ fontSize: 14, lineHeight: 2, position: 'relative' }}>
+      <Markdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{text}</Markdown>
+      {markMenu && (
+        <div style={{ position: 'fixed', left: markMenu.x, top: markMenu.y, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, boxShadow: '0 2px 8px rgba(0,0,0,0.15)', zIndex: 100, padding: 4 }}>
+          <button onClick={() => { onRemoveMark?.(markMenu.markId); setMarkMenu(null) }}
+            style={{ padding: '4px 12px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--danger)', width: '100%', textAlign: 'left' }}>
+            取消{markMenu.markType === 'bold' ? '加粗' : '划线'}
+          </button>
+          <button onClick={() => setMarkMenu(null)} style={{ padding: '4px 12px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', width: '100%', textAlign: 'left' }}>关闭</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ===== Immersive OCR Reader: page-flip, auto-fill, side page markers =====
+function ImmersiveOcrReader({ text, fontSize, fontWeight, bgHue, bgSat, bgLight, colorDepth,
+  annotations, marks, onAnnotationClick, onRemoveMark, activeSelectionText }: {
+  text: string; fontSize: number; fontWeight: number;
+  bgHue: number; bgSat: number; bgLight: number; colorDepth: number;
+  annotations: Array<{ id: string; selectedText: string }>;
+  marks: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>;
+  onAnnotationClick: (id: string) => void; onRemoveMark: (id: string) => void;
+  activeSelectionText?: string;
+}) {
+  const [spread, setSpread] = useState(0)
+  const [flipDir, setFlipDir] = useState<'none' | 'left' | 'right'>('none')
+
+  // Clean text: strip LaTeX artifacts, parse page markers
+  const parsed = useMemo(() => {
+    const lines: Array<{ text: string; origPage?: number }> = []
+    let currentOrigPage = 1
+    for (let rawLine of text.split('\n')) {
+      const pageMatch = rawLine.match(/^=== 第 (\d+) 页 ===$/)
+      if (pageMatch) { currentOrigPage = parseInt(pageMatch[1]); continue }
+      lines.push({ text: rawLine, origPage: currentOrigPage })
+    }
+    return lines
+  }, [text])
+
+  // Calculate page capacity based on font size and viewport
+  const lineH = fontSize * 1.75
+  const pagePadV = 32
+  const pagePadH = 36
+  const pageH = window.innerHeight - 20  // nearly full screen
+  const pageW = (window.innerWidth / 2) - 1
+  const contentH = pageH - pagePadV * 2
+  const contentW = pageW - pagePadH * 2
+  const charsPerLine = Math.max(10, Math.floor(contentW / fontSize))
+  // Fill page more aggressively — allow slight overflow which CSS will clip
+  const linesPerPage = Math.max(5, Math.floor(contentH / lineH) + 1)
+
+  // Split into visual pages
+  const visualPages = useMemo(() => {
+    const pages: Array<Array<{ text: string; origPage?: number }>> = []
+    let cur: typeof pages[0] = []
+    let count = 0
+    for (const line of parsed) {
+      // Skip pure empty lines at page start
+      if (cur.length === 0 && !line.text.trim()) continue
+      const wrap = Math.max(1, Math.ceil((line.text.length || 1) / charsPerLine))
+      if (count + wrap > linesPerPage && cur.length > 0) {
+        // Don't create a page with less than 3 lines of real content
+        const realLines = cur.filter(l => l.text.trim()).length
+        if (realLines < 3 && pages.length > 0) {
+          // Merge with previous page (allow overflow)
+          pages[pages.length - 1].push(...cur)
+        } else {
+          pages.push(cur)
+        }
+        cur = []; count = 0
+      }
+      cur.push(line); count += wrap
+    }
+    if (cur.length > 0) pages.push(cur)
+    return pages
+  }, [parsed, linesPerPage, charsPerLine])
+
+  const totalSpreads = Math.ceil(visualPages.length / 2)
+
+  // Navigation with animation
+  const goNext = useCallback(() => {
+    if (spread >= totalSpreads - 1) return
+    setFlipDir('right'); setTimeout(() => { setSpread(s => s + 1); setFlipDir('none') }, 250)
+  }, [spread, totalSpreads])
+
+  const goPrev = useCallback(() => {
+    if (spread <= 0) return
+    setFlipDir('left'); setTimeout(() => { setSpread(s => s - 1); setFlipDir('none') }, 250)
+  }, [spread])
+
+  // Keyboard + click navigation
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); goNext() }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); goPrev() }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [goNext, goPrev])
+
+  const leftPage = visualPages[spread * 2]
+  const rightPage = spread * 2 + 1 < visualPages.length ? visualPages[spread * 2 + 1] : null
+
+  const bgColor = `hsl(${bgHue}, ${bgSat}%, ${bgLight}%)`
+  const textColor = bgLight < 50
+    ? `hsl(40, 15%, ${60 + (100 - colorDepth) / 3}%)`
+    : `hsl(30, 20%, ${100 - colorDepth}%)`
+  const markerColor = bgLight < 50 ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.15)'
+
+  // Flip animation style
+  const animStyle = flipDir === 'none' ? {} : {
+    transition: 'transform 0.25s ease, opacity 0.25s ease',
+    transform: flipDir === 'right' ? 'translateX(-20px)' : 'translateX(20px)',
+    opacity: 0.7,
+  }
+
+  const renderPage = (lines: Array<{ text: string; origPage?: number }>, side: 'left' | 'right') => {
+    // Find original page markers for side labels
+    const pageMarkers: Array<{ lineIdx: number; origPage: number }> = []
+    let lastOrig = -1
+    lines.forEach((line, i) => {
+      if (line.origPage !== undefined && line.origPage !== lastOrig) {
+        pageMarkers.push({ lineIdx: i, origPage: line.origPage })
+        lastOrig = line.origPage
+      }
+    })
+
+    // Join lines into markdown text for proper rendering
+    const mdText = lines.map(l => l.text).join('\n')
+
+    return (
+      <div data-page-number={spread * 2 + (side === 'left' ? 1 : 2)} style={{
+        flex: 1, padding: `${pagePadV}px ${pagePadH}px`,
+        background: bgColor, fontSize, fontWeight, color: textColor,
+        lineHeight: 1.75, height: '100vh', overflow: 'hidden', position: 'relative',
+        borderLeft: side === 'right' ? `1px solid ${markerColor}` : 'none',
+        ...animStyle,
+      }}>
+        {/* Original page markers */}
+        {pageMarkers.map(m => (
+          <span key={m.origPage} style={{
+            position: 'absolute', left: 6, top: `${pagePadV + m.lineIdx * lineH}px`,
+            fontSize: 8, color: markerColor, fontWeight: 400,
+            userSelect: 'none', fontStyle: 'italic',
+          }}>
+            {m.origPage}
+          </span>
+        ))}
+        {/* Rendered content */}
+        <div className="ocr-markdown-content" style={{ fontSize, lineHeight: 1.75 }}>
+          <Markdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{mdText}</Markdown>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ width: '100%', height: '100%', background: bgColor, overflow: 'hidden', userSelect: 'text', position: 'relative' }}>
+      {/* Two-page spread */}
+      <div style={{ display: 'flex', width: '100%', height: '100%' }}>
+        {/* Left click zone */}
+        <div onClick={goPrev} style={{ position: 'absolute', left: 0, top: 0, width: '12%', height: '100%', zIndex: 10, cursor: spread > 0 ? 'w-resize' : 'default' }} />
+        {/* Right click zone */}
+        <div onClick={goNext} style={{ position: 'absolute', right: 0, top: 0, width: '12%', height: '100%', zIndex: 10, cursor: spread < totalSpreads - 1 ? 'e-resize' : 'default' }} />
+
+        {leftPage && renderPage(leftPage, 'left')}
+        {rightPage ? renderPage(rightPage, 'right') : (
+          <div style={{ flex: 1, background: bgColor, borderLeft: `1px solid ${markerColor}` }} />
+        )}
+      </div>
+
+      {/* Page indicator — overlaid at bottom center, minimal */}
+      <div style={{
+        position: 'absolute', bottom: 4, left: '50%', transform: 'translateX(-50%)',
+        fontSize: 9, color: markerColor, padding: '2px 8px',
+        borderRadius: 8, background: 'rgba(0,0,0,0.05)',
+      }}>
+        {spread * 2 + 1}{rightPage ? `-${spread * 2 + 2}` : ''} / {visualPages.length}
+      </div>
+    </div>
+  )
+}
+
+// ===== Immersive mode: floating annotation box with note + AI =====
+function ImmersiveAnnotationBox({ toolbar, textSelection, annotations, onAnnotate, onBold, onUnderline, onClose }: {
+  toolbar: { x: number; y: number; text: string; pageNumber: number }
+  textSelection: any
+  annotations: any[]
+  onAnnotate: () => void
+  onBold: () => void
+  onUnderline: (color: string) => void
+  onClose: () => void
+}) {
+  const [noteText, setNoteText] = useState('')
+  const [aiResponse, setAiResponse] = useState('')
+  const [aiLoading, setAiLoading] = useState(false)
+  const { updatePdfMeta } = useLibraryStore()
+
+  const existingAnn = annotations.find((a: any) => a.anchor?.selectedText === textSelection.text)
+  const history = existingAnn?.historyChain || []
+
+  // Save note to annotation
+  const handleSaveNote = async () => {
+    if (!noteText.trim()) return
+    const entry: any = {
+      id: uuid(), type: 'note', content: noteText.trim(),
+      author: 'user', createdAt: new Date().toISOString(),
+    }
+    if (existingAnn) {
+      await updatePdfMeta(meta => ({
+        ...meta,
+        annotations: meta.annotations.map((a: any) =>
+          a.id === existingAnn.id ? { ...a, historyChain: [...a.historyChain, entry], updatedAt: new Date().toISOString() } : a
+        ),
+      }))
+    } else {
+      const newAnn = {
+        id: uuid(),
+        anchor: { pageNumber: toolbar.pageNumber, startOffset: 0, endOffset: textSelection.text.length, selectedText: textSelection.text },
+        historyChain: [entry], style: { color: 'yellow' },
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      }
+      await updatePdfMeta(meta => ({ ...meta, annotations: [...meta.annotations, newAnn] }))
+    }
+    setNoteText('')
+  }
+
+  // Ask AI
+  const handleAskAi = async () => {
+    if (!noteText.trim()) return
+    setAiLoading(true); setAiResponse('')
+    const { selectedAiModel } = useUiStore.getState()
+    const docTitle = useLibraryStore.getState().currentEntry?.title || ''
+    const streamId = uuid()
+    let fullText = ''
+    const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => { if (sid === streamId) { fullText += chunk; setAiResponse(fullText) } })
+    try {
+      await window.electronAPI.aiChatStream(streamId, selectedAiModel, [
+        { role: 'system', content: `你是文献「${docTitle}」的学术导师。简洁回答。` },
+        { role: 'user', content: `选中文本：「${textSelection.text.slice(0, 200)}」\n\n问题：${noteText}` },
+      ])
+    } finally { cleanup() }
+    // Save AI response as annotation
+    if (fullText) {
+      const userEntry: any = { id: uuid(), type: 'question', content: noteText.trim(), author: 'user', createdAt: new Date().toISOString() }
+      const aiEntry: any = { id: uuid(), type: 'ai_qa', content: fullText, userQuery: noteText.trim(), author: 'ai', createdAt: new Date().toISOString() }
+      if (existingAnn) {
+        await updatePdfMeta(meta => ({
+          ...meta,
+          annotations: meta.annotations.map((a: any) =>
+            a.id === existingAnn.id ? { ...a, historyChain: [...a.historyChain, userEntry, aiEntry], updatedAt: new Date().toISOString() } : a
+          ),
+        }))
+      } else {
+        const newAnn = {
+          id: uuid(),
+          anchor: { pageNumber: toolbar.pageNumber, startOffset: 0, endOffset: textSelection.text.length, selectedText: textSelection.text },
+          historyChain: [userEntry, aiEntry], style: { color: 'yellow' },
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        }
+        await updatePdfMeta(meta => ({ ...meta, annotations: [...meta.annotations, newAnn] }))
+      }
+    }
+    setNoteText('')
+    setAiLoading(false)
+  }
+
+  return (
+    <div style={{
+      position: 'fixed',
+      left: Math.max(10, Math.min(toolbar.x - 160, window.innerWidth - 340)),
+      top: Math.min(toolbar.y + 20, window.innerHeight - 350),
+      width: 320, padding: '10px', background: 'var(--bg)', border: '1px solid var(--border)',
+      borderRadius: 10, boxShadow: '0 4px 24px rgba(0,0,0,0.2)', zIndex: 200,
+    }} className="immersive-annotation-box">
+      {/* Selected text */}
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6, padding: '0 2px' }}>
+        「{textSelection.text.slice(0, 50)}{textSelection.text.length > 50 ? '...' : ''}」
+      </div>
+
+      {/* History chain */}
+      {history.length > 0 && (
+        <div style={{ maxHeight: 140, overflow: 'auto', marginBottom: 6 }}>
+          {history.slice(-4).map((h: any) => (
+            <div key={h.id} style={{
+              padding: '4px 8px', marginBottom: 3, borderRadius: 6, fontSize: 11, lineHeight: 1.5,
+              background: h.author === 'user' ? 'var(--accent-soft)' : 'var(--bg-warm)',
+              color: 'var(--text)', borderLeft: h.author === 'ai' ? '2px solid var(--accent)' : 'none',
+            }}>
+              {h.content.slice(0, 200)}{h.content.length > 200 ? '...' : ''}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* AI response streaming */}
+      {aiResponse && (
+        <div style={{ padding: '6px 8px', marginBottom: 6, borderRadius: 6, background: 'var(--bg-warm)', border: '1px solid var(--border-light)', fontSize: 11, lineHeight: 1.6, maxHeight: 150, overflow: 'auto' }}>
+          <ReactMarkdown rehypePlugins={[rehypeRaw]}>{aiResponse}</ReactMarkdown>
+          {aiLoading && <span className="streaming-cursor" />}
+        </div>
+      )}
+
+      {/* Input */}
+      <textarea
+        autoFocus value={noteText} onChange={e => setNoteText(e.target.value)}
+        placeholder="写笔记 / 向 AI 提问..."
+        rows={2}
+        style={{
+          width: '100%', padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 6,
+          fontSize: 12, outline: 'none', resize: 'none', fontFamily: 'var(--font)',
+          background: 'var(--bg-warm)', color: 'var(--text)', lineHeight: 1.5,
+        }}
+        onFocus={e => e.currentTarget.style.borderColor = 'var(--accent)'}
+        onBlur={e => e.currentTarget.style.borderColor = 'var(--border)'}
+        onKeyDown={e => {
+          if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); handleSaveNote() }
+          if (e.key === 'Escape') onClose()
+        }}
+      />
+
+      {/* Action buttons */}
+      <div style={{ display: 'flex', gap: 4, marginTop: 6, justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', gap: 3 }}>
+          <button onClick={onBold} style={{ padding: '3px 8px', fontSize: 10, border: '1px solid var(--border)', borderRadius: 4, background: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>高亮</button>
+          <button onClick={() => onUnderline('yellow')} style={{ padding: '3px 8px', fontSize: 10, border: '1px solid var(--border)', borderRadius: 4, background: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>划线</button>
+        </div>
+        <div style={{ display: 'flex', gap: 3 }}>
+          <button onClick={handleSaveNote} disabled={!noteText.trim()} style={{ padding: '3px 10px', fontSize: 10, border: 'none', borderRadius: 4, background: noteText.trim() ? 'var(--accent)' : 'var(--border)', color: '#fff', cursor: 'pointer' }}>
+            保存笔记
+          </button>
+          <button onClick={handleAskAi} disabled={!noteText.trim() || aiLoading} style={{ padding: '3px 10px', fontSize: 10, border: '1px solid var(--accent)', borderRadius: 4, background: 'var(--accent-soft)', cursor: 'pointer', color: 'var(--accent-hover)' }}>
+            {aiLoading ? '...' : '问 AI'}
+          </button>
+          <button onClick={onClose} style={{ padding: '3px 8px', fontSize: 10, border: '1px solid var(--border)', borderRadius: 4, background: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>x</button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -765,7 +1214,7 @@ type ViewMode = 'pdf' | 'ocr'
 
 export default function PdfViewer() {
   const { currentEntry, currentPdfMeta, updatePdfMeta, updateEntry } = useLibraryStore()
-  const { textSelection, setTextSelection, setActiveAnnotation, glmApiKeyStatus } = useUiStore()
+  const { textSelection, setTextSelection, setActiveAnnotation, glmApiKeyStatus, immersiveMode, darkMode } = useUiStore()
   const [numPages, setNumPages] = useState(0)
   const [scale, setScale] = useState(1.0)
   const [pdfFileUrl, setPdfFileUrl] = useState<string | null>(null)
@@ -794,6 +1243,17 @@ export default function PdfViewer() {
   const setOcrBgLight = (v: number) => lsSet('sj-bgLight', v, _setOcrBgLight)
   const [showBgPicker, setShowBgPicker] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Auto-switch OCR background when dark mode toggles
+  useEffect(() => {
+    if (darkMode && ocrBgLight > 50) {
+      // Switching to dark — apply default dark preset
+      setOcrBgHue(220); setOcrBgSat(10); setOcrBgLight(15)
+    } else if (!darkMode && ocrBgLight < 50) {
+      // Switching to light — apply default light preset
+      setOcrBgHue(40); setOcrBgSat(30); setOcrBgLight(97)
+    }
+  }, [darkMode])
 
   const library = useLibraryStore(s => s.library)
 
@@ -831,6 +1291,16 @@ export default function PdfViewer() {
       id: m.id, type: m.type as 'underline' | 'bold', color: m.color, selectedText: m.selectedText
     }))
   }, [marksJson])
+
+  const handleRemoveMark = useCallback((markId: string) => {
+    document.querySelectorAll(`.ocr-mark[data-mark-id="${markId}"]`).forEach(el => {
+      try {
+        const parent = el.parentNode
+        if (parent) { while (el.firstChild) parent.insertBefore(el.firstChild, el); parent.removeChild(el) }
+      } catch {}
+    })
+    updatePdfMeta(meta => ({ ...meta, marks: (meta.marks || []).filter(m => m.id !== markId) }))
+  }, [updatePdfMeta])
 
   const absPath = currentEntry?.absPath || ''
   const fileExt = absPath.split('.').pop()?.toLowerCase() || ''
@@ -1036,21 +1506,52 @@ export default function PdfViewer() {
     // Position toolbar above selection
     const range = selection.getRangeAt(0)
     const rect = range.getBoundingClientRect()
-    setToolbar({ x: rect.left + rect.width / 2, y: rect.top - 8, text, pageNumber: pageNumber || 1 })
-    setToolbarMode('main')
+
+    const isImmersive = useUiStore.getState().immersiveMode
+    if (isImmersive) {
+      // In immersive mode: set toolbar position for the floating annotation box,
+      // and set textSelection directly (no floating toolbar needed)
+      setToolbar({ x: rect.left + rect.width / 2, y: rect.bottom + 8, text, pageNumber: pageNumber || 1 })
+      setTextSelection({ pageNumber: pageNumber || 1, text, startOffset: 0, endOffset: text.length })
+    } else {
+      setToolbar({ x: rect.left + rect.width / 2, y: rect.top - 8, text, pageNumber: pageNumber || 1 })
+      setToolbarMode('main')
+    }
   }, [])
 
-  // Dismiss toolbar on click outside
+  // Dismiss toolbar on click outside (but not when clicking immersive annotation box)
   useEffect(() => {
     if (!toolbar) return
     const handler = (e: MouseEvent) => {
       const el = e.target as HTMLElement
-      if (el.closest('.floating-toolbar')) return
+      if (el.closest('.floating-toolbar') || el.closest('.immersive-annotation-box')) return
       setToolbar(null)
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [toolbar])
+
+  // ESC to exit immersive mode
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && immersiveMode) {
+        useUiStore.getState().setImmersiveMode(false)
+      }
+    }
+    document.addEventListener('keydown', handleKey)
+    return () => document.removeEventListener('keydown', handleKey)
+  }, [])
+
+  // Also listen for fullscreen exit (browser ESC exits fullscreen before our handler)
+  useEffect(() => {
+    const handleFsChange = () => {
+      if (!document.fullscreenElement && immersiveMode) {
+        useUiStore.getState().setImmersiveMode(false)
+      }
+    }
+    document.addEventListener('fullscreenchange', handleFsChange)
+    return () => document.removeEventListener('fullscreenchange', handleFsChange)
+  }, [])
 
   // Toolbar action: create annotation with color
   const handleToolbarAnnotate = useCallback((color: string) => {
@@ -1244,14 +1745,21 @@ export default function PdfViewer() {
                   display: 'flex', flexDirection: 'column', gap: 4, zIndex: 100,
                   animation: 'bgPickerIn 0.15s ease-out',
                 }}>
-                  {[
+                  {(useUiStore.getState().darkMode ? [
+                    { label: '墨', h: 220, s: 10, l: 15 },
+                    { label: '碳', h: 0, s: 0, l: 12 },
+                    { label: '夜蓝', h: 220, s: 20, l: 18 },
+                    { label: '夜绿', h: 160, s: 15, l: 14 },
+                    { label: '深棕', h: 30, s: 20, l: 16 },
+                    { label: '紫夜', h: 270, s: 12, l: 15 },
+                  ] : [
                     { label: '暖', h: 40, s: 30, l: 97 },
                     { label: '护眼', h: 128, s: 45, l: 88 },
                     { label: '绿', h: 100, s: 25, l: 95 },
                     { label: '蓝', h: 210, s: 20, l: 96 },
                     { label: '灰', h: 0, s: 0, l: 94 },
                     { label: '暗', h: 30, s: 10, l: 88 },
-                  ].map(p => {
+                  ]).map(p => {
                     const active = ocrBgHue === p.h && ocrBgSat === p.s && ocrBgLight === p.l
                     return (
                       <button
@@ -1347,6 +1855,24 @@ export default function PdfViewer() {
             </button>
           )
         )}
+
+        {/* Immersive mode toggle */}
+        <button
+          className="btn btn-sm"
+          style={{ marginLeft: 8 }}
+          onClick={() => {
+            useUiStore.getState().setImmersiveMode(!immersiveMode)
+          }}
+          title={immersiveMode ? '退出沉浸阅读（ESC）' : '沉浸式阅读'}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            {immersiveMode ? (
+              <><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></>
+            ) : (
+              <><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></>
+            )}
+          </svg>
+        </button>
       </div>
 
       {/* OCR Progress */}
@@ -1364,42 +1890,75 @@ export default function PdfViewer() {
 
       {/* ===== PDF View ===== */}
       {viewMode === 'pdf' && isPdf && (
-        <div className="pdf-scroll-area" ref={scrollRef} onMouseUp={handleMouseUp}>
+        <div className="pdf-scroll-area" ref={scrollRef} onMouseUp={handleMouseUp}
+          style={immersiveMode ? { background: '#1a1a1a', padding: 0 } : undefined}
+        >
           {loadError ? (
             <div className="empty-state"><span style={{ fontSize: 32 }}>❌</span><span>{loadError}</span></div>
           ) : !pdfFileUrl ? (
             <div className="empty-state"><span>加载中...</span></div>
           ) : (
             <Document
-              key={currentEntry?.id}
+              key={`${currentEntry?.id}-${immersiveMode ? 'dual' : 'single'}`}
               file={pdfFileUrl}
               onLoadSuccess={onDocumentLoadSuccess}
               onLoadError={onDocumentLoadError}
               loading={<div className="empty-state"><span>解析 PDF...</span></div>}
               error={<div className="empty-state"><span>PDF 解析失败</span></div>}
             >
-              {Array.from({ length: numPages }, (_, i) => (
-                <div key={i + 1} className="pdf-page-wrapper" data-page-number={i + 1} style={{ position: 'relative' }}>
-                  <div style={{
-                    position: 'absolute', top: 4, right: 8, fontSize: 11,
-                    color: '#999', background: 'rgba(255,255,255,0.85)', padding: '2px 8px',
-                    borderRadius: 4, zIndex: 5
-                  }}>
-                    {i + 1}
-                  </div>
-                  <Page
-                    pageNumber={i + 1}
-                    scale={scale}
-                    renderTextLayer={true}
-                    renderAnnotationLayer={false}
-                    loading={
-                      <div style={{ width: 600 * scale, height: 800 * scale, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
-                        第 {i + 1} 页...
+              {immersiveMode ? (
+                /* Dual-page layout for immersive mode */
+                (() => {
+                  const pairs: Array<[number, number | null]> = []
+                  for (let i = 1; i <= numPages; i += 2) {
+                    pairs.push([i, i + 1 <= numPages ? i + 1 : null])
+                  }
+                  const immScale = Math.min((window.innerWidth / 2 - 40) / 600, (window.innerHeight - 60) / 800)
+                  return pairs.map(([left, right]) => (
+                    <div key={left} style={{
+                      display: 'flex', justifyContent: 'center', gap: 4,
+                      minHeight: '100vh', alignItems: 'center', padding: '20px 0',
+                    }}>
+                      <div className="pdf-page-wrapper" data-page-number={left} style={{ position: 'relative', boxShadow: '0 2px 16px rgba(0,0,0,0.3)' }}>
+                        <div style={{ position: 'absolute', top: 4, right: 8, fontSize: 10, color: '#999', background: 'rgba(255,255,255,0.85)', padding: '1px 6px', borderRadius: 4, zIndex: 5 }}>{left}</div>
+                        <Page pageNumber={left} scale={immScale} renderTextLayer={true} renderAnnotationLayer={false}
+                          loading={<div style={{ width: 600 * immScale, height: 800 * immScale, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666' }}>第 {left} 页...</div>} />
                       </div>
-                    }
-                  />
-                </div>
-              ))}
+                      {right && (
+                        <div className="pdf-page-wrapper" data-page-number={right} style={{ position: 'relative', boxShadow: '0 2px 16px rgba(0,0,0,0.3)' }}>
+                          <div style={{ position: 'absolute', top: 4, right: 8, fontSize: 10, color: '#999', background: 'rgba(255,255,255,0.85)', padding: '1px 6px', borderRadius: 4, zIndex: 5 }}>{right}</div>
+                          <Page pageNumber={right} scale={immScale} renderTextLayer={true} renderAnnotationLayer={false}
+                            loading={<div style={{ width: 600 * immScale, height: 800 * immScale, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666' }}>第 {right} 页...</div>} />
+                        </div>
+                      )}
+                    </div>
+                  ))
+                })()
+              ) : (
+                /* Normal single-page scroll layout */
+                Array.from({ length: numPages }, (_, i) => (
+                  <div key={i + 1} className="pdf-page-wrapper" data-page-number={i + 1} style={{ position: 'relative' }}>
+                    <div style={{
+                      position: 'absolute', top: 4, right: 8, fontSize: 11,
+                      color: '#999', background: 'rgba(255,255,255,0.85)', padding: '2px 8px',
+                      borderRadius: 4, zIndex: 5
+                    }}>
+                      {i + 1}
+                    </div>
+                    <Page
+                      pageNumber={i + 1}
+                      scale={scale}
+                      renderTextLayer={true}
+                      renderAnnotationLayer={false}
+                      loading={
+                        <div style={{ width: 600 * scale, height: 800 * scale, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
+                          第 {i + 1} 页...
+                        </div>
+                      }
+                    />
+                  </div>
+                ))
+              )}
             </Document>
           )}
         </div>
@@ -1425,17 +1984,31 @@ export default function PdfViewer() {
           alignItems: 'stretch', padding: 0,
           background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
           fontSize: ocrFontSize, fontWeight: ocrFontWeight,
-          color: `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
+          color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
         }} onMouseUp={handleMouseUp}>
-          <DocxViewer key={currentEntry?.id} absPath={absPath} onTextSelect={setTextSelection} />
+          <DocxViewer key={currentEntry?.id} absPath={absPath} onTextSelect={setTextSelection}
+            annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
+            onAnnotationClick={(id) => setActiveAnnotation(id)}
+            marks={memoizedMarks}
+            onRemoveMark={handleRemoveMark}
+            activeSelectionText={textSelection?.text}
+          />
         </div>
       )}
 
       {/* ===== Text View ===== */}
       {viewMode === 'pdf' && !editMode && isText && (
         <div className="pdf-scroll-area" style={{ alignItems: 'stretch', padding: 0, background: 'var(--bg-warm)' }} onMouseUp={handleMouseUp}>
-          <div style={{ maxWidth: 800, margin: '0 auto', padding: '40px 48px', minHeight: '100%' }}>
-            <TextFileContent key={currentEntry?.id} absPath={absPath} />
+          <div style={{ maxWidth: 800, margin: '0 auto', padding: '40px 48px', minHeight: '100%' }} data-page-number="1">
+            <TextFileContent
+              key={currentEntry?.id}
+              absPath={absPath}
+              annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
+              onAnnotationClick={(id) => setActiveAnnotation(id)}
+              marks={currentPdfMeta?.marks?.map(m => ({ id: m.id, type: m.type, color: m.color, selectedText: m.selectedText })) || []}
+              onRemoveMark={handleRemoveMark}
+              activeSelectionText={textSelection?.text}
+            />
           </div>
         </div>
       )}
@@ -1454,7 +2027,7 @@ export default function PdfViewer() {
               border: 'none', outline: 'none', resize: 'none',
               fontSize: ocrFontSize, fontWeight: ocrFontWeight,
               lineHeight: 2, fontFamily: 'var(--font-serif)',
-              color: `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
+              color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
               background: 'transparent',
             }}
           />
@@ -1470,58 +2043,61 @@ export default function PdfViewer() {
       {viewMode === 'ocr' && !editMode && (
         <div
           className="pdf-scroll-area"
-          style={{ background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`, alignItems: 'stretch', padding: 0 }}
+          style={{
+            background: immersiveMode ? `hsl(${ocrBgHue}, ${Math.max(ocrBgSat - 10, 0)}%, ${Math.max(ocrBgLight - 8, 10)}%)` : `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
+            alignItems: 'stretch', padding: 0,
+          }}
           onMouseUp={handleMouseUp}
         >
-          <div style={{
-            maxWidth: 800, margin: '0 auto', padding: '40px 48px 80px',
-            background: 'transparent', minHeight: '100%',
-            fontSize: ocrFontSize, fontWeight: ocrFontWeight,
-            color: `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
-          }}>
-            <div style={{
-              textAlign: 'center', marginBottom: 32, paddingBottom: 20,
-              borderBottom: '2px solid #333'
-            }}>
-              <h2 style={{ fontSize: ocrFontSize + 4, lineHeight: 1.4, marginBottom: 6 }}>
-                {currentEntry?.title || ''}
-              </h2>
-              <div style={{ fontSize: 12, color: '#999', fontWeight: 400 }}>
-                OCR 识别文本
-                {ocrFilePath && <span> · {ocrFilePath.split(/[/\\]/).pop()}</span>}
-              </div>
-            </div>
-
-            <OcrContent
+          {immersiveMode ? (
+            <ImmersiveOcrReader
               text={ocrFullText || ''}
+              fontSize={ocrFontSize}
+              fontWeight={ocrFontWeight}
+              bgHue={ocrBgHue} bgSat={ocrBgSat} bgLight={ocrBgLight}
+              colorDepth={ocrColorDepth}
               annotations={memoizedAnnotations}
-              onAnnotationClick={(id) => setActiveAnnotation(id)}
-              activeSelectionText={toolbar?.text || textSelection?.text || undefined}
               marks={memoizedMarks}
-              onRemoveMark={(markId) => {
-                // Immediately remove from DOM for instant feedback
-                document.querySelectorAll(`.ocr-mark[data-mark-id="${markId}"]`).forEach(el => {
-                  try {
-                    const parent = el.parentNode
-                    if (parent) {
-                      while (el.firstChild) parent.insertBefore(el.firstChild, el)
-                      parent.removeChild(el)
-                    }
-                  } catch {}
-                })
-                // Then persist the removal
-                updatePdfMeta(meta => ({
-                  ...meta,
-                  marks: (meta.marks || []).filter(m => m.id !== markId),
-                }))
-              }}
+              onAnnotationClick={(id) => setActiveAnnotation(id)}
+              onRemoveMark={handleRemoveMark}
+              activeSelectionText={toolbar?.text || textSelection?.text || undefined}
             />
-          </div>
+          ) : (
+            /* Normal single-column OCR layout */
+            <div style={{
+              maxWidth: 800, margin: '0 auto', padding: '40px 48px 80px',
+              background: 'transparent', minHeight: '100%',
+              fontSize: ocrFontSize, fontWeight: ocrFontWeight,
+              color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
+            }}>
+              <div style={{
+                textAlign: 'center', marginBottom: 32, paddingBottom: 20,
+                borderBottom: '2px solid #333'
+              }}>
+                <h2 style={{ fontSize: ocrFontSize + 4, lineHeight: 1.4, marginBottom: 6 }}>
+                  {currentEntry?.title || ''}
+                </h2>
+                <div style={{ fontSize: 12, color: '#999', fontWeight: 400 }}>
+                  OCR 识别文本
+                  {ocrFilePath && <span> · {ocrFilePath.split(/[/\\]/).pop()}</span>}
+                </div>
+              </div>
+
+              <OcrContent
+                text={ocrFullText || ''}
+                annotations={memoizedAnnotations}
+                onAnnotationClick={(id) => setActiveAnnotation(id)}
+                activeSelectionText={toolbar?.text || textSelection?.text || undefined}
+                marks={memoizedMarks}
+                onRemoveMark={handleRemoveMark}
+              />
+            </div>
+          )}
         </div>
       )}
 
-      {/* ===== Floating Toolbar ===== */}
-      {toolbar && (
+      {/* ===== Floating Toolbar (hidden in immersive mode — annotation box takes over) ===== */}
+      {toolbar && !immersiveMode && (
         <div className="floating-toolbar" style={{ left: toolbar.x, top: toolbar.y, transform: 'translateX(-50%) translateY(-100%)' }}>
           {toolbarMode === 'main' && (
             <>
@@ -1571,6 +2147,19 @@ export default function PdfViewer() {
             />
           )}
         </div>
+      )}
+
+      {/* ===== Immersive Mode: floating annotation panel ===== */}
+      {immersiveMode && textSelection && toolbar && (
+        <ImmersiveAnnotationBox
+          toolbar={toolbar}
+          textSelection={textSelection}
+          annotations={currentPdfMeta?.annotations || []}
+          onAnnotate={() => handleToolbarAnnotate('yellow')}
+          onBold={() => handleToolbarBold()}
+          onUnderline={(color) => handleToolbarUnderline(color)}
+          onClose={() => { setToolbar(null); setTextSelection(null) }}
+        />
       )}
     </div>
   )

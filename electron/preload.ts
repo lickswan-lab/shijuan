@@ -102,6 +102,9 @@ const electronAPI = {
   lectureAliyunToken: (akid: string, aksecret: string): Promise<{ success: boolean; token?: string; expireTime?: number; error?: string }> =>
     ipcRenderer.invoke('lecture-aliyun-token', akid, aksecret),
 
+  // === Theme ===
+  setTitleBarTheme: (dark: boolean) => ipcRenderer.send('set-title-bar-theme', dark),
+
   // === Agent ===
   agentLoadMemory: (): Promise<{ success: boolean; content?: string; error?: string }> =>
     ipcRenderer.invoke('agent-load-memory'),

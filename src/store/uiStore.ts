@@ -50,6 +50,10 @@ interface UiState {
   rightPanel: 'annotation' | 'agent'
   hermesHasInsight: boolean  // notification badge
 
+  // Immersive reading
+  immersiveMode: boolean
+  darkMode: boolean
+
   // Actions
   toggleSidebar: () => void
   toggleAnnotationPanel: () => void
@@ -70,6 +74,8 @@ interface UiState {
   setAnnotationColor: (color: string) => void
   setRightPanel: (panel: 'annotation' | 'agent') => void
   setHermesHasInsight: (has: boolean) => void
+  setImmersiveMode: (on: boolean) => void
+  toggleDarkMode: () => void
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -91,6 +97,8 @@ export const useUiStore = create<UiState>((set) => ({
   annotationColor: 'yellow',
   rightPanel: 'annotation',
   hermesHasInsight: false,
+  immersiveMode: false,
+  darkMode: (() => { try { return localStorage.getItem('sj-darkMode') === 'true' } catch { return false } })(),
 
   toggleSidebar: () => set(s => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   toggleAnnotationPanel: () => set(s => ({ annotationPanelCollapsed: !s.annotationPanelCollapsed, rightPanel: 'annotation' as const })),
@@ -108,7 +116,24 @@ export const useUiStore = create<UiState>((set) => ({
   setActiveLecture: (id) => set({ activeLectureId: id, activeMemoId: null, activeReadingLogDate: null }),
   setIsRecording: (recording) => set({ isRecording: recording }),
   setSelectedAiModel: (model) => set({ selectedAiModel: model }),
+  toggleDarkMode: () => set(s => {
+    const next = !s.darkMode
+    document.documentElement.classList.toggle('dark-mode', next)
+    try { localStorage.setItem('sj-darkMode', String(next)) } catch {}
+    // Update title bar
+    window.electronAPI?.setTitleBarTheme?.(next)
+    return { darkMode: next }
+  }),
   setAnnotationColor: (color) => set({ annotationColor: color }),
+  setImmersiveMode: (on) => {
+    set({ immersiveMode: on, sidebarCollapsed: on, annotationPanelCollapsed: on })
+    // Toggle browser fullscreen
+    if (on) {
+      document.documentElement.requestFullscreen?.().catch(() => {})
+    } else {
+      document.exitFullscreen?.().catch(() => {})
+    }
+  },
   setRightPanel: (panel) => set({ rightPanel: panel, annotationPanelCollapsed: false, ...(panel === 'agent' ? { hermesHasInsight: false } : {}) }),
   setHermesHasInsight: (has) => set({ hermesHasInsight: has }),
 }))

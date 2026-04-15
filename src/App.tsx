@@ -11,6 +11,7 @@ import ErrorBoundary from './components/ErrorBoundary'
 import { useLibraryStore } from './store/libraryStore'
 import { useUiStore } from './store/uiStore'
 import './styles/globals.css'
+import 'katex/dist/katex.min.css'
 
 // Shared position state for the floating toggle (persists across show/hide)
 const floatingTogglePos = { x: -1, y: -1 }
@@ -68,7 +69,14 @@ function DraggableToggle({ onClick }: { onClick: () => void }) {
 
 export default function App() {
   const { library, initLibrary } = useLibraryStore()
-  const { setGlmApiKeyStatus, annotationPanelCollapsed, toggleAnnotationPanel, activeMemoId, activeReadingLogDate, activeLectureId, rightPanel, setRightPanel } = useUiStore()
+  const { setGlmApiKeyStatus, annotationPanelCollapsed, toggleAnnotationPanel, activeMemoId, activeReadingLogDate, activeLectureId, rightPanel, setRightPanel, immersiveMode } = useUiStore()
+
+  // Apply dark mode on mount
+  useEffect(() => {
+    const dark = useUiStore.getState().darkMode
+    document.documentElement.classList.toggle('dark-mode', dark)
+    window.electronAPI?.setTitleBarTheme?.(dark)
+  }, [])
 
   // Init library on mount
   useEffect(() => {
@@ -107,11 +115,13 @@ export default function App() {
 
   return (
     <div className="app-layout">
-      <TopBar />
+      {!immersiveMode && <TopBar />}
       <div className="app-body">
-        <ErrorBoundary fallbackLabel="侧栏">
-          <FileTree />
-        </ErrorBoundary>
+        {!immersiveMode && (
+          <ErrorBoundary fallbackLabel="侧栏">
+            <FileTree />
+          </ErrorBoundary>
+        )}
 
         {/* Main content: Lecture / Reading log / Memo editor / PDF viewer */}
         {activeLectureId ? (
@@ -148,12 +158,12 @@ export default function App() {
             <ErrorBoundary fallbackLabel="PDF 阅读器">
               <PdfViewer />
             </ErrorBoundary>
-            {!annotationPanelCollapsed && rightPanel === 'annotation' && (
+            {!immersiveMode && !annotationPanelCollapsed && rightPanel === 'annotation' && (
               <ErrorBoundary fallbackLabel="注释面板">
                 <AnnotationPanel />
               </ErrorBoundary>
             )}
-            {!annotationPanelCollapsed && rightPanel === 'agent' && (
+            {!immersiveMode && !annotationPanelCollapsed && rightPanel === 'agent' && (
               <ErrorBoundary fallbackLabel="Agent">
                 <div style={{ width: 360, flexShrink: 0, borderLeft: '1px solid var(--border-light)', height: '100%' }}>
                   <AgentPanel />
