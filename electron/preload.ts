@@ -19,6 +19,10 @@ const electronAPI = {
     webUtils.getPathForFile(file),
   checkFileExists: (absPath: string): Promise<boolean> =>
     ipcRenderer.invoke('check-file-exists', absPath),
+  fullTextSearch: (query: string, libraryData: any): Promise<Array<{
+    entryId: string; entryTitle: string; type: 'ocr' | 'annotation';
+    text: string; pageNumber?: number; annotationId?: string;
+  }>> => ipcRenderer.invoke('full-text-search', query, libraryData),
 
   // PDF meta (stored centrally by entry ID)
   loadPdfMeta: (entryId: string): Promise<PdfMeta | null> =>

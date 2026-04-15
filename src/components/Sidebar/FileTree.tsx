@@ -340,8 +340,30 @@ function FolderItem({ folder }: { folder: VirtualFolder }) {
 
 // ===== Library panel (file tree content) =====
 function LibraryPanel() {
-  const { library, importFiles, importFolder, createFolder, moveEntryToFolder, removeEntry, deleteEntry } = useLibraryStore()
+  const { library, importFiles, importFolder, createFolder, moveEntryToFolder, removeEntry, deleteEntry, openEntry } = useLibraryStore()
   const [searchQuery, setSearchQuery] = useState('')
+  const [fullTextResults, setFullTextResults] = useState<Array<{
+    entryId: string; entryTitle: string; type: 'ocr' | 'annotation';
+    text: string; pageNumber?: number; annotationId?: string;
+  }>>([])
+  const [searching, setSearching] = useState(false)
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Debounced full-text search
+  useEffect(() => {
+    if (!searchQuery || searchQuery.length < 2) { setFullTextResults([]); return }
+    if (searchTimer.current) clearTimeout(searchTimer.current)
+    searchTimer.current = setTimeout(async () => {
+      if (!window.electronAPI?.fullTextSearch || !library) return
+      setSearching(true)
+      try {
+        const results = await window.electronAPI.fullTextSearch(searchQuery, library)
+        setFullTextResults(results)
+      } catch { setFullTextResults([]) }
+      setSearching(false)
+    }, 400)  // 400ms debounce
+    return () => { if (searchTimer.current) clearTimeout(searchTimer.current) }
+  }, [searchQuery, library])
   const [newFolderName, setNewFolderName] = useState<string | null>(null)
   const newFolderInputRef = useRef<HTMLInputElement>(null)
   const [multiSelect, setMultiSelect] = useState(false)
@@ -426,7 +448,7 @@ function LibraryPanel() {
       <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-light)' }}>
         <input
           type="text"
-          placeholder="搜索文献..."
+          placeholder="搜索文献 / 全文搜索..."
           value={searchQuery}
           onChange={e => setSearchQuery(e.target.value)}
           style={{
@@ -436,6 +458,55 @@ function LibraryPanel() {
           }}
         />
       </div>
+
+      {/* Full-text search results */}
+      {searchQuery.length >= 2 && fullTextResults.length > 0 && (
+        <div style={{ maxHeight: 240, overflow: 'auto', borderBottom: '1px solid var(--border-light)', background: 'var(--bg-warm)' }}>
+          <div style={{ padding: '4px 12px', fontSize: 10, color: 'var(--text-muted)', fontWeight: 600 }}>
+            全文搜索 {searching ? '...' : `(${fullTextResults.length})`}
+          </div>
+          {fullTextResults.map((r, i) => (
+            <div key={i}
+              onClick={() => {
+                const entry = library?.entries.find(e => e.id === r.entryId)
+                if (entry) {
+                  openEntry(entry)
+                  if (r.annotationId) {
+                    useUiStore.getState().setActiveAnnotation(r.annotationId)
+                  }
+                }
+                setSearchQuery('')
+                setFullTextResults([])
+              }}
+              style={{
+                padding: '6px 12px', cursor: 'pointer', fontSize: 11,
+                borderBottom: '1px solid var(--border-light)',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              <div style={{ fontWeight: 500, color: 'var(--text)', marginBottom: 2, display: 'flex', gap: 4, alignItems: 'center' }}>
+                <span style={{
+                  fontSize: 9, padding: '1px 4px', borderRadius: 3,
+                  background: r.type === 'ocr' ? 'var(--accent-soft)' : 'rgba(139,177,116,0.15)',
+                  color: r.type === 'ocr' ? 'var(--accent)' : 'var(--success)',
+                }}>
+                  {r.type === 'ocr' ? '正文' : '注释'}
+                </span>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.entryTitle}</span>
+              </div>
+              <div style={{ color: 'var(--text-muted)', fontSize: 10, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {r.text}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {searchQuery.length >= 2 && searching && fullTextResults.length === 0 && (
+        <div style={{ padding: '8px 12px', fontSize: 11, color: 'var(--text-muted)', borderBottom: '1px solid var(--border-light)' }}>
+          <span className="loading-spinner" style={{ marginRight: 6 }} />搜索中...
+        </div>
+      )}
 
       {/* Action buttons */}
       <div style={{ padding: '6px 10px', display: 'flex', gap: 4, borderBottom: '1px solid var(--border-light)' }}>

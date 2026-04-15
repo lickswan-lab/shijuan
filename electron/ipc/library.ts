@@ -235,6 +235,111 @@ export function registerLibraryIpc(): void {
     }
   })
 
+  // Full-text search across OCR texts and annotations
+  ipcMain.handle('full-text-search', async (_event, query: string, libraryData: any) => {
+    if (!query || query.length < 2) return []
+
+    const results: Array<{
+      entryId: string
+      entryTitle: string
+      type: 'ocr' | 'annotation'
+      text: string        // matched snippet
+      pageNumber?: number
+      annotationId?: string
+    }> = []
+
+    const q = query.toLowerCase()
+    const entries = libraryData?.entries || []
+
+    for (const entry of entries) {
+      // Search OCR text
+      try {
+        const ocrPath = entry.absPath.replace(/\.pdf$/i, '.ocr.txt')
+        const ocrText = await fs.readFile(ocrPath, 'utf-8')
+        const lines = ocrText.split('\n')
+        let currentPage = 1
+        for (const line of lines) {
+          const pageMatch = line.match(/^=== 第 (\d+) 页 ===$/)
+          if (pageMatch) { currentPage = parseInt(pageMatch[1]); continue }
+          if (line.toLowerCase().includes(q)) {
+            // Extract snippet around match
+            const idx = line.toLowerCase().indexOf(q)
+            const start = Math.max(0, idx - 30)
+            const end = Math.min(line.length, idx + query.length + 30)
+            results.push({
+              entryId: entry.id,
+              entryTitle: entry.title,
+              type: 'ocr',
+              text: (start > 0 ? '...' : '') + line.slice(start, end) + (end < line.length ? '...' : ''),
+              pageNumber: currentPage,
+            })
+            if (results.filter(r => r.entryId === entry.id && r.type === 'ocr').length >= 5) break
+          }
+        }
+      } catch { /* no OCR file */ }
+
+      // Search TXT/MD/DOCX content (read raw file for text types)
+      if (/\.(txt|md)$/i.test(entry.absPath)) {
+        try {
+          const text = await fs.readFile(entry.absPath, 'utf-8')
+          const lines = text.split('\n')
+          for (const line of lines) {
+            if (line.toLowerCase().includes(q)) {
+              const idx = line.toLowerCase().indexOf(q)
+              const start = Math.max(0, idx - 30)
+              const end = Math.min(line.length, idx + query.length + 30)
+              results.push({
+                entryId: entry.id,
+                entryTitle: entry.title,
+                type: 'ocr',
+                text: (start > 0 ? '...' : '') + line.slice(start, end) + (end < line.length ? '...' : ''),
+              })
+              if (results.filter(r => r.entryId === entry.id && r.type === 'ocr').length >= 5) break
+            }
+          }
+        } catch { /* file not readable */ }
+      }
+
+      // Search annotations
+      try {
+        const metaContent = await fs.readFile(metaPath(entry.id), 'utf-8')
+        const meta = JSON.parse(metaContent) as PdfMeta
+        for (const ann of (meta.annotations || [])) {
+          // Search selected text
+          if (ann.anchor.selectedText.toLowerCase().includes(q)) {
+            results.push({
+              entryId: entry.id,
+              entryTitle: entry.title,
+              type: 'annotation',
+              text: ann.anchor.selectedText.slice(0, 80),
+              pageNumber: ann.anchor.pageNumber,
+              annotationId: ann.id,
+            })
+          }
+          // Search history chain content
+          for (const h of (ann.historyChain || [])) {
+            if (h.content.toLowerCase().includes(q)) {
+              const idx = h.content.toLowerCase().indexOf(q)
+              const start = Math.max(0, idx - 20)
+              const end = Math.min(h.content.length, idx + query.length + 20)
+              results.push({
+                entryId: entry.id,
+                entryTitle: entry.title,
+                type: 'annotation',
+                text: (start > 0 ? '...' : '') + h.content.slice(start, end) + (end < h.content.length ? '...' : ''),
+                pageNumber: ann.anchor.pageNumber,
+                annotationId: ann.id,
+              })
+              break  // one match per annotation is enough
+            }
+          }
+        }
+      } catch { /* no meta */ }
+    }
+
+    return results.slice(0, 50)  // limit results
+  })
+
   // Export file with save dialog
   ipcMain.handle('export-file', async (_event, defaultName: string, filters: Array<{ name: string; extensions: string[] }>, content: string | Buffer) => {
     try {
