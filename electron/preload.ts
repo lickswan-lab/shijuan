@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { Library, PdfMeta, HistoryEntry, ReadingLogEvent, ReadingLog, LectureSession, AgentConversation, HermesSkill, HermesInsight } from '../src/types/library'
 
 const electronAPI = {
@@ -13,6 +13,10 @@ const electronAPI = {
     ipcRenderer.invoke('import-files'),
   importFolder: (): Promise<string[]> =>
     ipcRenderer.invoke('import-folder'),
+  scanDroppedPaths: (paths: string[]): Promise<string[]> =>
+    ipcRenderer.invoke('scan-dropped-paths', paths),
+  getPathForFile: (file: File): string =>
+    webUtils.getPathForFile(file),
   checkFileExists: (absPath: string): Promise<boolean> =>
     ipcRenderer.invoke('check-file-exists', absPath),
 

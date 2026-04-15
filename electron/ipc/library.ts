@@ -136,6 +136,39 @@ export function registerLibraryIpc(): void {
     return files
   })
 
+  // Scan dropped paths: expand folders recursively, filter supported file types
+  ipcMain.handle('scan-dropped-paths', async (_event, rawPaths: string[]) => {
+    const allFiles: string[] = []
+
+    async function scanDir(dir: string) {
+      try {
+        const entries = await fs.readdir(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          if (entry.name.startsWith('.')) continue
+          const full = path.join(dir, entry.name)
+          if (entry.isDirectory()) {
+            await scanDir(full)
+          } else if (isSupported(entry.name)) {
+            allFiles.push(full)
+          }
+        }
+      } catch { /* skip inaccessible dirs */ }
+    }
+
+    for (const p of rawPaths) {
+      try {
+        const stat = await fs.stat(p)
+        if (stat.isDirectory()) {
+          await scanDir(p)
+        } else if (isSupported(p)) {
+          allFiles.push(p)
+        }
+      } catch { /* skip inaccessible */ }
+    }
+
+    return allFiles
+  })
+
   // Check if a file still exists at its original path
   ipcMain.handle('check-file-exists', async (_event, absPath: string) => {
     try {

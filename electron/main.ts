@@ -80,14 +80,28 @@ function createWindow(): BrowserWindow {
   return mainWindow
 }
 
-// ===== Single instance lock — prevent opening multiple copies =====
+// ===== Single instance lock =====
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
-  // Another instance is already running, quit immediately
-  app.quit()
+  // dialog can only be used after app is ready
+  app.whenReady().then(() => {
+    const choice = dialog.showMessageBoxSync({
+      type: 'warning',
+      title: '拾卷',
+      message: '拾卷已经在运行中',
+      detail: '检测到拾卷已有一个实例正在运行。\n\n你可以结束旧进程并重新启动，或者取消本次启动去找到已打开的窗口。',
+      buttons: ['结束旧进程并重启', '取消'],
+      defaultId: 0,
+      cancelId: 1,
+    })
+    if (choice === 0) {
+      app.releaseSingleInstanceLock()
+      app.relaunch()
+    }
+    app.quit()
+  })
 } else {
   app.on('second-instance', () => {
-    // User tried to open a second instance — focus existing window
     const wins = BrowserWindow.getAllWindows()
     if (wins.length > 0) {
       const win = wins[0]
@@ -117,7 +131,6 @@ if (!gotTheLock) {
         }
       })
     } catch (err: any) {
-      // Show error dialog if app fails to start (e.g. missing runtime libraries)
       dialog.showErrorBox(
         '拾卷启动失败',
         `应用无法启动，可能缺少运行库。\n\n请尝试安装 Visual C++ 运行库：\nhttps://aka.ms/vs/17/release/vc_redist.x64.exe\n\n错误信息：${err?.message || err}`
@@ -127,6 +140,6 @@ if (!gotTheLock) {
   })
 
   app.on('window-all-closed', () => {
-    app.quit()  // Always quit when all windows closed (including macOS)
+    app.quit()
   })
 }

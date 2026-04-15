@@ -68,8 +68,78 @@ function DraggableToggle({ onClick }: { onClick: () => void }) {
 }
 
 export default function App() {
-  const { library, initLibrary } = useLibraryStore()
+  const { library, initLibrary, importByPaths } = useLibraryStore()
   const { setGlmApiKeyStatus, annotationPanelCollapsed, toggleAnnotationPanel, activeMemoId, activeReadingLogDate, activeLectureId, rightPanel, setRightPanel, immersiveMode, dualPageMode } = useUiStore()
+  const [dropActive, setDropActive] = useState(false)
+  const dropCounter = useRef(0)  // track nested drag enter/leave
+
+  // Global drag-drop file import
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    // Only respond to external file drops (not internal app drags)
+    if (e.dataTransfer.types.includes('Files')) {
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'copy'
+    }
+  }, [])
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes('Files')) {
+      e.preventDefault()
+      dropCounter.current++
+      setDropActive(true)
+    }
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    dropCounter.current--
+    if (dropCounter.current <= 0) {
+      dropCounter.current = 0
+      setDropActive(false)
+    }
+  }, [])
+
+  const SUPPORTED_EXTS = /\.(pdf|docx?|epub|html?|txt|md)$/i
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault()
+    dropCounter.current = 0
+    setDropActive(false)
+
+    const files = e.dataTransfer.files
+    if (!files || files.length === 0) return
+
+    // Get file paths using Electron's webUtils API (File.path is deprecated in Electron 28+)
+    const rawPaths: string[] = []
+    for (let i = 0; i < files.length; i++) {
+      try {
+        const p = window.electronAPI.getPathForFile(files[i])
+        if (p) rawPaths.push(p)
+      } catch {
+        // Fallback: try legacy .path property
+        const p = (files[i] as any).path
+        if (p) rawPaths.push(p)
+      }
+    }
+
+    if (rawPaths.length === 0) return
+
+    try {
+      // Expand folders + filter supported types via main process
+      const resolved = window.electronAPI?.scanDroppedPaths
+        ? await window.electronAPI.scanDroppedPaths(rawPaths)
+        : rawPaths.filter(p => /\.(pdf|docx?|epub|html?|txt|md)$/i.test(p))
+
+      if (resolved.length > 0) {
+        const added = await importByPaths(resolved)
+        if (added > 0) {
+          // Switch to library tab to show imported files
+          useUiStore.getState().setSidebarTab('library')
+        }
+      }
+    } catch (err) {
+      console.error('[drag-drop] error:', err)
+    }
+  }, [importByPaths])
 
   // Apply dark mode on mount
   useEffect(() => {
@@ -114,7 +184,24 @@ export default function App() {
   }
 
   return (
-    <div className="app-layout">
+    <div className="app-layout"
+      onDragOver={handleDragOver}
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* Drop overlay */}
+      {dropActive && (
+        <div className="drop-overlay">
+          <div className="drop-overlay-content">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            <span>松开以导入文献</span>
+            <span style={{ fontSize: 12, opacity: 0.6 }}>支持 PDF、DOCX、EPUB、HTML、TXT、Markdown</span>
+          </div>
+        </div>
+      )}
       {!immersiveMode && <TopBar />}
       <div className="app-body">
         {!immersiveMode && (

@@ -13,6 +13,7 @@ interface LibraryState {
   initLibrary: () => Promise<void>
   importFiles: (folderId?: string) => Promise<number>
   importFolder: (folderId?: string) => Promise<number>
+  importByPaths: (paths: string[], folderId?: string) => Promise<number>
   removeEntry: (id: string) => Promise<void>
   deleteEntry: (id: string) => Promise<{ success: boolean; error?: string }>
   openEntry: (entry: LibraryEntry) => Promise<void>
@@ -152,6 +153,31 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
     await window.electronAPI.saveLibrary(library)
     set({ library: { ...library } })
+    return added
+  },
+
+  // Import by absolute paths (for drag-drop — no file dialog)
+  importByPaths: async (paths: string[], folderId?: string) => {
+    if (!paths.length) return 0
+    const { library } = get()
+    if (!library) return 0
+
+    let added = 0
+    for (const absPath of paths) {
+      if (library.entries.some(e => e.absPath === absPath)) continue
+      const fileName = absPath.split(/[/\\]/).pop()?.replace(/\.(pdf|docx?|epub|html?|txt|md)$/i, '') || ''
+      const entry: LibraryEntry = {
+        id: uuid(), absPath, title: fileName, authors: [], tags: [], notes: '',
+        folderId, ocrStatus: 'none', addedAt: new Date().toISOString()
+      }
+      library.entries.push(entry)
+      added++
+    }
+
+    if (added > 0) {
+      await window.electronAPI.saveLibrary(library)
+      set({ library: { ...library } })
+    }
     return added
   },
 
