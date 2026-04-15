@@ -73,6 +73,81 @@ export default function App() {
   const [dropActive, setDropActive] = useState(false)
   const dropCounter = useRef(0)  // track nested drag enter/leave
 
+  // ===== Global keyboard shortcuts =====
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const ctrl = e.ctrlKey || e.metaKey
+      const shift = e.shiftKey
+
+      // Don't intercept when typing in input/textarea
+      const tag = (e.target as HTMLElement)?.tagName
+      const isEditing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable
+
+      // Ctrl+, → Open settings
+      if (ctrl && e.key === ',') {
+        e.preventDefault()
+        useUiStore.getState().setShowSettings(true)
+        return
+      }
+
+      // Ctrl+B → Toggle sidebar
+      if (ctrl && e.key === 'b' && !shift) {
+        e.preventDefault()
+        useUiStore.getState().toggleSidebar()
+        return
+      }
+
+      // Ctrl+Shift+F → Focus search (full-text)
+      if (ctrl && shift && e.key === 'F') {
+        e.preventDefault()
+        useUiStore.getState().setSidebarTab('library')
+        // Focus the search input
+        setTimeout(() => {
+          const input = document.querySelector('.sidebar input[type="text"]') as HTMLInputElement
+          if (input) { input.focus(); input.select() }
+        }, 50)
+        return
+      }
+
+      // Ctrl+D → Toggle dark mode
+      if (ctrl && e.key === 'd' && !isEditing) {
+        e.preventDefault()
+        useUiStore.getState().toggleDarkMode()
+        return
+      }
+
+      // Ctrl+O → Import files
+      if (ctrl && e.key === 'o') {
+        e.preventDefault()
+        useLibraryStore.getState().importFiles()
+        return
+      }
+
+      // Ctrl+N → New memo
+      if (ctrl && e.key === 'n' && !shift) {
+        e.preventDefault()
+        useUiStore.getState().setSidebarTab('memos')
+        useLibraryStore.getState().createMemo()
+        return
+      }
+
+      // Ctrl+J → Toggle annotation panel
+      if (ctrl && e.key === 'j') {
+        e.preventDefault()
+        useUiStore.getState().toggleAnnotationPanel()
+        return
+      }
+
+      // Ctrl+1/2/3 → Switch sidebar tabs
+      if (ctrl && e.key === '1' && !isEditing) { e.preventDefault(); useUiStore.getState().setSidebarTab('library'); return }
+      if (ctrl && e.key === '2' && !isEditing) { e.preventDefault(); useUiStore.getState().setSidebarTab('memos'); return }
+      if (ctrl && e.key === '3' && !isEditing) { e.preventDefault(); useUiStore.getState().setSidebarTab('reading-log'); return }
+    }
+
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [])
+
   // Global drag-drop file import
   const handleDragOver = useCallback((e: React.DragEvent) => {
     // Only respond to external file drops (not internal app drags)
