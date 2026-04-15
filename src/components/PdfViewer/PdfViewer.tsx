@@ -584,10 +584,11 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
   )
 }
 
-// HTML viewer: uses iframe for proper rendering + postMessage for text selection
-function HtmlViewer({ absPath, onTextSelect }: {
+// HTML viewer: uses iframe for proper rendering + postMessage for text selection + annotation highlights
+function HtmlViewer({ absPath, onTextSelect, annotations }: {
   absPath: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
+  annotations?: Array<{ id: string; selectedText: string }>
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
 
@@ -607,14 +608,40 @@ function HtmlViewer({ absPath, onTextSelect }: {
     return () => window.removeEventListener('message', handler)
   }, [onTextSelect])
 
-  // Load HTML and inject selection script
+  // Load HTML and inject selection script + annotation highlights
   useEffect(() => {
     if (!iframeRef.current) return
     window.electronAPI.readFileBuffer(absPath).then(buf => {
       const decoder = new TextDecoder('utf-8')
       let html = decoder.decode(buf)
 
-      // Inject a small script before </body> to capture text selection
+      // Build annotation highlight data
+      const annTexts = (annotations || []).map(a => a.selectedText).filter(t => t.length >= 2)
+      const annHighlightJS = annTexts.length > 0 ? `
+var annTexts = ${JSON.stringify(annTexts)};
+function highlightAnnotations() {
+  var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+  var textNodes = [];
+  while (walker.nextNode()) textNodes.push(walker.currentNode);
+  annTexts.forEach(function(searchText) {
+    textNodes.forEach(function(node) {
+      var idx = node.textContent.indexOf(searchText);
+      if (idx >= 0 && node.parentNode && !node.parentNode.classList?.contains('sj-ann-hl')) {
+        var range = document.createRange();
+        range.setStart(node, idx);
+        range.setEnd(node, idx + searchText.length);
+        var span = document.createElement('span');
+        span.className = 'sj-ann-hl';
+        span.style.cssText = 'background: rgba(200,149,108,0.2); border-bottom: 2px solid rgba(200,149,108,0.5); border-radius: 2px;';
+        range.surroundContents(span);
+      }
+    });
+  });
+}
+setTimeout(highlightAnnotations, 200);
+` : ''
+
+      // Inject script before </body>
       const selectionScript = `
 <script>
 document.addEventListener('mouseup', function() {
@@ -626,6 +653,7 @@ document.addEventListener('mouseup', function() {
     }
   }
 });
+${annHighlightJS}
 </script>`
 
       if (html.includes('</body>')) {
@@ -638,7 +666,7 @@ document.addEventListener('mouseup', function() {
     }).catch(() => {
       if (iframeRef.current) iframeRef.current.srcdoc = '<p>无法加载文件</p>'
     })
-  }, [absPath])
+  }, [absPath, annotations])
 
   return (
     <iframe
@@ -2131,7 +2159,9 @@ export default function PdfViewer() {
       {/* ===== HTML View (iframe with postMessage for text selection) ===== */}
       {viewMode === 'pdf' && isHtml && (
         <div className="pdf-scroll-area" style={{ padding: 0 }}>
-          <HtmlViewer key={currentEntry?.id} absPath={absPath} onTextSelect={setTextSelection} />
+          <HtmlViewer key={currentEntry?.id} absPath={absPath} onTextSelect={setTextSelection}
+            annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
+          />
         </div>
       )}
 
