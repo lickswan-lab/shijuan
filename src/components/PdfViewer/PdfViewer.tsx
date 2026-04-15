@@ -1944,8 +1944,8 @@ export default function PdfViewer() {
           )
         )}
 
-        {/* Immersive mode toggle */}
-        <button
+        {/* Immersive mode toggle — hidden for now, feature in development */}
+        {false && <button
           className="btn btn-sm"
           style={{ marginLeft: 8 }}
           onClick={() => {
@@ -1960,7 +1960,7 @@ export default function PdfViewer() {
               <><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></>
             )}
           </svg>
-        </button>
+        </button>}
       </div>
 
       {/* OCR Progress */}
