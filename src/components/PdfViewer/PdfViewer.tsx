@@ -1113,38 +1113,44 @@ function ImmersiveAnnotationBox({ toolbar, textSelection, annotations, onAnnotat
   const handleAskAi = async () => {
     if (!noteText.trim()) return
     setAiLoading(true); setAiResponse('')
-    const docTitle = useLibraryStore.getState().currentEntry?.title || ''
-    const streamId = uuid()
-    let fullText = ''
-    const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => { if (sid === streamId) { fullText += chunk; setAiResponse(fullText) } })
     try {
-      await window.electronAPI.aiChatStream(streamId, selectedAiModel, [
-        { role: 'system', content: `你是文献「${docTitle}」的学术导师。简洁回答。` },
-        { role: 'user', content: `选中文本：「${textSelection.text.slice(0, 200)}」\n\n问题：${noteText}` },
-      ])
-    } finally { cleanup() }
-    // Save AI response as annotation
-    if (fullText) {
-      const userEntry: any = { id: uuid(), type: 'question', content: noteText.trim(), author: 'user', createdAt: new Date().toISOString() }
-      const aiEntry: any = { id: uuid(), type: 'ai_qa', content: fullText, userQuery: noteText.trim(), author: 'ai', createdAt: new Date().toISOString(), aiModel: selectedAiModel }
-      if (existingAnn) {
-        await updatePdfMeta(meta => ({
-          ...meta,
-          annotations: meta.annotations.map((a: any) =>
-            a.id === existingAnn.id ? { ...a, historyChain: [...a.historyChain, userEntry, aiEntry], updatedAt: new Date().toISOString() } : a
-          ),
-        }))
-      } else {
-        const newAnn = {
-          id: uuid(),
-          anchor: { pageNumber: toolbar.pageNumber, startOffset: 0, endOffset: textSelection.text.length, selectedText: textSelection.text },
-          historyChain: [userEntry, aiEntry], style: { color: 'yellow' },
-          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      const model = useUiStore.getState().selectedAiModel
+      const docTitle = useLibraryStore.getState().currentEntry?.title || ''
+      const streamId = uuid()
+      let fullText = ''
+      const cleanup = window.electronAPI.onAiStreamChunk((sid: string, chunk: string) => { if (sid === streamId) { fullText += chunk; setAiResponse(fullText) } })
+      try {
+        await window.electronAPI.aiChatStream(streamId, model, [
+          { role: 'system', content: `你是文献「${docTitle}」的学术导师。简洁回答。` },
+          { role: 'user', content: `选中文本：「${textSelection.text.slice(0, 200)}」\n\n问题：${noteText}` },
+        ])
+      } finally { cleanup() }
+      // Save AI response as annotation
+      if (fullText) {
+        const userEntry: any = { id: uuid(), type: 'question', content: noteText.trim(), author: 'user', createdAt: new Date().toISOString() }
+        const aiEntry: any = { id: uuid(), type: 'ai_qa', content: fullText, userQuery: noteText.trim(), author: 'ai', createdAt: new Date().toISOString(), aiModel: model }
+        if (existingAnn) {
+          await updatePdfMeta(meta => ({
+            ...meta,
+            annotations: meta.annotations.map((a: any) =>
+              a.id === existingAnn.id ? { ...a, historyChain: [...a.historyChain, userEntry, aiEntry], updatedAt: new Date().toISOString() } : a
+            ),
+          }))
+        } else {
+          const newAnn = {
+            id: uuid(),
+            anchor: { pageNumber: toolbar.pageNumber, startOffset: 0, endOffset: textSelection.text.length, selectedText: textSelection.text },
+            historyChain: [userEntry, aiEntry], style: { color: 'yellow' },
+            createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          }
+          await updatePdfMeta(meta => ({ ...meta, annotations: [...meta.annotations, newAnn] }))
         }
-        await updatePdfMeta(meta => ({ ...meta, annotations: [...meta.annotations, newAnn] }))
       }
+      setNoteText('')
+    } catch (err) {
+      console.error('[ImmersiveAnnotationBox] AI error:', err)
+      setAiResponse('AI 调用失败，请检查 API Key 设置')
     }
-    setNoteText('')
     setAiLoading(false)
   }
 
@@ -1525,6 +1531,8 @@ export default function PdfViewer() {
 
   // Floating toolbar state
   const [toolbar, setToolbar] = useState<{ x: number; y: number; text: string; pageNumber: number } | null>(null)
+  const toolbarRef = useRef(toolbar)
+  toolbarRef.current = toolbar  // always keep ref in sync
   const [toolbarMode, setToolbarMode] = useState<'main' | 'underline-color' | 'append-list'>('main')
 
   const PRESET_COLORS = [
@@ -1631,13 +1639,13 @@ export default function PdfViewer() {
 
   // Toolbar action: create annotation with color
   const handleToolbarAnnotate = useCallback((color: string) => {
-    if (!toolbar) return
-    // Clear any active annotation so this creates a NEW annotation, not appending
+    const tb = toolbarRef.current
+    if (!tb) return
     setActiveAnnotation(null)
-    setTextSelection({ pageNumber: toolbar.pageNumber, text: toolbar.text, startOffset: 0, endOffset: toolbar.text.length })
+    setTextSelection({ pageNumber: tb.pageNumber, text: tb.text, startOffset: 0, endOffset: tb.text.length })
     useUiStore.getState().setAnnotationColor(color)
     setToolbar(null)
-  }, [toolbar, setTextSelection, setActiveAnnotation])
+  }, [setTextSelection, setActiveAnnotation])
 
   // Toolbar action: append to existing annotation
   const handleToolbarAppend = useCallback((annotationId: string) => {
@@ -1680,13 +1688,14 @@ export default function PdfViewer() {
 
   // Toolbar action: add underline mark
   const handleToolbarUnderline = useCallback((color: string) => {
-    if (!toolbar || !currentEntry) return
+    const tb = toolbarRef.current
+    if (!tb || !currentEntry) { console.warn('[handleToolbarUnderline] no toolbar or entry'); return }
     const mark: import('../../types/library').TextMark = {
       id: crypto.randomUUID(),
       type: 'underline',
       color,
-      pageNumber: toolbar.pageNumber,
-      selectedText: toolbar.text,
+      pageNumber: tb.pageNumber,
+      selectedText: tb.text,
       createdAt: new Date().toISOString(),
     }
     updatePdfMeta(meta => ({
@@ -1696,16 +1705,17 @@ export default function PdfViewer() {
     window.getSelection()?.removeAllRanges()
     // In immersive mode, keep annotation box open (no floating toolbar to dismiss)
     if (!useUiStore.getState().immersiveMode) setToolbar(null)
-  }, [toolbar, currentEntry, updatePdfMeta])
+  }, [currentEntry, updatePdfMeta])
 
   // Toolbar action: add bold mark
   const handleToolbarBold = useCallback(() => {
-    if (!toolbar || !currentEntry) return
+    const tb = toolbarRef.current
+    if (!tb || !currentEntry) { console.warn('[handleToolbarBold] no toolbar or entry'); return }
     const mark: import('../../types/library').TextMark = {
       id: crypto.randomUUID(),
       type: 'bold',
-      pageNumber: toolbar.pageNumber,
-      selectedText: toolbar.text,
+      pageNumber: tb.pageNumber,
+      selectedText: tb.text,
       createdAt: new Date().toISOString(),
     }
     updatePdfMeta(meta => ({
@@ -1715,7 +1725,7 @@ export default function PdfViewer() {
     window.getSelection()?.removeAllRanges()
     // In immersive mode, keep annotation box open
     if (!useUiStore.getState().immersiveMode) setToolbar(null)
-  }, [toolbar, currentEntry, updatePdfMeta])
+  }, [currentEntry, updatePdfMeta])
 
   // ===== RENDER =====
 
