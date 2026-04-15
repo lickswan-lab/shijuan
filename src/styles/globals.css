@@ -408,7 +408,7 @@ html, body, #root {
 .floating-toggle {
   position: fixed;
   right: 18px;
-  top: 60px;
+  top: 50%;
   z-index: 50;
   width: 36px; height: 36px;
   border-radius: 50%;

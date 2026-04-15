@@ -30,21 +30,20 @@ function cleanOcrText(raw: string): string {
     // Remove image bbox references
     .replace(/!\[[^\]]*\]\(page=\d+,\s*bbox=\[[^\]]*\]\)/g, '')
     .replace(/!\[\]\([^)]*\)/g, '')
-    // Remaining LaTeX: try to extract readable content, or remove
-    .replace(/\$([^$]{1,80})\$/g, (_m, inner) => {
-      // If it's mostly normal text with minor LaTeX, extract text
-      const cleaned = inner
-        .replace(/\\textbf\{([^}]+)\}/g, '**$1**')
-        .replace(/\\textit\{([^}]+)\}/g, '*$1*')
-        .replace(/\\[a-zA-Z]+\{([^}]*)\}/g, '$1')
-        .replace(/\\\\/g, '')
-        .replace(/[\\{}^_]/g, '')
-        .trim()
-      return cleaned || ''
-    })
+    // Remaining $...$ LaTeX: keep for remark-math / KaTeX to render
+    // (don't strip — let the math renderer handle it)
     // Bare superscripts without $ wrapper: ^{83} or ^83
     .replace(/\^{?\{(\d+)\}?}/g, (_m, n) => toSuper(n))
     .replace(/\^(\d{1,3})(?=\D|$)/g, (_m, n) => toSuper(n))
+    // Wrap bare LaTeX commands (not inside $) in $ for remark-math:
+    // Match sequences starting with \ followed by known math commands and their args
+    .replace(/(?<!\$)(\\(?:frac|partial|left|right|sqrt|sum|int|prod|lim|infty|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|omega|pi|phi|psi|nabla|cdot|times|div|pm|mp|leq|geq|neq|approx|equiv|subset|supset|cap|cup|in|notin|forall|exists|rightarrow|leftarrow|Rightarrow|Leftarrow|vec|hat|bar|dot|tilde|overline|underline)(?:\s*[\{^_][\s\S]*?)?)(?=[\u4e00-\u9fff\s,，。.;；:：!！?？)]|$)/gm, (match) => {
+      // Only wrap if it looks like a real LaTeX expression (has braces or operators)
+      if (match.includes('{') || match.includes('^') || match.includes('_')) {
+        return ` $${match.trim()}$ `
+      }
+      return match
+    })
     // Clean up excessive blank lines
     .replace(/\n{3,}/g, '\n\n')
     .trim()
@@ -1029,10 +1028,12 @@ function ImmersiveOcrReader({ text, fontSize, fontWeight, bgHue, bgSat, bgLight,
     <div style={{ width: '100%', height: '100%', background: bgColor, overflow: 'hidden', userSelect: 'text', position: 'relative' }}>
       {/* Two-page spread */}
       <div style={{ display: 'flex', width: '100%', height: '100%' }}>
-        {/* Left click zone */}
-        <div onClick={goPrev} style={{ position: 'absolute', left: 0, top: 0, width: '12%', height: '100%', zIndex: 10, cursor: spread > 0 ? 'w-resize' : 'default' }} />
+        {/* Left click zone — pointer-events only when not selecting text */}
+        <div onClick={goPrev} onMouseDown={e => { if (window.getSelection()?.toString()) e.stopPropagation() }}
+          style={{ position: 'absolute', left: 0, top: 0, width: '12%', height: '100%', zIndex: 10, cursor: spread > 0 ? 'w-resize' : 'default', pointerEvents: 'auto' }} />
         {/* Right click zone */}
-        <div onClick={goNext} style={{ position: 'absolute', right: 0, top: 0, width: '12%', height: '100%', zIndex: 10, cursor: spread < totalSpreads - 1 ? 'e-resize' : 'default' }} />
+        <div onClick={goNext} onMouseDown={e => { if (window.getSelection()?.toString()) e.stopPropagation() }}
+          style={{ position: 'absolute', right: 0, top: 0, width: '12%', height: '100%', zIndex: 10, cursor: spread < totalSpreads - 1 ? 'e-resize' : 'default', pointerEvents: 'auto' }} />
 
         {leftPage && renderPage(leftPage, 'left')}
         {rightPage ? renderPage(rightPage, 'right') : (
@@ -1690,7 +1691,8 @@ export default function PdfViewer() {
       marks: [...(meta.marks || []), mark],
     }))
     window.getSelection()?.removeAllRanges()
-    setToolbar(null)
+    // In immersive mode, keep annotation box open (no floating toolbar to dismiss)
+    if (!useUiStore.getState().immersiveMode) setToolbar(null)
   }, [toolbar, currentEntry, updatePdfMeta])
 
   // Toolbar action: add bold mark
@@ -1708,7 +1710,8 @@ export default function PdfViewer() {
       marks: [...(meta.marks || []), mark],
     }))
     window.getSelection()?.removeAllRanges()
-    setToolbar(null)
+    // In immersive mode, keep annotation box open
+    if (!useUiStore.getState().immersiveMode) setToolbar(null)
   }, [toolbar, currentEntry, updatePdfMeta])
 
   // ===== RENDER =====
@@ -2092,7 +2095,7 @@ export default function PdfViewer() {
           <div className="pdf-scroll-area" style={{
             alignItems: 'stretch', padding: 0,
             background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
-          }}>
+          }} onMouseUp={handleMouseUp}>
             <ImmersiveOcrReader
               text={txtContent}
               fontSize={ocrFontSize}
