@@ -46,6 +46,16 @@
     },
     "portable": {
       "artifactName": "拾卷-${version}-便携版.exe"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "zip",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "拾卷-${version}-${arch}.${ext}"
     }
   },
   "dependencies": {

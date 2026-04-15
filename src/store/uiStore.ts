@@ -53,6 +53,7 @@ interface UiState {
   // Immersive reading
   immersiveMode: boolean
   darkMode: boolean
+  dualPageMode: boolean  // true = dual-page spread in immersive; false = single-page + side annotation
 
   // Actions
   toggleSidebar: () => void
@@ -76,6 +77,7 @@ interface UiState {
   setHermesHasInsight: (has: boolean) => void
   setImmersiveMode: (on: boolean) => void
   toggleDarkMode: () => void
+  setDualPageMode: (on: boolean) => void
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -99,6 +101,7 @@ export const useUiStore = create<UiState>((set) => ({
   hermesHasInsight: false,
   immersiveMode: false,
   darkMode: (() => { try { return localStorage.getItem('sj-darkMode') === 'true' } catch { return false } })(),
+  dualPageMode: (() => { try { const v = localStorage.getItem('sj-dualPageMode'); return v !== null ? v === 'true' : true } catch { return true } })(),
 
   toggleSidebar: () => set(s => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   toggleAnnotationPanel: () => set(s => ({ annotationPanelCollapsed: !s.annotationPanelCollapsed, rightPanel: 'annotation' as const })),
@@ -126,7 +129,14 @@ export const useUiStore = create<UiState>((set) => ({
   }),
   setAnnotationColor: (color) => set({ annotationColor: color }),
   setImmersiveMode: (on) => {
-    set({ immersiveMode: on, sidebarCollapsed: on, annotationPanelCollapsed: on })
+    const { dualPageMode } = useUiStore.getState()
+    set({
+      immersiveMode: on,
+      sidebarCollapsed: on,
+      // In single-page mode (dualPageMode=false), keep annotation panel open for side annotation
+      annotationPanelCollapsed: on ? dualPageMode : true,
+      rightPanel: 'annotation' as const,
+    })
     // Toggle browser fullscreen
     if (on) {
       document.documentElement.requestFullscreen?.().catch(() => {})
@@ -134,6 +144,7 @@ export const useUiStore = create<UiState>((set) => ({
       document.exitFullscreen?.().catch(() => {})
     }
   },
+  setDualPageMode: (on) => { set({ dualPageMode: on }); try { localStorage.setItem('sj-dualPageMode', String(on)) } catch {} },
   setRightPanel: (panel) => set({ rightPanel: panel, annotationPanelCollapsed: false, ...(panel === 'agent' ? { hermesHasInsight: false } : {}) }),
   setHermesHasInsight: (has) => set({ hermesHasInsight: has }),
 }))

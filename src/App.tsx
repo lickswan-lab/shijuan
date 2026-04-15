@@ -69,7 +69,7 @@ function DraggableToggle({ onClick }: { onClick: () => void }) {
 
 export default function App() {
   const { library, initLibrary } = useLibraryStore()
-  const { setGlmApiKeyStatus, annotationPanelCollapsed, toggleAnnotationPanel, activeMemoId, activeReadingLogDate, activeLectureId, rightPanel, setRightPanel, immersiveMode } = useUiStore()
+  const { setGlmApiKeyStatus, annotationPanelCollapsed, toggleAnnotationPanel, activeMemoId, activeReadingLogDate, activeLectureId, rightPanel, setRightPanel, immersiveMode, dualPageMode } = useUiStore()
 
   // Apply dark mode on mount
   useEffect(() => {
@@ -158,19 +158,21 @@ export default function App() {
             <ErrorBoundary fallbackLabel="PDF 阅读器">
               <PdfViewer />
             </ErrorBoundary>
-            {!immersiveMode && !annotationPanelCollapsed && rightPanel === 'annotation' && (
+            {/* Show annotation panel: always when not immersive, or in immersive single-page mode */}
+            {(!immersiveMode || !dualPageMode) && !annotationPanelCollapsed && rightPanel === 'annotation' && (
               <ErrorBoundary fallbackLabel="注释面板">
                 <AnnotationPanel />
               </ErrorBoundary>
             )}
-            {!immersiveMode && !annotationPanelCollapsed && rightPanel === 'agent' && (
+            {(!immersiveMode || !dualPageMode) && !annotationPanelCollapsed && rightPanel === 'agent' && (
               <ErrorBoundary fallbackLabel="Agent">
                 <div style={{ width: 360, flexShrink: 0, borderLeft: '1px solid var(--border-light)', height: '100%' }}>
                   <AgentPanel />
                 </div>
               </ErrorBoundary>
             )}
-            {annotationPanelCollapsed && (
+            {/* Show floating toggle to open annotation panel */}
+            {annotationPanelCollapsed && (!immersiveMode || !dualPageMode) && (
               <DraggableToggle onClick={toggleAnnotationPanel} />
             )}
           </>

@@ -326,6 +326,42 @@ export default function TopBar() {
               </div>
             </div>
 
+            {/* Dual-page mode setting */}
+            <div style={{
+              padding: '12px 14px', marginBottom: 8, borderRadius: 8,
+              border: '1px solid var(--border)', background: 'var(--bg-warm)',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>沉浸式双页模式</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                    {useUiStore.getState().dualPageMode
+                      ? '开启：沉浸式阅读时以双页对开展示'
+                      : '关闭：沉浸式为单页全屏，右侧可呼出注释栏'}
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    const next = !useUiStore.getState().dualPageMode
+                    useUiStore.getState().setDualPageMode(next)
+                    // Force re-render
+                    setKeyInputs(prev => ({ ...prev }))
+                  }}
+                  style={{
+                    width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
+                    background: useUiStore.getState().dualPageMode ? 'var(--accent)' : 'var(--border)',
+                    position: 'relative', transition: 'background 0.2s', flexShrink: 0,
+                  }}
+                >
+                  <span style={{
+                    position: 'absolute', top: 2, width: 20, height: 20, borderRadius: 10,
+                    background: '#fff', transition: 'left 0.2s',
+                    left: useUiStore.getState().dualPageMode ? 22 : 2,
+                  }} />
+                </button>
+              </div>
+            </div>
+
             {/* AI Context Window Setting */}
             <div style={{
               padding: '12px 14px', marginBottom: 8, borderRadius: 8,

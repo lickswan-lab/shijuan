@@ -41,7 +41,7 @@ function ContextMenu({ pos, items, onClose }: ContextMenuProps) {
             padding: '7px 14px', fontSize: 12, cursor: 'pointer',
             color: item.danger ? 'var(--danger)' : 'var(--text)',
           }}
-          onMouseEnter={e => (e.currentTarget.style.background = item.danger ? '#fef2f2' : 'var(--bg-warm)')}
+          onMouseEnter={e => (e.currentTarget.style.background = item.danger ? 'var(--bg-hover)' : 'var(--bg-warm)')}
           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
         >
           {item.label}
@@ -217,7 +217,7 @@ function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep,
           <div
             onClick={onDeleteStep}
             style={{ padding: '7px 14px', fontSize: 12, cursor: 'pointer', color: 'var(--danger)' }}
-            onMouseEnter={e => (e.currentTarget.style.background = '#fef2f2')}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
           >
             删除原文件...
@@ -231,7 +231,7 @@ function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep,
           <div
             onClick={onDeleteConfirm}
             style={{ padding: '7px 14px', fontSize: 12, cursor: 'pointer', color: 'var(--danger)', fontWeight: 500 }}
-            onMouseEnter={e => (e.currentTarget.style.background = '#fef2f2')}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
           >
             确认删除

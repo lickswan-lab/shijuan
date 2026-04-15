@@ -130,7 +130,7 @@ function MemoFolderItem({
           <div
             onClick={() => { onDeleteFolder(folder.id); setFolderMenu(null) }}
             style={{ padding: '7px 14px', fontSize: 12, cursor: 'pointer', color: 'var(--danger)' }}
-            onMouseEnter={e => (e.currentTarget.style.background = '#fef2f2')}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
           >
             删除文件夹
@@ -497,7 +497,7 @@ export default function MemoList() {
           <div
             onClick={() => handleDelete(menuMemoId)}
             style={{ padding: '7px 14px', fontSize: 12, cursor: 'pointer', color: 'var(--danger)' }}
-            onMouseEnter={e => (e.currentTarget.style.background = '#fef2f2')}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
           >
             删除笔记

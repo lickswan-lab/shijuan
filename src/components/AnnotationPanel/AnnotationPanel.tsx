@@ -97,8 +97,8 @@ function GhostReaderCard({ suggestion, onDismiss }: { suggestion: string | null;
   return (
     <div style={{
       margin: '4px 8px 8px', padding: '8px 12px', borderRadius: 8,
-      background: 'linear-gradient(135deg, #f0e6ff, var(--bg-warm))',
-      border: '1px solid #d4b8ff', position: 'relative',
+      background: 'linear-gradient(135deg, var(--bg-hover), var(--bg-warm))',
+      border: '1px solid var(--border)', position: 'relative',
     }}>
       <button onClick={onDismiss} style={{
         position: 'absolute', top: 4, right: 6, background: 'none', border: 'none',
@@ -246,8 +246,8 @@ function FeedbackBubble({ text, loading, onKeep, onDismiss, onExpand }: {
   return (
     <div style={{
       padding: '10px 14px', margin: '0 14px 10px',
-      background: '#F5F8F5', borderRadius: 8,
-      border: '1px solid #E0E8E0',
+      background: 'var(--bg-warm)', borderRadius: 8,
+      border: '1px solid var(--border)',
       fontSize: 13, lineHeight: 1.7, color: 'var(--text-secondary)',
       flexShrink: 0,
     }}>

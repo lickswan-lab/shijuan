@@ -179,7 +179,7 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: #EDE8DF;
+  background: var(--bg-warm);
 }
 
 .pdf-toolbar {
@@ -268,6 +268,14 @@ html, body, #root {
   background: #F5F8F5;
   border-left: 3px solid #9DB5B2;
 }
+:root.dark-mode .history-entry.user-note { background: #2a2520; border-left-color: var(--accent); }
+:root.dark-mode .history-entry.user-question { background: #2a2618; border-left-color: #D4A84B; }
+:root.dark-mode .history-entry.user-stance { background: #25202e; border-left-color: #8B6CC1; }
+:root.dark-mode .history-entry.user-link { background: #1e2430; border-left-color: #5B9BD5; }
+:root.dark-mode .history-entry.ai-response { background: #1e2820; border-left-color: var(--success); }
+:root.dark-mode .history-entry.ai-qa { background: #2a2618; border-left-color: var(--warning); }
+:root.dark-mode .history-entry.ai-feedback { background: #202520; border-left-color: #9DB5B2; }
+
 .history-entry-header {
   display: flex;
   justify-content: space-between;
@@ -517,7 +525,7 @@ html, body, #root {
 .ocr-markdown-content h3 { font-size: 16px; }
 
 .ocr-markdown-content p { margin-bottom: 8px; }
-.ocr-markdown-content strong { font-weight: 700; color: #2A2318; }
+.ocr-markdown-content strong { font-weight: 700; color: var(--text); }
 .ocr-markdown-content em { font-style: italic; }
 
 .ocr-markdown-content blockquote {
