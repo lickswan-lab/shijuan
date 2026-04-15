@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, shell, ipcMain } from 'electron'
+import { app, BrowserWindow, Menu, shell, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 import { registerFileSystemIpc } from './ipc/fileSystem'
@@ -80,27 +80,53 @@ function createWindow(): BrowserWindow {
   return mainWindow
 }
 
-// Register all IPC handlers
-registerFileSystemIpc()
-registerLibraryIpc()
-registerAiApiIpc()
-registerPdfOperationsIpc()
-registerReadingLogIpc()
-registerLectureIpc()
-registerAgentIpc()
-
-app.whenReady().then(() => {
-  const mainWindow = createWindow()
-  startMidnightScheduler(mainWindow)
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      const win = createWindow()
-      startMidnightScheduler(win)
+// ===== Single instance lock — prevent opening multiple copies =====
+const gotTheLock = app.requestSingleInstanceLock()
+if (!gotTheLock) {
+  // Another instance is already running, quit immediately
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    // User tried to open a second instance — focus existing window
+    const wins = BrowserWindow.getAllWindows()
+    if (wins.length > 0) {
+      const win = wins[0]
+      if (win.isMinimized()) win.restore()
+      win.focus()
     }
   })
-})
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
-})
+  // Register all IPC handlers
+  registerFileSystemIpc()
+  registerLibraryIpc()
+  registerAiApiIpc()
+  registerPdfOperationsIpc()
+  registerReadingLogIpc()
+  registerLectureIpc()
+  registerAgentIpc()
+
+  app.whenReady().then(() => {
+    try {
+      const mainWindow = createWindow()
+      startMidnightScheduler(mainWindow)
+
+      app.on('activate', () => {
+        if (BrowserWindow.getAllWindows().length === 0) {
+          const win = createWindow()
+          startMidnightScheduler(win)
+        }
+      })
+    } catch (err: any) {
+      // Show error dialog if app fails to start (e.g. missing runtime libraries)
+      dialog.showErrorBox(
+        '拾卷启动失败',
+        `应用无法启动，可能缺少运行库。\n\n请尝试安装 Visual C++ 运行库：\nhttps://aka.ms/vs/17/release/vc_redist.x64.exe\n\n错误信息：${err?.message || err}`
+      )
+      app.quit()
+    }
+  })
+
+  app.on('window-all-closed', () => {
+    app.quit()  // Always quit when all windows closed (including macOS)
+  })
+}

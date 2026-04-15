@@ -170,7 +170,7 @@ export default function TopBar() {
       {showSettings && (
         <div className="modal-overlay" onClick={() => setShowSettings(false)}>
           <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 520, maxHeight: '80vh', overflow: 'auto' }}>
-            <h3>AI 模型设置</h3>
+            <h3>设置</h3>
             <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
               配置各 AI 供应商的 API Key。OCR 功能需要智谱 GLM，问答对话支持所有已配置的模型。
             </div>
@@ -326,41 +326,7 @@ export default function TopBar() {
               </div>
             </div>
 
-            {/* Dual-page mode setting */}
-            <div style={{
-              padding: '12px 14px', marginBottom: 8, borderRadius: 8,
-              border: '1px solid var(--border)', background: 'var(--bg-warm)',
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>沉浸式双页模式</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                    {useUiStore.getState().dualPageMode
-                      ? '开启：沉浸式阅读时以双页对开展示'
-                      : '关闭：沉浸式为单页全屏，右侧可呼出注释栏'}
-                  </div>
-                </div>
-                <button
-                  onClick={() => {
-                    const next = !useUiStore.getState().dualPageMode
-                    useUiStore.getState().setDualPageMode(next)
-                    // Force re-render
-                    setKeyInputs(prev => ({ ...prev }))
-                  }}
-                  style={{
-                    width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
-                    background: useUiStore.getState().dualPageMode ? 'var(--accent)' : 'var(--border)',
-                    position: 'relative', transition: 'background 0.2s', flexShrink: 0,
-                  }}
-                >
-                  <span style={{
-                    position: 'absolute', top: 2, width: 20, height: 20, borderRadius: 10,
-                    background: '#fff', transition: 'left 0.2s',
-                    left: useUiStore.getState().dualPageMode ? 22 : 2,
-                  }} />
-                </button>
-              </div>
-            </div>
+            {/* Dual-page mode setting — hidden for now, feature in development */}
 
             {/* AI Context Window Setting */}
             <div style={{
