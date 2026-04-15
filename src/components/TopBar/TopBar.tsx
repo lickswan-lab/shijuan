@@ -9,7 +9,7 @@ interface ProviderInfo {
 }
 
 export default function TopBar() {
-  const { showSettings, setShowSettings, glmApiKeyStatus, activeReadingLogDate, setActiveReadingLogDate, setSidebarTab } = useUiStore()
+  const { showSettings, setShowSettings, glmApiKeyStatus, activeReadingLogDate, setActiveReadingLogDate, setSidebarTab, rightPanel, setRightPanel, annotationPanelCollapsed, toggleAnnotationPanel, hermesHasInsight } = useUiStore()
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState<string | null>(null)
@@ -56,6 +56,58 @@ export default function TopBar() {
       <div className="top-bar">
         <span className="logo">拾卷</span>
         <div style={{ flex: 1 }} />
+        {/* Agent button */}
+        <button
+          className="btn btn-sm btn-icon"
+          onClick={() => {
+            if (rightPanel === 'agent' && !annotationPanelCollapsed) {
+              // Already showing agent → collapse panel and reset to annotation mode
+              // Don't use setRightPanel here (it forces collapsed=false)
+              useUiStore.setState({ rightPanel: 'annotation', annotationPanelCollapsed: true })
+            } else {
+              // Open agent panel
+              setRightPanel('agent')
+            }
+          }}
+          title="Hermes 研究助手"
+          style={{
+            padding: '5px 7px', marginRight: 4, position: 'relative',
+            color: rightPanel === 'agent' && !annotationPanelCollapsed ? 'var(--accent)' : 'var(--text-muted)',
+          }}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+          </svg>
+          {hermesHasInsight && (
+            <span style={{
+              position: 'absolute', top: 2, right: 2, width: 7, height: 7,
+              borderRadius: '50%', background: '#e74c3c',
+              border: '1.5px solid var(--bg-warm)',
+            }} />
+          )}
+        </button>
+        {/* Lecture mode button */}
+        <button
+          className="btn btn-sm btn-icon"
+          onClick={() => {
+            const { activeLectureId, setActiveLecture } = useUiStore.getState()
+            if (activeLectureId) {
+              setActiveLecture(null)
+            } else {
+              setActiveLecture('__list__')  // show list
+            }
+          }}
+          title="听课模式"
+          style={{
+            padding: '5px 7px', marginRight: 4,
+            color: useUiStore.getState().activeLectureId ? 'var(--accent)' : 'var(--text-muted)',
+          }}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        </button>
         {/* Reading log button */}
         <button
           className="btn btn-sm btn-icon"
@@ -159,6 +211,99 @@ export default function TopBar() {
                 </div>
               </div>
             ))}
+
+            {/* Speech-to-Text API Keys */}
+            <div style={{
+              padding: '12px 14px', marginBottom: 8, borderRadius: 8,
+              border: '1px solid var(--border)', background: 'var(--bg-warm)',
+            }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)', marginBottom: 8 }}>
+                语音转写（听课模式）
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>
+                配置讯飞或阿里云的语音转写 API，用于听课模式的实时录音转文字。
+              </div>
+
+              {/* Xfyun */}
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4, color: 'var(--text)' }}>
+                  讯飞实时转写
+                  {providers.find(p => p.id === 'xfyun_stt')?.hasKey && <span style={{ fontSize: 10, color: 'var(--success)', marginLeft: 6 }}>✓ 已配置</span>}
+                </div>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <input
+                    placeholder="App ID"
+                    value={keyInputs['xfyun_appid'] || ''}
+                    onChange={e => setKeyInputs(prev => ({ ...prev, xfyun_appid: e.target.value }))}
+                    style={{ flex: 1, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, outline: 'none', background: 'var(--bg)' }}
+                  />
+                  <input
+                    type="password"
+                    placeholder="API Key"
+                    value={keyInputs['xfyun_apikey'] || ''}
+                    onChange={e => setKeyInputs(prev => ({ ...prev, xfyun_apikey: e.target.value }))}
+                    style={{ flex: 1, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, outline: 'none', background: 'var(--bg)' }}
+                  />
+                  <button
+                    className="btn btn-sm btn-primary"
+                    style={{ fontSize: 10, padding: '4px 8px' }}
+                    onClick={async () => {
+                      const appid = keyInputs['xfyun_appid']?.trim()
+                      const apikey = keyInputs['xfyun_apikey']?.trim()
+                      if (appid && apikey) {
+                        await window.electronAPI.aiSetKey('xfyun_stt', JSON.stringify({ appid, apikey }))
+                        setKeyInputs(prev => ({ ...prev, xfyun_appid: '', xfyun_apikey: '' }))
+                        window.electronAPI.aiGetProviders().then(setProviders).catch(() => {})
+                      }
+                    }}
+                  >保存</button>
+                </div>
+              </div>
+
+              {/* Aliyun */}
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4, color: 'var(--text)' }}>
+                  阿里云语音识别
+                  {providers.find(p => p.id === 'aliyun_stt')?.hasKey && <span style={{ fontSize: 10, color: 'var(--success)', marginLeft: 6 }}>✓ 已配置</span>}
+                </div>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <input
+                    type="password"
+                    placeholder="AccessKey ID"
+                    value={keyInputs['aliyun_akid'] || ''}
+                    onChange={e => setKeyInputs(prev => ({ ...prev, aliyun_akid: e.target.value }))}
+                    style={{ flex: 1, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, outline: 'none', background: 'var(--bg)' }}
+                  />
+                  <input
+                    type="password"
+                    placeholder="AccessKey Secret"
+                    value={keyInputs['aliyun_aksecret'] || ''}
+                    onChange={e => setKeyInputs(prev => ({ ...prev, aliyun_aksecret: e.target.value }))}
+                    style={{ flex: 1, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, outline: 'none', background: 'var(--bg)' }}
+                  />
+                  <input
+                    placeholder="App Key"
+                    value={keyInputs['aliyun_appkey'] || ''}
+                    onChange={e => setKeyInputs(prev => ({ ...prev, aliyun_appkey: e.target.value }))}
+                    style={{ flex: 1, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, outline: 'none', background: 'var(--bg)' }}
+                  />
+                  <button
+                    className="btn btn-sm btn-primary"
+                    style={{ fontSize: 10, padding: '4px 8px' }}
+                    onClick={async () => {
+                      const akid = keyInputs['aliyun_akid']?.trim()
+                      const aksecret = keyInputs['aliyun_aksecret']?.trim()
+                      const appkey = keyInputs['aliyun_appkey']?.trim()
+                      if (akid && aksecret && appkey) {
+                        await window.electronAPI.aiSetKey('aliyun_stt', JSON.stringify({ akid, aksecret, appkey }))
+                        setKeyInputs(prev => ({ ...prev, aliyun_akid: '', aliyun_aksecret: '', aliyun_appkey: '' }))
+                        window.electronAPI.aiGetProviders().then(setProviders).catch(() => {})
+                      }
+                    }}
+                  >保存</button>
+                </div>
+              </div>
+            </div>
 
             {/* AI Context Window Setting */}
             <div style={{

@@ -6,6 +6,8 @@ import { registerLibraryIpc } from './ipc/library'
 import { registerAiApiIpc } from './ipc/aiApi'
 import { registerPdfOperationsIpc } from './ipc/pdfOperations'
 import { registerReadingLogIpc, startMidnightScheduler } from './ipc/readingLog'
+import { registerLectureIpc } from './ipc/lecture'
+import { registerAgentIpc } from './ipc/agent'
 
 function createWindow(): BrowserWindow {
   // Remove default menu bar
@@ -73,6 +75,8 @@ registerLibraryIpc()
 registerAiApiIpc()
 registerPdfOperationsIpc()
 registerReadingLogIpc()
+registerLectureIpc()
+registerAgentIpc()
 
 app.whenReady().then(() => {
   const mainWindow = createWindow()

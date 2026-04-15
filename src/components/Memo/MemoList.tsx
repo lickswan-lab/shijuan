@@ -422,7 +422,7 @@ export default function MemoList() {
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.3, marginBottom: 12 }}>
               <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
             </svg>
-            <div style={{ fontSize: 12, marginBottom: 6 }}>还没有思考笔记</div>
+            <div style={{ fontSize: 12, marginBottom: 6 }}>还没有笔记</div>
             <div style={{ fontSize: 11, lineHeight: 1.6 }}>
               在阅读文献时，可以将注释和 AI 回复作为「引用块」收集到笔记中，帮助你整合跨文献的思考。
             </div>

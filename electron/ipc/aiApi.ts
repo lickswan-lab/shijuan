@@ -350,12 +350,18 @@ export function registerAiApiIpc(): void {
 
   // Get all providers info (for settings UI)
   ipcMain.handle('ai-get-providers', async () => {
-    return PROVIDERS.map(p => ({
+    const providers = PROVIDERS.map(p => ({
       id: p.id,
       name: p.name,
       models: p.models,
       hasKey: !!apiKeys[p.id],
     }))
+    // Include STT provider status
+    providers.push(
+      { id: 'xfyun_stt', name: '讯飞转写', models: [], hasKey: !!apiKeys['xfyun_stt'] },
+      { id: 'aliyun_stt', name: '阿里云转写', models: [], hasKey: !!apiKeys['aliyun_stt'] },
+    )
+    return providers
   })
 
   // Set API key for a provider
@@ -370,6 +376,11 @@ export function registerAiApiIpc(): void {
     delete apiKeys[providerId]
     await saveApiKeys()
     return true
+  })
+
+  // Get a specific key value (for STT providers etc.)
+  ipcMain.handle('ai-get-key', async (_event, providerId: string) => {
+    return apiKeys[providerId] || null
   })
 
   // Get configured providers (which have keys)

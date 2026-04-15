@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { v4 as uuid } from 'uuid'
-import type { Library, LibraryEntry, PdfMeta, VirtualFolder, Memo, BlockRef, MemoSnapshot, MemoFolder, ReadingLog } from '../types/library'
+import type { Library, LibraryEntry, PdfMeta, VirtualFolder, Memo, BlockRef, MemoSnapshot, MemoFolder, ReadingLog, LectureSession } from '../types/library'
 import { createDefaultLibrary, createDefaultPdfMeta } from '../types/library'
 
 interface LibraryState {
@@ -43,6 +43,10 @@ interface LibraryState {
 
   // Reading log actions
   saveReadingLog: (log: ReadingLog) => void
+
+  // Lecture actions
+  saveLectureSession: (session: LectureSession) => void
+  deleteLectureSession: (id: string) => void
 }
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
@@ -63,6 +67,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (!library.folders) library.folders = []
     if (!library.memoFolders) library.memoFolders = []
     if (!library.readingLogs) library.readingLogs = []
+    if (!library.lectureSessions) library.lectureSessions = []
     for (const memo of library.memos) {
       if (!memo.blocks) memo.blocks = []
       if (!memo.aiHistory) memo.aiHistory = []
@@ -428,6 +433,30 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (memo) memo.folderId = folderId
     await window.electronAPI.saveLibrary(library)
     set({ library: { ...library } })
+  },
+
+  // ===== Lecture actions =====
+
+  saveLectureSession: (session: LectureSession) => {
+    const { library } = get()
+    if (!library) return
+    if (!library.lectureSessions) library.lectureSessions = []
+    const idx = library.lectureSessions.findIndex(s => s.id === session.id)
+    if (idx >= 0) {
+      library.lectureSessions[idx] = session
+    } else {
+      library.lectureSessions.unshift(session)
+    }
+    set({ library: { ...library } })
+    window.electronAPI.saveLibrary(library).catch(() => {})
+  },
+
+  deleteLectureSession: (id: string) => {
+    const { library } = get()
+    if (!library) return
+    library.lectureSessions = (library.lectureSessions || []).filter(s => s.id !== id)
+    set({ library: { ...library } })
+    window.electronAPI.saveLibrary(library).catch(() => {})
   },
 
   // ===== Reading log actions =====

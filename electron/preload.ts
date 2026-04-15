@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { Library, PdfMeta, HistoryEntry, ReadingLogEvent, ReadingLog } from '../src/types/library'
+import type { Library, PdfMeta, HistoryEntry, ReadingLogEvent, ReadingLog, LectureSession, AgentConversation, HermesSkill, HermesInsight } from '../src/types/library'
 
 const electronAPI = {
   // Library (central storage)
@@ -47,6 +47,8 @@ const electronAPI = {
     ipcRenderer.invoke('ai-set-key', providerId, key),
   aiRemoveKey: (providerId: string): Promise<boolean> =>
     ipcRenderer.invoke('ai-remove-key', providerId),
+  aiGetKey: (providerId: string): Promise<string | null> =>
+    ipcRenderer.invoke('ai-get-key', providerId),
   aiGetConfigured: (): Promise<Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>> =>
     ipcRenderer.invoke('ai-get-configured'),
 
@@ -87,6 +89,38 @@ const electronAPI = {
     ipcRenderer.on('ai-stream-error', handler)
     return () => { ipcRenderer.removeListener('ai-stream-error', handler) }
   },
+
+  // === Lecture ===
+  lectureSave: (session: LectureSession): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('lecture-save', session),
+  lectureSaveAudio: (sessionId: string, buffer: ArrayBuffer): Promise<{ success: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('lecture-save-audio', sessionId, Buffer.from(buffer)),
+  lectureDeleteAudio: (sessionId: string): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('lecture-delete-audio', sessionId),
+  lectureXfyunSign: (appid: string, apikey: string): Promise<{ success: boolean; url?: string; error?: string }> =>
+    ipcRenderer.invoke('lecture-xfyun-sign', appid, apikey),
+  lectureAliyunToken: (akid: string, aksecret: string): Promise<{ success: boolean; token?: string; expireTime?: number; error?: string }> =>
+    ipcRenderer.invoke('lecture-aliyun-token', akid, aksecret),
+
+  // === Agent ===
+  agentLoadMemory: (): Promise<{ success: boolean; content?: string; error?: string }> =>
+    ipcRenderer.invoke('agent-load-memory'),
+  agentSaveMemory: (content: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('agent-save-memory', content),
+  agentLoadConversations: (): Promise<{ success: boolean; conversations: AgentConversation[]; error?: string }> =>
+    ipcRenderer.invoke('agent-load-conversations'),
+  agentSaveConversation: (conv: AgentConversation): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('agent-save-conversation', conv),
+  agentExecuteTool: (toolName: string, argsJson: string): Promise<{ success: boolean; result: string }> =>
+    ipcRenderer.invoke('agent-execute-tool', toolName, argsJson),
+  agentLoadInsight: (): Promise<{ success: boolean; insight: HermesInsight | null }> =>
+    ipcRenderer.invoke('agent-load-insight'),
+  agentSaveInsight: (insight: HermesInsight): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('agent-save-insight', insight),
+  agentLoadSkills: (): Promise<{ success: boolean; skills: HermesSkill[] }> =>
+    ipcRenderer.invoke('agent-load-skills'),
+  agentSaveSkills: (skills: HermesSkill[]): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('agent-save-skills', skills),
 
   // === Reading Log ===
   readingLogCollectEvents: (date: string): Promise<{ success: boolean; events: ReadingLogEvent[]; error?: string }> =>

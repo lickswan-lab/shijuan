@@ -4,6 +4,8 @@ import PdfViewer from './components/PdfViewer/PdfViewer'
 import AnnotationPanel from './components/AnnotationPanel/AnnotationPanel'
 import MemoEditor from './components/Memo/MemoEditor'
 import ReadingLogView from './components/ReadingLog/ReadingLogView'
+import LectureMode from './components/Lecture/LectureMode'
+import AgentPanel from './components/Agent/AgentPanel'
 import TopBar from './components/TopBar/TopBar'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useLibraryStore } from './store/libraryStore'
@@ -66,7 +68,7 @@ function DraggableToggle({ onClick }: { onClick: () => void }) {
 
 export default function App() {
   const { library, initLibrary } = useLibraryStore()
-  const { setGlmApiKeyStatus, annotationPanelCollapsed, toggleAnnotationPanel, activeMemoId, activeReadingLogDate } = useUiStore()
+  const { setGlmApiKeyStatus, annotationPanelCollapsed, toggleAnnotationPanel, activeMemoId, activeReadingLogDate, activeLectureId, rightPanel, setRightPanel } = useUiStore()
 
   // Init library on mount
   useEffect(() => {
@@ -111,19 +113,30 @@ export default function App() {
           <FileTree />
         </ErrorBoundary>
 
-        {/* Main content: Reading log / Memo editor / PDF viewer */}
-        {activeReadingLogDate ? (
+        {/* Main content: Lecture / Reading log / Memo editor / PDF viewer */}
+        {activeLectureId ? (
+          <ErrorBoundary fallbackLabel="听课模式">
+            <LectureMode />
+          </ErrorBoundary>
+        ) : activeReadingLogDate ? (
           <ErrorBoundary fallbackLabel="阅读日志">
             <ReadingLogView />
           </ErrorBoundary>
         ) : activeMemoId ? (
           <>
-            <ErrorBoundary fallbackLabel="思考笔记">
+            <ErrorBoundary fallbackLabel="笔记">
               <MemoEditor />
             </ErrorBoundary>
-            {!annotationPanelCollapsed && (
+            {!annotationPanelCollapsed && rightPanel === 'annotation' && (
               <ErrorBoundary fallbackLabel="注释面板">
                 <AnnotationPanel />
+              </ErrorBoundary>
+            )}
+            {!annotationPanelCollapsed && rightPanel === 'agent' && (
+              <ErrorBoundary fallbackLabel="Agent">
+                <div style={{ width: 360, flexShrink: 0, borderLeft: '1px solid var(--border-light)', height: '100%' }}>
+                  <AgentPanel />
+                </div>
               </ErrorBoundary>
             )}
             {annotationPanelCollapsed && (
@@ -135,9 +148,16 @@ export default function App() {
             <ErrorBoundary fallbackLabel="PDF 阅读器">
               <PdfViewer />
             </ErrorBoundary>
-            {!annotationPanelCollapsed && (
+            {!annotationPanelCollapsed && rightPanel === 'annotation' && (
               <ErrorBoundary fallbackLabel="注释面板">
                 <AnnotationPanel />
+              </ErrorBoundary>
+            )}
+            {!annotationPanelCollapsed && rightPanel === 'agent' && (
+              <ErrorBoundary fallbackLabel="Agent">
+                <div style={{ width: 360, flexShrink: 0, borderLeft: '1px solid var(--border-light)', height: '100%' }}>
+                  <AgentPanel />
+                </div>
               </ErrorBoundary>
             )}
             {annotationPanelCollapsed && (

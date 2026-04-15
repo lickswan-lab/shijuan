@@ -15,6 +15,8 @@ export interface Library {
   memoFolders: MemoFolder[]
   // Reading logs
   readingLogs: ReadingLog[]
+  // Lecture sessions
+  lectureSessions: LectureSession[]
 }
 
 export interface VirtualFolder {
@@ -162,6 +164,70 @@ export interface ReadingLog {
   generatedAt: string
 }
 
+// ===== Lecture Session =====
+
+export interface TranscriptSegment {
+  id: string
+  startTime: number               // seconds from recording start
+  endTime: number
+  text: string
+  isFinal: boolean                // final vs interim result
+}
+
+export interface LectureSession {
+  id: string
+  title: string
+  date: string                    // ISO
+  duration: number                // seconds
+  preDocIds: string[]             // associated pre-lecture entry IDs
+  transcript: TranscriptSegment[]
+  notes: string                   // user notes (Markdown)
+  aiSummary?: string              // AI-generated course record
+  aiModel?: string
+  audioPath?: string              // path to audio file
+  provider: 'webspeech' | 'xfyun' | 'aliyun'
+  createdAt: string
+}
+
+// ===== Hermes Agent =====
+
+export interface AgentMessage {
+  id: string
+  role: 'user' | 'assistant' | 'tool_call' | 'tool_result'
+  content: string
+  toolName?: string
+  toolArgs?: string
+  timestamp: string
+}
+
+export interface AgentConversation {
+  id: string
+  title: string
+  messages: AgentMessage[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface HermesSkill {
+  id: string
+  name: string
+  description: string
+  type: 'builtin' | 'learned' | 'custom'
+  prompt?: string          // Prompt template (custom/learned)
+  trigger?: string         // When to activate (e.g. "阅读法学文献时")
+  enabled: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface HermesInsight {
+  id: string
+  content: string          // AI-generated insight markdown
+  basedOn: number          // Number of behavior events analyzed
+  generatedAt: string
+  model: string            // Which AI model generated it
+}
+
 export interface FileTreeNode {
   name: string
   path: string
@@ -180,7 +246,8 @@ export function createDefaultLibrary(): Library {
     entries: [],
     memos: [],
     memoFolders: [],
-    readingLogs: []
+    readingLogs: [],
+    lectureSessions: []
   }
 }
 

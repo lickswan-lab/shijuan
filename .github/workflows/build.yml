@@ -1,0 +1,83 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # Push tag like v1.2.5 to trigger
+  workflow_dispatch:  # Manual trigger from GitHub Actions page
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - run: npx electron-vite build
+      - run: npx electron-packager . "拾卷" --platform=win32 --arch=x64 --out=dist --icon=build/icon.ico --asar --overwrite
+      - name: Zip Windows build
+        run: Compress-Archive -Path "dist\拾卷-win32-x64\*" -DestinationPath "dist\shijuan-win-x64.zip"
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shijuan-win-x64
+          path: dist/shijuan-win-x64.zip
+
+  build-macos-intel:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - run: npx electron-vite build
+      - run: npx electron-packager . "拾卷" --platform=darwin --arch=x64 --out=dist --icon=build/icon.png --asar --overwrite
+      - name: Zip macOS Intel build
+        run: cd dist && zip -r -y shijuan-mac-x64.zip "拾卷-darwin-x64"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shijuan-mac-x64
+          path: dist/shijuan-mac-x64.zip
+
+  build-macos-arm:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - run: npx electron-vite build
+      - run: npx electron-packager . "拾卷" --platform=darwin --arch=arm64 --out=dist --icon=build/icon.png --asar --overwrite
+      - name: Zip macOS ARM build
+        run: cd dist && zip -r -y shijuan-mac-arm64.zip "拾卷-darwin-arm64"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shijuan-mac-arm64
+          path: dist/shijuan-mac-arm64.zip
+
+  release:
+    needs: [build-windows, build-macos-intel, build-macos-arm]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 拾卷 ${{ github.ref_name }}
+          draft: false
+          files: |
+            artifacts/shijuan-win-x64/shijuan-win-x64.zip
+            artifacts/shijuan-mac-x64/shijuan-mac-x64.zip
+            artifacts/shijuan-mac-arm64/shijuan-mac-arm64.zip

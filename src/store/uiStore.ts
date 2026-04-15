@@ -36,11 +36,19 @@ interface UiState {
   // AI context window size (chars before + after selection)
   aiContextWindow: number   // 1000 / 2000 / 5000 / 10000 / -1 (full)
 
+  // Lecture mode
+  activeLectureId: string | null
+  isRecording: boolean
+
   // AI model
   selectedAiModel: string
 
   // Annotation color (for next annotation to be created)
   annotationColor: string
+
+  // Agent
+  rightPanel: 'annotation' | 'agent'
+  hermesHasInsight: boolean  // notification badge
 
   // Actions
   toggleSidebar: () => void
@@ -56,8 +64,12 @@ interface UiState {
   setActiveReadingLogDate: (date: string | null) => void
   setCurrentDocText: (text: string | null) => void
   setAiContextWindow: (size: number) => void
+  setActiveLecture: (id: string | null) => void
+  setIsRecording: (recording: boolean) => void
   setSelectedAiModel: (model: string) => void
   setAnnotationColor: (color: string) => void
+  setRightPanel: (panel: 'annotation' | 'agent') => void
+  setHermesHasInsight: (has: boolean) => void
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -72,14 +84,18 @@ export const useUiStore = create<UiState>((set) => ({
   sidebarTab: 'library',
   activeReadingLogDate: null,
   currentDocText: null,
+  activeLectureId: null,
+  isRecording: false,
   aiContextWindow: (() => { try { const v = localStorage.getItem('sj-aiContextWindow'); return v ? Number(v) : 2000 } catch { return 2000 } })(),
   selectedAiModel: 'glm:glm-4-flash',
   annotationColor: 'yellow',
+  rightPanel: 'annotation',
+  hermesHasInsight: false,
 
   toggleSidebar: () => set(s => ({ sidebarCollapsed: !s.sidebarCollapsed })),
-  toggleAnnotationPanel: () => set(s => ({ annotationPanelCollapsed: !s.annotationPanelCollapsed })),
-  setTextSelection: (sel) => set({ textSelection: sel, annotationPanelCollapsed: sel ? false : true }),
-  setActiveAnnotation: (id) => set({ activeAnnotationId: id, annotationPanelCollapsed: id ? false : true }),
+  toggleAnnotationPanel: () => set(s => ({ annotationPanelCollapsed: !s.annotationPanelCollapsed, rightPanel: 'annotation' as const })),
+  setTextSelection: (sel) => set({ textSelection: sel, annotationPanelCollapsed: sel ? false : true, rightPanel: 'annotation' as const }),
+  setActiveAnnotation: (id) => set({ activeAnnotationId: id, annotationPanelCollapsed: id ? false : true, rightPanel: 'annotation' as const }),
   clearAnnotationFocus: () => set({ activeAnnotationId: null, textSelection: null }),
   setSearchQuery: (query) => set({ searchQuery: query }),
   setShowSettings: (show) => set({ showSettings: show }),
@@ -89,6 +105,10 @@ export const useUiStore = create<UiState>((set) => ({
   setActiveReadingLogDate: (date) => set({ activeReadingLogDate: date, activeMemoId: null }),
   setCurrentDocText: (text) => set({ currentDocText: text }),
   setAiContextWindow: (size) => { set({ aiContextWindow: size }); try { localStorage.setItem('sj-aiContextWindow', String(size)) } catch {} },
+  setActiveLecture: (id) => set({ activeLectureId: id, activeMemoId: null, activeReadingLogDate: null }),
+  setIsRecording: (recording) => set({ isRecording: recording }),
   setSelectedAiModel: (model) => set({ selectedAiModel: model }),
-  setAnnotationColor: (color) => set({ annotationColor: color })
+  setAnnotationColor: (color) => set({ annotationColor: color }),
+  setRightPanel: (panel) => set({ rightPanel: panel, annotationPanelCollapsed: false, ...(panel === 'agent' ? { hermesHasInsight: false } : {}) }),
+  setHermesHasInsight: (has) => set({ hermesHasInsight: has }),
 }))

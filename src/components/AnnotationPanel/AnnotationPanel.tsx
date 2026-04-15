@@ -5,6 +5,116 @@ import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
 import type { Annotation, HistoryEntry, BlockRef } from '../../types/library'
 
+// ===== Hermes background learning =====
+// Silently appends annotation events to agent memory for behavior learning
+const hermesEventQueue: string[] = []
+let hermesFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+async function flushHermesQueue() {
+  if (hermesEventQueue.length === 0) return
+  const batch = hermesEventQueue.splice(0)
+  try {
+    const { success, content } = await window.electronAPI.agentLoadMemory()
+    const existing = success && content ? content : ''
+    const today = new Date().toLocaleDateString('zh-CN')
+    const header = `\n\n## ${today} 阅读行为\n\n`
+    const hasToday = existing.includes(`## ${today} 阅读行为`)
+    const updated = hasToday
+      ? existing + '\n' + batch.join('\n')
+      : existing + header + batch.join('\n')
+    await window.electronAPI.agentSaveMemory(updated)
+  } catch {}
+  hermesFlushTimer = null
+}
+
+function feedHermes(event: string) {
+  hermesEventQueue.push(`- [${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}] ${event}`)
+
+  // Flush quickly (3s) so data is ready when user opens Agent
+  if (hermesFlushTimer) clearTimeout(hermesFlushTimer)
+  hermesFlushTimer = setTimeout(flushHermesQueue, 3000)
+}
+
+// ===== Hermes contextual hint component =====
+function HermesHint({ selectedText, currentTitle }: { selectedText?: string; currentTitle?: string }) {
+  const [hint, setHint] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!selectedText || selectedText.length < 4) { setHint(null); return }
+
+    // Search agent memory for related mentions
+    let cancelled = false
+    window.electronAPI.agentLoadMemory().then(({ success, content }) => {
+      if (cancelled || !success || !content) return
+
+      // Simple keyword matching: find lines in memory mentioning similar terms
+      const keywords = selectedText.slice(0, 60).replace(/[，。、；：""''【】（）]/g, ' ').split(/\s+/).filter(w => w.length >= 2)
+      const lines = content.split('\n').filter(l => l.startsWith('- ['))
+
+      const matches: string[] = []
+      for (const line of lines) {
+        // Skip if it's about the current document
+        if (currentTitle && line.includes(currentTitle)) continue
+        for (const kw of keywords) {
+          if (line.includes(kw)) {
+            matches.push(line.replace(/^- \[[^\]]*\]\s*/, '').slice(0, 80))
+            break
+          }
+        }
+      }
+
+      if (matches.length > 0 && !cancelled) {
+        setHint(matches[matches.length - 1])  // Show most recent related activity
+      } else {
+        setHint(null)
+      }
+    }).catch(() => {})
+
+    return () => { cancelled = true }
+  }, [selectedText, currentTitle])
+
+  if (!hint) return null
+
+  return (
+    <div style={{
+      padding: '6px 12px', margin: '0 8px 4px', borderRadius: 6,
+      background: 'linear-gradient(90deg, var(--accent-soft), transparent)',
+      fontSize: 10, color: 'var(--accent-hover)', lineHeight: 1.5,
+      display: 'flex', alignItems: 'center', gap: 6,
+    }}>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}>
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+      </svg>
+      <span>Hermes: 你之前也关注过 — {hint}</span>
+    </div>
+  )
+}
+
+// ===== Ghost Reader: proactive cross-doc analysis after annotation =====
+function GhostReaderCard({ suggestion, onDismiss }: { suggestion: string | null; onDismiss: () => void }) {
+  if (!suggestion) return null
+
+  return (
+    <div style={{
+      margin: '4px 8px 8px', padding: '8px 12px', borderRadius: 8,
+      background: 'linear-gradient(135deg, #f0e6ff, var(--bg-warm))',
+      border: '1px solid #d4b8ff', position: 'relative',
+    }}>
+      <button onClick={onDismiss} style={{
+        position: 'absolute', top: 4, right: 6, background: 'none', border: 'none',
+        cursor: 'pointer', color: 'var(--text-muted)', fontSize: 12, lineHeight: 1,
+      }}>x</button>
+      <div style={{ fontSize: 10, fontWeight: 600, color: '#6b3fa0', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+        </svg>
+        Hermes 发现
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text)', lineHeight: 1.6 }}>{suggestion}</div>
+    </div>
+  )
+}
+
 // Map entry types to display info
 function getModelLabel(modelSpec: string): string {
   // "glm:glm-5.1" → "GLM-5.1", "claude:claude-opus-4-6-..." → "Claude Opus 4.6"
@@ -210,7 +320,7 @@ function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, onDo
       </div>
       {memos.length === 0 ? (
         <div style={{ padding: '6px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
-          请先创建思考笔记
+          请先创建笔记
         </div>
       ) : memos.map(m => (
         <div
@@ -277,6 +387,9 @@ export default function AnnotationPanel() {
   const [feedbackText, setFeedbackText] = useState<string | null>(null)
   const [feedbackLoading, setFeedbackLoading] = useState(false)
   const feedbackAnnotationId = useRef<string | null>(null)
+
+  // Ghost Reader state
+  const [ghostSuggestion, setGhostSuggestion] = useState<string | null>(null)
 
   const historyEndRef = useRef<HTMLDivElement>(null)
 
@@ -506,8 +619,38 @@ export default function AnnotationPanel() {
     const savedText = newContextText || displayAnnotation?.anchor.selectedText || textSelection?.text || ''
     setNoteInput('')
 
+    // Feed to Hermes: record annotation behavior
+    const entryTitle = currentEntry?.title || '未知文献'
+    feedHermes(`在「${entryTitle}」中对「${savedText.slice(0, 40)}」添加笔记：${savedNote.slice(0, 60)}`)
+
     // Trigger instant feedback after saving
     triggerFeedback(savedNote, targetAnnotationId, savedText)
+
+    // Ghost Reader: async cross-doc analysis (non-blocking)
+    ;(async () => {
+      try {
+        // Search other documents' annotations for related content
+        const result = await window.electronAPI.agentExecuteTool('build_knowledge_map', '{}')
+        const data = JSON.parse(result.result)
+        if (!data.annotationSummary || data.totalAnnotations < 3) return
+
+        // Ask AI to find cross-doc connections (quick, focused prompt)
+        const { selectedAiModel } = useUiStore.getState()
+        const streamId = uuid()
+        let fullText = ''
+        const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => { if (sid === streamId) fullText += chunk })
+        try {
+          await window.electronAPI.aiChatStream(streamId, selectedAiModel, [
+            { role: 'system', content: '你是 Hermes 幽灵读者。用户刚刚在一篇文献上做了注释，你需要在1-2句话内指出一个有价值的跨文献关联。如果没有发现关联，只回复"无"。不要客套，直接说发现。' },
+            { role: 'user', content: `用户刚在「${entryTitle}」中对「${savedText.slice(0, 100)}」写了笔记：「${savedNote.slice(0, 150)}」\n\n其他文献的注释概要：\n${data.annotationSummary.slice(0, 2000)}` },
+          ])
+        } finally { cleanup() }
+
+        if (fullText && !fullText.startsWith('无') && fullText.length > 5) {
+          setGhostSuggestion(fullText.trim())
+        }
+      } catch {}
+    })()
   }, [textSelection, noteInput, displayAnnotation, newContextText, updatePdfMeta, setActiveAnnotation, triggerFeedback])
 
   // ===== AI interpret =====
@@ -643,6 +786,10 @@ export default function AnnotationPanel() {
     }
 
     setStreamingText('')
+
+    // Feed to Hermes: record AI dialogue
+    const entryTitle = useLibraryStore.getState().currentEntry?.title || '未知文献'
+    feedHermes(`在「${entryTitle}」中向AI提问：${text.trim().slice(0, 50)}`)
 
     const entry: HistoryEntry = {
       id: uuid(),
@@ -1027,6 +1174,12 @@ export default function AnnotationPanel() {
           setFeedbackLoading(false)
         }}
       />
+
+      {/* Ghost Reader suggestion */}
+      <GhostReaderCard suggestion={ghostSuggestion} onDismiss={() => setGhostSuggestion(null)} />
+
+      {/* Hermes contextual hint */}
+      <HermesHint selectedText={displayAnnotation?.anchor.selectedText || textSelection?.text} currentTitle={currentEntry?.title} />
 
       {/* Unified input area */}
       <div className="ai-chat-input">
