@@ -44,8 +44,8 @@ const EVENT_ICONS: Record<ReadingLogEvent['type'], string> = {
 }
 
 export default function ReadingLogView() {
-  const { library, saveReadingLog } = useLibraryStore()
-  const { activeReadingLogDate, selectedAiModel } = useUiStore()
+  const { library, saveReadingLog, openEntry } = useLibraryStore()
+  const { activeReadingLogDate, selectedAiModel, setActiveReadingLogDate, setActiveMemo } = useUiStore()
   const [generatingSummary, setGeneratingSummary] = useState(false)
   const [streamingText, setStreamingText] = useState('')
 
@@ -289,10 +289,30 @@ export default function ReadingLogView() {
                     )}
                   </div>
 
-                  {/* Content */}
-                  <div style={{ flex: 1, paddingBottom: isLast ? 0 : 12 }}>
+                  {/* Content — clickable to jump to document */}
+                  <div
+                    style={{ flex: 1, paddingBottom: isLast ? 0 : 12, cursor: event.entryId || event.memoId ? 'pointer' : 'default' }}
+                    onClick={() => {
+                      if (event.entryId) {
+                        const entry = library?.entries.find(e => e.id === event.entryId)
+                        if (entry) {
+                          openEntry(entry)
+                          setActiveReadingLogDate(null)
+                        }
+                      } else if (event.memoId) {
+                        setActiveMemo(event.memoId)
+                        setActiveReadingLogDate(null)
+                      }
+                    }}
+                    onMouseEnter={e => { if (event.entryId || event.memoId) (e.currentTarget.style.background = 'var(--bg-hover)') }}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                    title={event.entryId ? '点击打开该文献' : event.memoId ? '点击打开该笔记' : ''}
+                  >
                     <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.5 }}>
                       {event.detail}
+                      {(event.entryId || event.memoId) && (
+                        <span style={{ fontSize: 10, color: 'var(--accent)', marginLeft: 6 }}>↗</span>
+                      )}
                     </div>
                     {event.selectedText && (
                       <div style={{
