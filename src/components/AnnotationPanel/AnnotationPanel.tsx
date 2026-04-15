@@ -115,6 +115,76 @@ function GhostReaderCard({ suggestion, onDismiss }: { suggestion: string | null;
   )
 }
 
+// ===== Concept Tracker: detect cross-document concepts =====
+function ConceptTracker({ currentEntryId, currentText, otherEntryAnnotations }: {
+  currentEntryId?: string
+  currentText?: string
+  otherEntryAnnotations: Array<{ entryId: string; entryTitle: string; annotations: Annotation[] }>
+}) {
+  const [concepts, setConcepts] = useState<Array<{ keyword: string; entries: Array<{ title: string; count: number }> }>>([])
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    if (!currentText || currentText.length < 4 || otherEntryAnnotations.length < 2) {
+      setConcepts([])
+      return
+    }
+
+    // Extract key phrases from current text (simple: 4+ char Chinese segments)
+    const phrases: string[] = []
+    const chineseMatches = currentText.match(/[\u4e00-\u9fff]{4,10}/g) || []
+    for (const m of chineseMatches) {
+      if (!phrases.includes(m)) phrases.push(m)
+    }
+    if (phrases.length === 0) { setConcepts([]); return }
+
+    // Check which phrases appear in other entries' annotations
+    const found: Array<{ keyword: string; entries: Array<{ title: string; count: number }> }> = []
+    for (const phrase of phrases.slice(0, 5)) {
+      const matchedEntries: Array<{ title: string; count: number }> = []
+      for (const other of otherEntryAnnotations) {
+        if (other.entryId === currentEntryId) continue
+        let count = 0
+        for (const ann of other.annotations) {
+          if (ann.anchor.selectedText.includes(phrase)) count++
+          for (const h of ann.historyChain) {
+            if (h.content.includes(phrase)) count++
+          }
+        }
+        if (count > 0) matchedEntries.push({ title: other.entryTitle, count })
+      }
+      if (matchedEntries.length >= 1) {
+        found.push({ keyword: phrase, entries: matchedEntries })
+      }
+    }
+    setConcepts(found)
+  }, [currentText, currentEntryId, otherEntryAnnotations])
+
+  const visible = concepts.filter(c => !dismissed.has(c.keyword))
+  if (visible.length === 0) return null
+
+  return (
+    <div style={{ margin: '4px 8px 8px', padding: '8px 12px', borderRadius: 8,
+      background: 'var(--bg-warm)', border: '1px solid var(--border)', fontSize: 11 }}>
+      <div style={{ fontWeight: 600, color: 'var(--accent)', marginBottom: 4, fontSize: 10 }}>
+        📊 概念关联发现
+      </div>
+      {visible.slice(0, 3).map(c => (
+        <div key={c.keyword} style={{ marginBottom: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <span style={{ fontWeight: 600, color: 'var(--text)' }}>「{c.keyword}」</span>
+            <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>
+              在 {c.entries.map(e => e.title.slice(0, 10)).join('、')} 中也出现
+            </span>
+          </div>
+          <button onClick={() => setDismissed(prev => new Set([...prev, c.keyword]))}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 10 }}>×</button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // Map entry types to display info
 function getModelLabel(modelSpec: string): string {
   // "glm:glm-5.1" → "GLM-5.1", "claude:claude-opus-4-6-..." → "Claude Opus 4.6"
@@ -1183,6 +1253,13 @@ export default function AnnotationPanel() {
 
       {/* Ghost Reader suggestion */}
       <GhostReaderCard suggestion={ghostSuggestion} onDismiss={() => setGhostSuggestion(null)} />
+
+      {/* Concept tracker — detect cross-document concepts */}
+      <ConceptTracker
+        currentEntryId={currentEntry?.id}
+        currentText={displayAnnotation?.anchor.selectedText || textSelection?.text}
+        otherEntryAnnotations={otherEntryAnnotations}
+      />
 
       {/* Hermes contextual hint */}
       <HermesHint selectedText={displayAnnotation?.anchor.selectedText || textSelection?.text} currentTitle={currentEntry?.title} />
