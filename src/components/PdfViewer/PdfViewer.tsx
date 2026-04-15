@@ -887,13 +887,14 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
 
 // ===== Immersive OCR Reader: page-flip, auto-fill, side page markers =====
 function ImmersiveOcrReader({ text, fontSize, fontWeight, bgHue, bgSat, bgLight, colorDepth,
-  annotations, marks, onAnnotationClick, onRemoveMark, activeSelectionText }: {
+  annotations, marks, onAnnotationClick, onRemoveMark, activeSelectionText, onTextSelect }: {
   text: string; fontSize: number; fontWeight: number;
   bgHue: number; bgSat: number; bgLight: number; colorDepth: number;
   annotations: Array<{ id: string; selectedText: string }>;
   marks: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>;
   onAnnotationClick: (id: string) => void; onRemoveMark: (id: string) => void;
   activeSelectionText?: string;
+  onTextSelect?: (sel: { text: string; pageNumber: number; x: number; y: number }) => void;
 }) {
   const [spread, setSpread] = useState(0)
   const [flipDir, setFlipDir] = useState<'none' | 'left' | 'right'>('none')
@@ -971,6 +972,27 @@ function ImmersiveOcrReader({ text, fontSize, fontWeight, bgHue, bgSat, bgLight,
     return () => document.removeEventListener('keydown', handler)
   }, [goNext, goPrev])
 
+  // Handle text selection inside the reader (direct, no event bubbling needed)
+  const handleInternalMouseUp = useCallback(() => {
+    if (!onTextSelect) return
+    const selection = window.getSelection()
+    if (!selection || selection.isCollapsed) return
+    const text = selection.toString().trim()
+    if (!text || text.length < 2) return
+
+    // Find page number from DOM
+    let el: HTMLElement | null = selection.getRangeAt(0).startContainer.parentElement
+    let pageNumber = 0
+    while (el) {
+      const pn = el.getAttribute('data-page-number')
+      if (pn) { pageNumber = parseInt(pn); break }
+      el = el.parentElement
+    }
+
+    const rect = selection.getRangeAt(0).getBoundingClientRect()
+    onTextSelect({ text, pageNumber: pageNumber || 1, x: rect.left + rect.width / 2, y: rect.bottom + 8 })
+  }, [onTextSelect])
+
   const leftPage = visualPages[spread * 2]
   const rightPage = spread * 2 + 1 < visualPages.length ? visualPages[spread * 2 + 1] : null
 
@@ -1028,7 +1050,7 @@ function ImmersiveOcrReader({ text, fontSize, fontWeight, bgHue, bgSat, bgLight,
   }
 
   return (
-    <div style={{ width: '100%', height: '100%', background: bgColor, overflow: 'hidden', userSelect: 'text', position: 'relative' }}>
+    <div onMouseUp={handleInternalMouseUp} style={{ width: '100%', height: '100%', background: bgColor, overflow: 'hidden', userSelect: 'text', position: 'relative' }}>
       {/* Two-page spread */}
       <div style={{ display: 'flex', width: '100%', height: '100%' }}>
         {/* Left click zone — pointer-events only when not selecting text */}
@@ -1647,6 +1669,12 @@ export default function PdfViewer() {
     setToolbar(null)
   }, [setTextSelection, setActiveAnnotation])
 
+  // Handle text selection from ImmersiveOcrReader (direct callback, no event bubbling)
+  const handleImmersiveTextSelect = useCallback((sel: { text: string; pageNumber: number; x: number; y: number }) => {
+    setToolbar({ x: sel.x, y: sel.y, text: sel.text, pageNumber: sel.pageNumber })
+    setTextSelection({ pageNumber: sel.pageNumber, text: sel.text, startOffset: 0, endOffset: sel.text.length })
+  }, [setTextSelection])
+
   // Toolbar action: append to existing annotation
   const handleToolbarAppend = useCallback((annotationId: string) => {
     // Pass the selected text as supplementary context for the target annotation
@@ -2120,6 +2148,7 @@ export default function PdfViewer() {
               onAnnotationClick={(id) => setActiveAnnotation(id)}
               onRemoveMark={handleRemoveMark}
               activeSelectionText={toolbar?.text || textSelection?.text || undefined}
+              onTextSelect={handleImmersiveTextSelect}
             />
           </div>
         ) : (
@@ -2188,6 +2217,7 @@ export default function PdfViewer() {
               onAnnotationClick={(id) => setActiveAnnotation(id)}
               onRemoveMark={handleRemoveMark}
               activeSelectionText={toolbar?.text || textSelection?.text || undefined}
+              onTextSelect={handleImmersiveTextSelect}
             />
           ) : (
             /* Normal single-column OCR layout */
