@@ -348,6 +348,15 @@ function LibraryPanel() {
   }>>([])
   const [searching, setSearching] = useState(false)
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Web scraper state
+  const [showWebScraper, setShowWebScraper] = useState(false)
+  const [webUrl, setWebUrl] = useState('')
+  const [webResources, setWebResources] = useState<Array<{ url: string; name: string; ext: string }>>([])
+  const [webLoading, setWebLoading] = useState(false)
+  const [webError, setWebError] = useState('')
+  const [webPageTitle, setWebPageTitle] = useState('')
+  const [downloadingUrl, setDownloadingUrl] = useState<string | null>(null)
+  const [downloadProgress, setDownloadProgress] = useState(0)
 
   // Debounced full-text search
   useEffect(() => {
@@ -538,6 +547,9 @@ function LibraryPanel() {
             <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => setMultiSelect(true)} title="多选">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="5" width="14" height="14" rx="2"/><polyline points="9 12 11 14 17 8"/></svg>
             </button>
+            <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => setShowWebScraper(true)} title="在线获取">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            </button>
           </>
         )}
       </div>
@@ -629,8 +641,130 @@ function LibraryPanel() {
           </>
         )}
       </div>
+      {/* Web Scraper Modal */}
+      {showWebScraper && (
+        <div className="modal-overlay" onClick={() => setShowWebScraper(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560, maxHeight: '80vh', overflow: 'auto' }}>
+            <h3 style={{ marginBottom: 12 }}>在线获取资源</h3>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+              输入网页地址，自动扫描页面上的可下载文档资源
+            </div>
+
+            <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+              <input
+                type="text"
+                placeholder="输入网址，如 https://example.com/resources"
+                value={webUrl}
+                onChange={e => setWebUrl(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleScrape() }}
+                style={{
+                  flex: 1, padding: '8px 12px', border: '1px solid var(--border)',
+                  borderRadius: 6, fontSize: 13, outline: 'none',
+                  background: 'var(--bg-warm)', color: 'var(--text)',
+                }}
+              />
+              <button
+                className="btn btn-primary"
+                onClick={handleScrape}
+                disabled={webLoading || !webUrl.trim()}
+                style={{ fontSize: 13, padding: '8px 16px' }}
+              >
+                {webLoading ? '扫描中...' : '扫描'}
+              </button>
+            </div>
+
+            {webError && (
+              <div style={{ fontSize: 12, color: 'var(--danger)', marginBottom: 8 }}>{webError}</div>
+            )}
+
+            {webPageTitle && (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+                页面标题：{webPageTitle}
+              </div>
+            )}
+
+            {webResources.length > 0 && (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+                发现 {webResources.length} 个可下载资源
+              </div>
+            )}
+
+            <div style={{ maxHeight: 320, overflow: 'auto' }}>
+              {webResources.map((r, i) => (
+                <div key={i} style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px',
+                  borderBottom: '1px solid var(--border-light)', fontSize: 12,
+                }}>
+                  <span style={{
+                    padding: '2px 6px', borderRadius: 4, fontSize: 10, fontWeight: 600,
+                    background: r.ext === 'pdf' ? 'rgba(200,80,80,0.1)' : 'var(--accent-soft)',
+                    color: r.ext === 'pdf' ? '#c05050' : 'var(--accent)',
+                    flexShrink: 0,
+                  }}>
+                    {r.ext.toUpperCase()}
+                  </span>
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text)' }} title={r.name}>
+                    {r.name}
+                  </span>
+                  <button
+                    className="btn btn-sm"
+                    disabled={downloadingUrl === r.url}
+                    onClick={async () => {
+                      setDownloadingUrl(r.url); setDownloadProgress(0)
+                      const cleanup = window.electronAPI.onDownloadResourceProgress?.((pct: number) => setDownloadProgress(pct))
+                      try {
+                        const result = await window.electronAPI.downloadResource(r.url, r.name)
+                        cleanup?.()
+                        if (result.success && result.path) {
+                          // Import into library
+                          const { importByPaths } = useLibraryStore.getState()
+                          await importByPaths([result.path])
+                        }
+                      } catch {}
+                      setDownloadingUrl(null)
+                    }}
+                    style={{ fontSize: 10, padding: '3px 10px', flexShrink: 0 }}
+                  >
+                    {downloadingUrl === r.url ? `${downloadProgress}%` : '下载导入'}
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {webResources.length === 0 && !webLoading && webUrl && !webError && (
+              <div style={{ padding: '20px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                未发现可下载资源
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
+              <button className="btn" onClick={() => setShowWebScraper(false)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   )
+
+  async function handleScrape() {
+    if (!webUrl.trim() || !window.electronAPI?.scrapeResources) return
+    setWebLoading(true); setWebError(''); setWebResources([]); setWebPageTitle('')
+    try {
+      let url = webUrl.trim()
+      if (!url.startsWith('http')) url = 'https://' + url
+      const result = await window.electronAPI.scrapeResources(url)
+      if (result.success) {
+        setWebResources(result.resources)
+        setWebPageTitle(result.pageTitle || '')
+        if (result.resources.length === 0) setWebError('页面上没有找到可下载的文档资源')
+      } else {
+        setWebError(result.error || '扫描失败')
+      }
+    } catch (err: any) {
+      setWebError(err.message || '网络错误')
+    }
+    setWebLoading(false)
+  }
 }
 
 // ===== Main sidebar with tabs =====
