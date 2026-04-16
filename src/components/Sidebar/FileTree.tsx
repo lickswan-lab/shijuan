@@ -133,11 +133,11 @@ function EntryItem({ entry, multiSelect, selected, onToggleSelect }: {
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
           </svg>
         )}
-        <div style={{ flex: 1, overflow: 'hidden' }}>
+        <div style={{ flex: 1, overflow: 'hidden' }} title={`${entry.title}\n${folder}`}>
           <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 13 }}>
             {entry.title}
           </div>
-          <div style={{ fontSize: 10, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {folder}
           </div>
         </div>
@@ -452,10 +452,12 @@ function LibraryPanel() {
           placeholder="搜索文献 / 全文搜索..."
           value={searchQuery}
           onChange={e => setSearchQuery(e.target.value)}
+          onFocus={e => e.currentTarget.style.borderColor = 'var(--accent)'}
+          onBlur={e => e.currentTarget.style.borderColor = 'var(--border)'}
           style={{
-            width: '100%', padding: '6px 10px', border: '1px solid var(--border)',
+            width: '100%', padding: '7px 10px', border: '1px solid var(--border)',
             borderRadius: 'var(--radius-xs)', fontSize: 12, outline: 'none',
-            background: 'var(--bg-warm)', color: 'var(--text)'
+            background: 'var(--bg-warm)', color: 'var(--text)', transition: 'border-color 0.2s',
           }}
         />
       </div>

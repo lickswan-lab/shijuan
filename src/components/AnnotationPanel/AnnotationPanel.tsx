@@ -425,7 +425,7 @@ function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, onDo
 export default function AnnotationPanel() {
   const { currentEntry, currentPdfMeta, updatePdfMeta, library } = useLibraryStore()
   const { textSelection, activeAnnotationId, setTextSelection, setActiveAnnotation } = useUiStore()
-  const [panelWidth, _setPanelWidth] = useState(() => { try { const v = localStorage.getItem('sj-annPanelWidth'); return v ? Number(v) : 340 } catch { return 340 } })
+  const [panelWidth, _setPanelWidth] = useState(() => { try { const v = localStorage.getItem('sj-annPanelWidth'); return v ? Number(v) : 380 } catch { return 380 } })
   const setPanelWidth = (w: number) => { _setPanelWidth(w); try { localStorage.setItem('sj-annPanelWidth', String(w)) } catch {} }
   const resizingRef = useRef(false)
 
@@ -439,7 +439,7 @@ export default function AnnotationPanel() {
     const onMove = (ev: MouseEvent) => {
       if (!resizingRef.current) return
       const delta = startX - ev.clientX
-      setPanelWidth(Math.max(260, Math.min(600, startWidth + delta)))
+      setPanelWidth(Math.max(300, Math.min(600, startWidth + delta)))
     }
     const onUp = () => {
       resizingRef.current = false
@@ -1099,7 +1099,7 @@ export default function AnnotationPanel() {
 
     return (
       <div style={{ display: 'flex', flexShrink: 0 }}>
-        <div onMouseDown={handleResizeStart} style={{ width: 4, cursor: 'col-resize', background: 'transparent', flexShrink: 0, transition: 'background 0.15s' }} onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent)')} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')} />
+        <div onMouseDown={handleResizeStart} style={{ width: 6, cursor: 'col-resize', background: 'var(--border-light)', flexShrink: 0, transition: 'background 0.15s' }} onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent)')} onMouseLeave={e => (e.currentTarget.style.background = 'var(--border-light)')} />
         <div className="annotation-panel" style={{ width: panelWidth }}>
         <div className="annotation-panel-header">
           <span>注释</span>
@@ -1171,7 +1171,7 @@ export default function AnnotationPanel() {
   // ===== Active annotation view =====
   return (
     <div style={{ display: 'flex', flexShrink: 0 }}>
-      <div onMouseDown={handleResizeStart} style={{ width: 4, cursor: 'col-resize', background: 'transparent', flexShrink: 0, transition: 'background 0.15s' }} onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent)')} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')} />
+      <div onMouseDown={handleResizeStart} style={{ width: 6, cursor: 'col-resize', background: 'var(--border-light)', flexShrink: 0, transition: 'background 0.15s' }} onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent)')} onMouseLeave={e => (e.currentTarget.style.background = 'var(--border-light)')} />
       <div className="annotation-panel" style={{ width: panelWidth }}>
       <div className="annotation-panel-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
