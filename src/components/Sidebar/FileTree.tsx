@@ -548,11 +548,7 @@ function LibraryPanel() {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="5" width="14" height="14" rx="2"/><polyline points="9 12 11 14 17 8"/></svg>
             </button>
             <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => {
-              if (window.electronAPI?.openResourceBrowser) {
-                window.electronAPI.openResourceBrowser()
-              } else {
-                setShowWebScraper(true)  // fallback to modal
-              }
+              setShowWebScraper(true)
             }} title="在线获取">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
             </button>
@@ -652,8 +648,39 @@ function LibraryPanel() {
         <div className="modal-overlay" onClick={() => setShowWebScraper(false)}>
           <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560, maxHeight: '80vh', overflow: 'auto' }}>
             <h3 style={{ marginBottom: 12 }}>在线获取资源</h3>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
-              输入网页地址，自动扫描页面上的可下载文档资源
+
+            {/* Open built-in browser for login-required sites */}
+            <div style={{ padding: '10px 14px', marginBottom: 12, borderRadius: 8, background: 'var(--accent-soft)', border: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text)', marginBottom: 6 }}>需要登录的网站？</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+                打开内置浏览器 → 登录网站 → 导航到资源页 → 点击「扫描浏览器」
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="btn btn-sm btn-primary" style={{ fontSize: 11 }}
+                  onClick={() => window.electronAPI?.openResourceBrowser?.(webUrl || undefined)}>
+                  打开浏览器{webUrl ? '（前往该网址）' : ''}
+                </button>
+                <button className="btn btn-sm" style={{ fontSize: 11 }}
+                  onClick={async () => {
+                    if (!window.electronAPI?.scanBrowserResources) return
+                    setWebLoading(true); setWebError(''); setWebResources([])
+                    const result = await window.electronAPI.scanBrowserResources()
+                    if (result.success) {
+                      setWebResources(result.resources)
+                      setWebPageTitle(result.title || '')
+                      if (result.resources.length === 0) setWebError('浏览器页面上没有找到可下载资源')
+                    } else {
+                      setWebError(result.error || '请先打开浏览器并导航到资源页面')
+                    }
+                    setWebLoading(false)
+                  }}>
+                  扫描浏览器页面
+                </button>
+              </div>
+            </div>
+
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8, textAlign: 'center' }}>
+              — 或直接输入公开网页地址 —
             </div>
 
             <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
@@ -717,17 +744,23 @@ function LibraryPanel() {
                     disabled={downloadingUrl === r.url}
                     onClick={async () => {
                       setDownloadingUrl(r.url); setDownloadProgress(0)
-                      const cleanup = window.electronAPI.onDownloadResourceProgress?.((pct: number) => setDownloadProgress(pct))
-                      try {
-                        const result = await window.electronAPI.downloadResource(r.url, r.name)
-                        cleanup?.()
-                        if (result.success && result.path) {
-                          // Import into library
-                          const { importByPaths } = useLibraryStore.getState()
-                          await importByPaths([result.path])
-                        }
-                      } catch {}
-                      setDownloadingUrl(null)
+                      // Try browser download (uses authenticated session) first, fallback to direct
+                      if (window.electronAPI?.browserDownload) {
+                        window.electronAPI.browserDownload(r.url)
+                        // The download will be handled by browser's will-download → auto import
+                        setTimeout(() => setDownloadingUrl(null), 3000)
+                      } else {
+                        const cleanup = window.electronAPI.onDownloadResourceProgress?.((pct: number) => setDownloadProgress(pct))
+                        try {
+                          const result = await window.electronAPI.downloadResource(r.url, r.name)
+                          cleanup?.()
+                          if (result.success && result.path) {
+                            const { importByPaths } = useLibraryStore.getState()
+                            await importByPaths([result.path])
+                          }
+                        } catch {}
+                        setDownloadingUrl(null)
+                      }
                     }}
                     style={{ fontSize: 10, padding: '3px 10px', flexShrink: 0 }}
                   >

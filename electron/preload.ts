@@ -112,6 +112,10 @@ const electronAPI = {
 
   // === Built-in Browser ===
   openResourceBrowser: (startUrl?: string) => ipcRenderer.send('open-resource-browser', startUrl),
+  scanBrowserResources: (): Promise<{ success: boolean; resources: Array<{ url: string; name: string; ext: string }>; url?: string; title?: string; error?: string }> =>
+    ipcRenderer.invoke('scan-browser-resources'),
+  browserNavigate: (url: string) => ipcRenderer.send('browser-navigate', url),
+  browserDownload: (url: string) => ipcRenderer.send('browser-download', url),
   onResourceDownloaded: (callback: (filePath: string) => void) => {
     const handler = (_event: any, filePath: string) => callback(filePath)
     ipcRenderer.on('resource-downloaded', handler)
