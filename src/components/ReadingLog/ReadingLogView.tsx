@@ -43,16 +43,18 @@ const EVENT_ICONS: Record<ReadingLogEvent['type'], string> = {
   mark_text: 'M4 7V4h16v3 M9 20h6 M12 4v16',
 }
 
-// ===== Learning Profile: annotation density heatmap across all documents =====
+// ===== Learning Profile: reading overview with annotation heatmap =====
 function LearningProfile() {
   const { library } = useLibraryStore()
   const [profileData, setProfileData] = useState<Array<{
     id: string; title: string; annCount: number; noteCount: number; lastOpened: string
   }>>([])
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     if (!library) return
     let cancelled = false
+    setLoading(true)
 
     async function loadProfile() {
       const data: typeof profileData = []
@@ -60,22 +62,19 @@ function LearningProfile() {
         try {
           const meta = await window.electronAPI.loadPdfMeta(entry.id)
           const annCount = meta?.annotations?.length || 0
-          const noteCount = meta?.annotations?.reduce((sum, a) =>
-            sum + a.historyChain.filter(h => h.author === 'user').length, 0) || 0
-          if (annCount > 0 || entry.lastOpenedAt) {
-            data.push({
-              id: entry.id,
-              title: entry.title,
-              annCount,
-              noteCount,
-              lastOpened: entry.lastOpenedAt || entry.addedAt,
-            })
-          }
+          const noteCount = meta?.annotations?.reduce((sum: number, a: any) =>
+            sum + a.historyChain.filter((h: any) => h.author === 'user').length, 0) || 0
+          data.push({
+            id: entry.id,
+            title: entry.title,
+            annCount,
+            noteCount,
+            lastOpened: entry.lastOpenedAt || entry.addedAt,
+          })
         } catch {}
       }
-      // Sort by annotation count descending
       data.sort((a, b) => b.annCount - a.annCount)
-      if (!cancelled) setProfileData(data)
+      if (!cancelled) { setProfileData(data); setLoading(false) }
     }
 
     loadProfile()
@@ -86,46 +85,55 @@ function LearningProfile() {
   const totalAnnotations = profileData.reduce((s, d) => s + d.annCount, 0)
   const totalNotes = profileData.reduce((s, d) => s + d.noteCount, 0)
   const totalEntries = library?.entries.length || 0
+  const readEntries = profileData.filter(d => d.annCount > 0).length
+
+  if (loading) {
+    return (
+      <div style={{ padding: '40px 32px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
+        <span className="loading-spinner" style={{ marginRight: 8 }} />加载学习档案...
+      </div>
+    )
+  }
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', background: 'var(--bg)', padding: '28px 32px' }}>
-      <h2 style={{ fontSize: 18, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>学习档案</h2>
-      <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 24 }}>你的阅读深度一览</p>
+    <div style={{ padding: '24px 28px' }}>
+      {/* Header */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>学习档案</div>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          共 {totalEntries} 篇文献，{readEntries} 篇有标注，{totalAnnotations} 条注释
+        </div>
+      </div>
 
-      {/* Stats overview */}
-      <div style={{ display: 'flex', gap: 16, marginBottom: 28 }}>
+      {/* Stats row */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 20 }}>
         {[
-          { label: '文献总量', value: totalEntries, icon: '📚' },
-          { label: '注释总数', value: totalAnnotations, icon: '✏️' },
-          { label: '笔记条数', value: totalNotes, icon: '📝' },
-          { label: '深度阅读', value: profileData.filter(d => d.annCount >= 5).length, icon: '🔥' },
+          { label: '注释', value: totalAnnotations, color: 'var(--accent)' },
+          { label: '笔记', value: totalNotes, color: 'var(--success)' },
+          { label: '深度阅读', value: profileData.filter(d => d.annCount >= 5).length, color: 'var(--warning)' },
         ].map(s => (
           <div key={s.label} style={{
-            flex: 1, padding: '14px 16px', borderRadius: 10,
+            padding: '12px 14px', borderRadius: 8,
             background: 'var(--bg-warm)', border: '1px solid var(--border)',
+            textAlign: 'center',
           }}>
-            <div style={{ fontSize: 20, marginBottom: 4 }}>{s.icon}</div>
-            <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text)' }}>{s.value}</div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{s.label}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>{s.label}</div>
           </div>
         ))}
       </div>
 
-      {/* Annotation density heatmap */}
-      <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 12 }}>注释深度</div>
-        {profileData.length === 0 ? (
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '20px 0', textAlign: 'center' }}>
-            还没有阅读记录，开始阅读并标注吧
-          </div>
-        ) : (
-          profileData.slice(0, 15).map(d => {
+      {/* Annotation depth bars */}
+      {profileData.filter(d => d.annCount > 0).length > 0 && (
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 10 }}>阅读深度</div>
+          {profileData.filter(d => d.annCount > 0).slice(0, 12).map(d => {
             const pct = (d.annCount / maxAnn) * 100
-            const hue = pct > 80 ? 25 : pct > 50 ? 35 : pct > 20 ? 40 : 45
-            const sat = pct > 50 ? '70%' : '40%'
-            const light = pct > 80 ? '50%' : pct > 50 ? '60%' : pct > 20 ? '70%' : '80%'
             return (
-              <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}
+              <div key={d.id} style={{
+                display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5, cursor: 'pointer',
+                padding: '3px 0', borderRadius: 4,
+              }}
                 onClick={() => {
                   const entry = library?.entries.find(e => e.id === d.id)
                   if (entry) {
@@ -133,32 +141,40 @@ function LearningProfile() {
                     useUiStore.getState().setActiveReadingLogDate(null)
                   }
                 }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
               >
                 <div style={{
-                  width: 140, fontSize: 11, color: 'var(--text)', overflow: 'hidden',
-                  textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer', flexShrink: 0,
+                  width: 100, fontSize: 11, color: 'var(--text)', overflow: 'hidden',
+                  textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 0,
                 }} title={d.title}>
                   {d.title}
                 </div>
-                <div style={{ flex: 1, height: 14, background: 'var(--border-light)', borderRadius: 3, overflow: 'hidden', cursor: 'pointer' }}>
+                <div style={{ flex: 1, height: 10, background: 'var(--border-light)', borderRadius: 5, overflow: 'hidden' }}>
                   <div style={{
-                    width: `${Math.max(pct, 3)}%`, height: '100%', borderRadius: 3,
-                    background: `hsl(${hue}, ${sat}, ${light})`,
+                    width: `${Math.max(pct, 4)}%`, height: '100%', borderRadius: 5,
+                    background: `var(--accent)`, opacity: 0.4 + (pct / 100) * 0.6,
                     transition: 'width 0.5s ease',
                   }} />
                 </div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)', width: 36, textAlign: 'right', flexShrink: 0 }}>
-                  {d.annCount} 条
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', width: 28, textAlign: 'right', flexShrink: 0 }}>
+                  {d.annCount}
                 </div>
               </div>
             )
-          })
-        )}
-      </div>
+          })}
+        </div>
+      )}
 
-      <p style={{ fontSize: 10, color: 'var(--text-muted)', textAlign: 'center' }}>
+      {profileData.filter(d => d.annCount > 0).length === 0 && (
+        <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+          还没有阅读标注，开始阅读并标注吧
+        </div>
+      )}
+
+      <div style={{ fontSize: 10, color: 'var(--text-muted)', textAlign: 'center', marginTop: 16 }}>
         选择左侧日期查看具体日志
-      </p>
+      </div>
     </div>
   )
 }
@@ -460,7 +476,9 @@ export default function ReadingLogView() {
       </div>
     </div>
       ) : (
-        <LearningProfile />
+        <div style={{ flex: 1, overflow: 'auto', background: 'var(--bg)' }}>
+          <LearningProfile />
+        </div>
       )}
     </div>
   )
