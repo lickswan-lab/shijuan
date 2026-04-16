@@ -84,23 +84,8 @@ function createWindow(): BrowserWindow {
 // ===== Single instance lock =====
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
-  // dialog can only be used after app is ready
-  app.whenReady().then(() => {
-    const choice = dialog.showMessageBoxSync({
-      type: 'warning',
-      title: '拾卷',
-      message: '拾卷已经在运行中',
-      detail: '检测到拾卷已有一个实例正在运行。\n\n你可以结束旧进程并重新启动，或者取消本次启动去找到已打开的窗口。',
-      buttons: ['结束旧进程并重启', '取消'],
-      defaultId: 0,
-      cancelId: 1,
-    })
-    if (choice === 0) {
-      app.releaseSingleInstanceLock()
-      app.relaunch()
-    }
-    app.quit()
-  })
+  // Another instance is running — it will auto-focus its window via second-instance event
+  app.quit()
 } else {
   app.on('second-instance', () => {
     const wins = BrowserWindow.getAllWindows()
@@ -108,6 +93,8 @@ if (!gotTheLock) {
       const win = wins[0]
       if (win.isMinimized()) win.restore()
       win.focus()
+      win.flashFrame(true)
+      setTimeout(() => win.flashFrame(false), 3000)
     }
   })
 
