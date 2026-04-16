@@ -348,15 +348,7 @@ function LibraryPanel() {
   }>>([])
   const [searching, setSearching] = useState(false)
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // Web scraper state
-  const [showWebScraper, setShowWebScraper] = useState(false)
-  const [webUrl, setWebUrl] = useState('')
-  const [webResources, setWebResources] = useState<Array<{ url: string; name: string; ext: string }>>([])
-  const [webLoading, setWebLoading] = useState(false)
-  const [webError, setWebError] = useState('')
-  const [webPageTitle, setWebPageTitle] = useState('')
-  const [downloadingUrl, setDownloadingUrl] = useState<string | null>(null)
-  const [downloadProgress, setDownloadProgress] = useState(0)
+  // Web scraper — shelved, code in _shelved_features/
 
   // Debounced full-text search
   useEffect(() => {
@@ -547,11 +539,6 @@ function LibraryPanel() {
             <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => setMultiSelect(true)} title="多选">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="5" width="14" height="14" rx="2"/><polyline points="9 12 11 14 17 8"/></svg>
             </button>
-            <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => {
-              setShowWebScraper(true)
-            }} title="在线获取">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-            </button>
           </>
         )}
       </div>
@@ -643,8 +630,8 @@ function LibraryPanel() {
           </>
         )}
       </div>
-      {/* Web Scraper Modal */}
-      {showWebScraper && (
+      {/* Web Scraper — shelved */}
+      {false && (
         <div className="modal-overlay" onClick={() => setShowWebScraper(false)}>
           <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560, maxHeight: '80vh', overflow: 'auto' }}>
             <h3 style={{ marginBottom: 12 }}>在线获取资源</h3>

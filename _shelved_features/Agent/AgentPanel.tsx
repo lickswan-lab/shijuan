@@ -1,0 +1,508 @@
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { v4 as uuid } from 'uuid'
+import ReactMarkdown from 'react-markdown'
+import rehypeRaw from 'rehype-raw'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import { useLibraryStore } from '../../store/libraryStore'
+import { useUiStore } from '../../store/uiStore'
+import type { AgentMessage, AgentConversation, HermesSkill, HermesInsight } from '../../types/library'
+import { buildAgentSystemPrompt, type AgentContext } from './agentPrompt'
+import { parseToolCalls, hasToolCalls, extractMemoryUpdate, cleanResponse, executeTool } from './agentTools'
+
+// ===== Built-in tool definitions (display only) =====
+const BUILTIN_TOOLS: Array<{ name: string; desc: string; category?: string }> = [
+  { name: 'search_library', desc: '搜索文献库（标题/标签/作者）', category: '基础' },
+  { name: 'get_entry_detail', desc: '获取文献完整元数据', category: '基础' },
+  { name: 'get_annotations', desc: '读取文献的注释和历史链', category: '基础' },
+  { name: 'get_document_text', desc: '获取文献全文（OCR文本）', category: '基础' },
+  { name: 'list_memos', desc: '列出所有思考笔记', category: '基础' },
+  { name: 'read_memo', desc: '读取笔记内容', category: '基础' },
+  { name: 'create_memo', desc: '创建新笔记', category: '基础' },
+  { name: 'update_memo', desc: '更新笔记内容', category: '基础' },
+  { name: 'get_reading_activity', desc: '查看最近阅读活动', category: '基础' },
+  { name: 'build_knowledge_map', desc: '构建跨文献知识图谱', category: '智能' },
+  { name: 'generate_exam', desc: '生成考试预测和模拟题', category: '智能' },
+  { name: 'build_paper_outline', desc: '从注释构建论文大纲', category: '智能' },
+  { name: 'trace_concept_evolution', desc: '追踪概念理解的演变', category: '智能' },
+]
+
+interface ConfiguredProvider {
+  id: string
+  name: string
+  models: Array<{ id: string; name: string }>
+}
+
+type PanelTab = 'chat' | 'insights' | 'skills'
+
+// ===== Main Component =====
+export default function AgentPanel() {
+  const { library, currentEntry, currentPdfMeta, createMemo, updateMemo } = useLibraryStore()
+  const { selectedAiModel, textSelection } = useUiStore()
+
+  const [tab, setTab] = useState<PanelTab>('chat')
+
+  // Chat state
+  const [conversations, setConversations] = useState<AgentConversation[]>([])
+  const [activeConv, setActiveConv] = useState<AgentConversation | null>(null)
+  const [input, setInput] = useState('')
+  const [streaming, setStreaming] = useState(false)
+  const [streamingText, setStreamingText] = useState('')
+  const [toolStatus, setToolStatus] = useState('')
+  const [memory, setMemory] = useState('')
+
+  // Model
+  const [agentModel, setAgentModel] = useState(() => {
+    try { return localStorage.getItem('sj-agentModel') || selectedAiModel } catch { return selectedAiModel }
+  })
+  const [configuredProviders, setConfiguredProviders] = useState<ConfiguredProvider[]>([])
+
+  // Insights
+  const [insight, setInsight] = useState<HermesInsight | null>(null)
+  const [generatingInsight, setGeneratingInsight] = useState(false)
+
+  // Skills
+  const [skills, setSkills] = useState<HermesSkill[]>([])
+  const [editingSkill, setEditingSkill] = useState<HermesSkill | null>(null)
+
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Load everything on mount
+  const loadMemory = useCallback(() => {
+    window.electronAPI.agentLoadMemory().then(r => { if (r.success) setMemory(r.content || '') })
+  }, [])
+
+  useEffect(() => {
+    loadMemory()
+    window.electronAPI.aiGetConfigured?.().then(setConfiguredProviders).catch(() => {})
+    window.electronAPI.agentLoadConversations().then(r => {
+      if (r.success) {
+        setConversations(r.conversations)
+        if (r.conversations.length > 0) setActiveConv(r.conversations[0])
+      }
+    })
+    window.electronAPI.agentLoadInsight().then(r => { if (r.success && r.insight?.content) setInsight(r.insight) })
+    window.electronAPI.agentLoadSkills().then(r => { if (r.success) setSkills(r.skills) })
+    const timer = setTimeout(loadMemory, 4000)
+    return () => clearTimeout(timer)
+  }, [])
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [activeConv?.messages.length, streamingText])
+
+  // Store helpers
+  const storeHelpers = {
+    getLibrary: () => library,
+    getCurrentEntry: () => currentEntry,
+    getSelectedText: () => textSelection?.text || null,
+    getCurrentPdfMeta: () => currentPdfMeta,
+    createMemo, updateMemo,
+  }
+
+  const buildContext = useCallback((): AgentContext => {
+    const ctx: AgentContext = { memory }
+    if (currentEntry) { ctx.currentEntryTitle = currentEntry.title; ctx.currentEntryId = currentEntry.id }
+    if (textSelection?.text) ctx.selectedText = textSelection.text
+    if (currentPdfMeta?.annotations) {
+      ctx.recentAnnotations = currentPdfMeta.annotations.slice(-5).map(a => ({
+        text: a.anchor?.selectedText || '', note: a.historyChain?.[a.historyChain.length - 1]?.content || '',
+      }))
+    }
+    return ctx
+  }, [memory, currentEntry, textSelection, currentPdfMeta])
+
+  // ===== Chat logic =====
+  const handleNewConversation = useCallback(() => {
+    const conv: AgentConversation = {
+      id: uuid(), title: '新对话', messages: [],
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    }
+    setActiveConv(conv)
+    setConversations(prev => [conv, ...prev])
+    setTab('chat')
+  }, [])
+
+  const handleSend = useCallback(async () => {
+    const text = input.trim()
+    if (!text || streaming) return
+
+    let conv = activeConv
+    if (!conv) {
+      conv = { id: uuid(), title: text.slice(0, 30), messages: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
+      setConversations(prev => [conv!, ...prev])
+    }
+
+    const userMsg: AgentMessage = { id: uuid(), role: 'user', content: text, timestamp: new Date().toISOString() }
+    const updatedMessages = [...conv.messages, userMsg]
+    conv = { ...conv, messages: updatedMessages, updatedAt: new Date().toISOString() }
+    if (conv.messages.length === 1) conv.title = text.slice(0, 30)
+    setActiveConv(conv)
+    setInput('')
+    setStreaming(true)
+    setStreamingText('')
+
+    try {
+      // Include custom skills in system prompt context
+      const customSkillsText = skills.filter(s => s.type !== 'builtin' && s.enabled).map(s =>
+        `[技能: ${s.name}] ${s.description}${s.prompt ? `\n指令: ${s.prompt}` : ''}`
+      ).join('\n')
+
+      const systemPrompt = buildAgentSystemPrompt(buildContext()) +
+        (customSkillsText ? `\n\n## 用户自定义技能\n\n${customSkillsText}` : '')
+
+      const llmMessages: Array<{ role: string; content: string }> = [{ role: 'system', content: systemPrompt }]
+      for (const msg of updatedMessages) {
+        if (msg.role === 'user') llmMessages.push({ role: 'user', content: msg.content })
+        else if (msg.role === 'assistant') llmMessages.push({ role: 'assistant', content: msg.content })
+        else if (msg.role === 'tool_result') llmMessages.push({ role: 'user', content: `<tool_result name="${msg.toolName}">${msg.content}</tool_result>` })
+      }
+
+      let maxIter = 5, finalResponse = ''
+      while (maxIter-- > 0) {
+        const streamId = uuid()
+        let fullText = ''
+        setStreamingText('')
+        const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => { if (sid === streamId) { fullText += chunk; setStreamingText(fullText) } })
+        try { await window.electronAPI.aiChatStream(streamId, agentModel, llmMessages) } finally { cleanup() }
+        setStreamingText('')
+
+        if (hasToolCalls(fullText)) {
+          for (const call of parseToolCalls(fullText)) {
+            setToolStatus(`${call.toolName}...`)
+            const result = await executeTool(call.toolName, call.argsJson, storeHelpers)
+            updatedMessages.push(
+              { id: uuid(), role: 'tool_call', content: call.argsJson, toolName: call.toolName, toolArgs: call.argsJson, timestamp: new Date().toISOString() },
+              { id: uuid(), role: 'tool_result', content: result, toolName: call.toolName, timestamp: new Date().toISOString() },
+            )
+            llmMessages.push({ role: 'assistant', content: fullText }, { role: 'user', content: `<tool_result name="${call.toolName}">${result}</tool_result>` })
+          }
+          setToolStatus('')
+          continue
+        }
+        finalResponse = fullText
+        break
+      }
+      setToolStatus('')
+
+      const memUpdate = extractMemoryUpdate(finalResponse)
+      if (memUpdate) {
+        const newMem = memory ? `${memory}\n\n---\n\n${memUpdate}` : memUpdate
+        setMemory(newMem)
+        await window.electronAPI.agentSaveMemory(newMem)
+      }
+
+      const cleaned = cleanResponse(finalResponse)
+      const finalMessages = [...updatedMessages, { id: uuid(), role: 'assistant' as const, content: cleaned, timestamp: new Date().toISOString() }]
+      const finalConv: AgentConversation = { ...conv, messages: finalMessages, updatedAt: new Date().toISOString() }
+      setActiveConv(finalConv)
+      setConversations(prev => prev.map(c => c.id === finalConv.id ? finalConv : c))
+      await window.electronAPI.agentSaveConversation(finalConv)
+    } catch (err: any) {
+      setActiveConv({ ...conv, messages: [...updatedMessages, { id: uuid(), role: 'assistant', content: `Agent 出错：${err.message}`, timestamp: new Date().toISOString() }] })
+    }
+    setStreaming(false)
+  }, [input, streaming, activeConv, agentModel, memory, buildContext, storeHelpers, skills])
+
+  // ===== Insight generation =====
+  const generateInsight = useCallback(async () => {
+    if (generatingInsight || !memory.trim()) return
+    setGeneratingInsight(true)
+
+    const streamId = uuid()
+    let fullText = ''
+
+    const prompt = `你是 Hermes 研究助手的分析模块。基于以下用户行为记录，生成一份简短的研究洞察报告（3-5 个要点）。
+
+分析方向：
+1. 用户近期的研究主题和关注方向
+2. 阅读习惯模式（时间、频率、深度）
+3. 跨文献的潜在关联
+4. 值得深入的研究线索
+5. 对用户的个性化建议
+
+用中文，每个要点一句话，用 emoji 开头。
+
+===== 用户行为记录 =====
+${memory.slice(-3000)}`
+
+    const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => {
+      if (sid === streamId) { fullText += chunk; setStreamingText(fullText) }
+    })
+
+    try {
+      await window.electronAPI.aiChatStream(streamId, agentModel, [
+        { role: 'system', content: '你是一个专注于学术研究行为分析的AI助手。' },
+        { role: 'user', content: prompt },
+      ])
+    } finally { cleanup() }
+
+    setStreamingText('')
+    if (fullText) {
+      const newInsight: HermesInsight = {
+        id: uuid(), content: fullText,
+        basedOn: (memory.match(/^- \[/gm) || []).length,
+        generatedAt: new Date().toISOString(), model: agentModel,
+      }
+      setInsight(newInsight)
+      await window.electronAPI.agentSaveInsight(newInsight)
+      // Only now show the red dot — real insight generated
+      useUiStore.getState().setHermesHasInsight(true)
+    }
+    setGeneratingInsight(false)
+  }, [memory, agentModel, generatingInsight])
+
+  // ===== Skill CRUD =====
+  const saveSkill = useCallback(async (skill: HermesSkill) => {
+    const updated = skills.find(s => s.id === skill.id)
+      ? skills.map(s => s.id === skill.id ? skill : s)
+      : [...skills, skill]
+    setSkills(updated)
+    await window.electronAPI.agentSaveSkills(updated)
+    setEditingSkill(null)
+  }, [skills])
+
+  const deleteSkill = useCallback(async (id: string) => {
+    const updated = skills.filter(s => s.id !== id)
+    setSkills(updated)
+    await window.electronAPI.agentSaveSkills(updated)
+  }, [skills])
+
+  const toggleSkill = useCallback(async (id: string) => {
+    const updated = skills.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s)
+    setSkills(updated)
+    await window.electronAPI.agentSaveSkills(updated)
+  }, [skills])
+
+  // ===== Render helpers =====
+  const displayMessages = activeConv?.messages.filter(m => m.role === 'user' || m.role === 'assistant') || []
+  const behaviorCount = (memory.match(/^- \[/gm) || []).length
+
+  const tabStyle = (t: PanelTab) => ({
+    flex: 1, padding: '6px 0', fontSize: 11, fontWeight: tab === t ? 600 : 400,
+    border: 'none', borderBottom: tab === t ? '2px solid var(--accent)' : '2px solid transparent',
+    background: 'none', color: tab === t ? 'var(--accent-hover)' : 'var(--text-muted)',
+    cursor: 'pointer',
+  })
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg)' }}>
+      {/* Header */}
+      <div style={{ padding: '6px 12px', borderBottom: '1px solid var(--border-light)', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+        </svg>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>Hermes</span>
+        <select value={agentModel} onChange={e => { setAgentModel(e.target.value); try { localStorage.setItem('sj-agentModel', e.target.value) } catch {} }}
+          style={{ flex: 1, minWidth: 0, padding: '2px 4px', fontSize: 10, border: '1px solid var(--border)', borderRadius: 4, outline: 'none', background: 'var(--bg)', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+          {configuredProviders.map(p => (<optgroup key={p.id} label={p.name}>{p.models.map(m => (<option key={`${p.id}:${m.id}`} value={`${p.id}:${m.id}`}>{m.name}</option>))}</optgroup>))}
+        </select>
+      </div>
+
+      {/* Tab bar */}
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--border-light)', flexShrink: 0 }}>
+        <button style={tabStyle('chat')} onClick={() => setTab('chat')}>对话</button>
+        <button style={tabStyle('insights')} onClick={() => setTab('insights')}>
+          洞察{behaviorCount > 0 && <span style={{ fontSize: 9, marginLeft: 3, opacity: 0.6 }}>({behaviorCount})</span>}
+        </button>
+        <button style={tabStyle('skills')} onClick={() => setTab('skills')}>
+          技能库{skills.length > 0 && <span style={{ fontSize: 9, marginLeft: 3, opacity: 0.6 }}>({BUILTIN_TOOLS.length + skills.length})</span>}
+        </button>
+      </div>
+
+      {/* ===== Tab: Chat ===== */}
+      {tab === 'chat' && (
+        <>
+          {conversations.length > 1 && (
+            <div style={{ padding: '4px 8px', borderBottom: '1px solid var(--border-light)', display: 'flex', gap: 4, overflow: 'auto', flexShrink: 0 }}>
+              {conversations.slice(0, 8).map(c => (
+                <button key={c.id} onClick={() => setActiveConv(c)} style={{
+                  padding: '2px 8px', fontSize: 10, borderRadius: 10, cursor: 'pointer',
+                  border: c.id === activeConv?.id ? '1px solid var(--accent)' : '1px solid var(--border)',
+                  background: c.id === activeConv?.id ? 'var(--accent-soft)' : 'transparent',
+                  color: c.id === activeConv?.id ? 'var(--accent-hover)' : 'var(--text-muted)',
+                  whiteSpace: 'nowrap', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis',
+                }}>{c.title}</button>
+              ))}
+            </div>
+          )}
+
+          <div style={{ flex: 1, overflow: 'auto', padding: '12px' }}>
+            {displayMessages.length === 0 && !streaming && (
+              <div style={{ textAlign: 'center', padding: '30px 16px', color: 'var(--text-muted)' }}>
+                <div style={{ fontSize: 12, marginBottom: 4 }}>问 Hermes 任何关于你的研究的问题</div>
+                <div style={{ fontSize: 11 }}>「我最近在读什么？」「帮我整理这个主题的笔记」</div>
+              </div>
+            )}
+
+            {displayMessages.map(msg => (
+              <div key={msg.id} style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                <div style={{
+                  maxWidth: '90%', padding: '8px 12px', borderRadius: 10, fontSize: 13, lineHeight: 1.7,
+                  ...(msg.role === 'user'
+                    ? { background: 'var(--accent)', color: '#fff', borderBottomRightRadius: 2 }
+                    : { background: 'var(--bg-warm)', color: 'var(--text)', border: '1px solid var(--border-light)', borderBottomLeftRadius: 2 }),
+                }}>
+                  {msg.role === 'assistant' ? <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>{msg.content}</ReactMarkdown> : <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>}
+                </div>
+              </div>
+            ))}
+
+            {streaming && (
+              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                {toolStatus && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}><span className="loading-spinner" style={{ width: 10, height: 10 }} />{toolStatus}</div>}
+                <div style={{ maxWidth: '90%', padding: '8px 12px', borderRadius: 10, background: 'var(--bg-warm)', border: '1px solid var(--border-light)', borderBottomLeftRadius: 2, fontSize: 13, lineHeight: 1.7 }}>
+                  {streamingText ? <><ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>{cleanResponse(streamingText)}</ReactMarkdown><span className="streaming-cursor" /></> : <span style={{ color: 'var(--text-muted)' }}>{toolStatus ? '处理中...' : '思考中...'}</span>}
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          <div style={{ padding: '8px 12px', borderTop: '1px solid var(--border-light)', flexShrink: 0, display: 'flex', gap: 6, alignItems: 'flex-end' }}>
+            <button onClick={handleNewConversation} style={{ padding: '6px', background: 'none', border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer', color: 'var(--text-muted)', flexShrink: 0 }} title="新对话">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+            <textarea value={input} onChange={e => setInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
+              placeholder="问 Hermes..." rows={1}
+              style={{ flex: 1, padding: '6px 10px', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12, outline: 'none', resize: 'none', fontFamily: 'var(--font)', background: 'var(--bg)', color: 'var(--text)', lineHeight: 1.5, maxHeight: 100, overflow: 'auto' }}
+              onFocus={e => e.currentTarget.style.borderColor = 'var(--accent)'}
+              onBlur={e => e.currentTarget.style.borderColor = 'var(--border)'}
+              onInput={e => { const el = e.currentTarget; el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 100) + 'px' }}
+            />
+            <button onClick={handleSend} disabled={!input.trim() || streaming} style={{ padding: '6px 10px', borderRadius: 8, border: 'none', cursor: 'pointer', background: input.trim() && !streaming ? 'var(--accent)' : 'var(--border)', color: '#fff', flexShrink: 0 }}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ===== Tab: Insights ===== */}
+      {tab === 'insights' && (
+        <div style={{ flex: 1, overflow: 'auto', padding: '12px' }}>
+          {/* AI Insight card */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>AI 研究洞察</span>
+              <button onClick={generateInsight} disabled={generatingInsight || !memory.trim()} style={{
+                padding: '3px 10px', fontSize: 10, borderRadius: 4, cursor: 'pointer',
+                background: 'var(--accent-soft)', border: '1px solid var(--accent)', color: 'var(--accent-hover)',
+              }}>
+                {generatingInsight ? '分析中...' : insight ? '重新分析' : '生成洞察'}
+              </button>
+            </div>
+
+            {generatingInsight && streamingText && (
+              <div style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--bg-warm)', border: '1px solid var(--border-light)', fontSize: 12, lineHeight: 1.8 }}>
+                <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>{streamingText}</ReactMarkdown>
+                <span className="streaming-cursor" />
+              </div>
+            )}
+
+            {!generatingInsight && insight && (
+              <div style={{ padding: '10px 12px', borderRadius: 8, background: 'linear-gradient(135deg, var(--accent-soft), var(--bg-warm))', border: '1px solid var(--border-light)' }}>
+                <div style={{ fontSize: 12, lineHeight: 1.8, color: 'var(--text)' }}>
+                  <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>{insight.content}</ReactMarkdown>
+                </div>
+                <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 6 }}>
+                  基于 {insight.basedOn} 条行为记录 · {new Date(insight.generatedAt).toLocaleString('zh-CN')}
+                </div>
+              </div>
+            )}
+
+            {!generatingInsight && !insight && (
+              <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 11 }}>
+                {memory.trim() ? '点击「生成洞察」让 AI 分析你的阅读行为' : '暂无行为记录。使用拾卷阅读、注释后，Hermes 会自动学习'}
+              </div>
+            )}
+          </div>
+
+          {/* Raw behavior log */}
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 8 }}>行为记录</div>
+            {behaviorCount === 0 ? (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center', padding: 16 }}>暂无记录</div>
+            ) : (
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.7, maxHeight: 300, overflow: 'auto' }}>
+                {memory.split('\n').filter(l => l.startsWith('- [')).slice(-15).map((line, i) => (
+                  <div key={i} style={{ padding: '2px 0', borderBottom: '1px solid var(--border-light)' }}>{line.replace(/^- /, '')}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ===== Tab: Skills ===== */}
+      {tab === 'skills' && (
+        <div style={{ flex: 1, overflow: 'auto', padding: '12px' }}>
+          {/* Custom skills */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>自定义技能</span>
+            <button onClick={() => setEditingSkill({
+              id: uuid(), name: '', description: '', type: 'custom',
+              prompt: '', trigger: '', enabled: true,
+              createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+            })} style={{ padding: '3px 10px', fontSize: 10, borderRadius: 4, cursor: 'pointer', background: 'var(--accent-soft)', border: '1px solid var(--accent)', color: 'var(--accent-hover)' }}>
+              + 新技能
+            </button>
+          </div>
+
+          {/* Skill editor */}
+          {editingSkill && (
+            <div style={{ padding: 10, marginBottom: 12, borderRadius: 8, border: '1px solid var(--accent)', background: 'var(--bg-warm)' }}>
+              <input value={editingSkill.name} onChange={e => setEditingSkill({ ...editingSkill, name: e.target.value })}
+                placeholder="技能名称（如：论文摘要提取）" style={{ width: '100%', padding: '4px 8px', marginBottom: 6, border: '1px solid var(--border)', borderRadius: 4, fontSize: 12, outline: 'none', background: 'var(--bg)' }} />
+              <input value={editingSkill.description} onChange={e => setEditingSkill({ ...editingSkill, description: e.target.value })}
+                placeholder="简短描述" style={{ width: '100%', padding: '4px 8px', marginBottom: 6, border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, outline: 'none', background: 'var(--bg)' }} />
+              <textarea value={editingSkill.prompt || ''} onChange={e => setEditingSkill({ ...editingSkill, prompt: e.target.value })}
+                placeholder="Prompt 指令（Hermes 对话时会参考这个指令）" rows={3}
+                style={{ width: '100%', padding: '4px 8px', marginBottom: 6, border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, outline: 'none', resize: 'vertical', background: 'var(--bg)', fontFamily: 'var(--font)' }} />
+              <input value={editingSkill.trigger || ''} onChange={e => setEditingSkill({ ...editingSkill, trigger: e.target.value })}
+                placeholder="触发条件（可选，如：阅读法学文献时）" style={{ width: '100%', padding: '4px 8px', marginBottom: 8, border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, outline: 'none', background: 'var(--bg)' }} />
+              <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                <button onClick={() => setEditingSkill(null)} style={{ padding: '4px 12px', fontSize: 10, borderRadius: 4, border: '1px solid var(--border)', background: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>取消</button>
+                <button onClick={() => editingSkill.name && saveSkill({ ...editingSkill, updatedAt: new Date().toISOString() })}
+                  disabled={!editingSkill.name.trim()} style={{ padding: '4px 12px', fontSize: 10, borderRadius: 4, border: 'none', background: 'var(--accent)', color: '#fff', cursor: 'pointer' }}>保存</button>
+              </div>
+            </div>
+          )}
+
+          {/* Custom skill list */}
+          {skills.filter(s => s.type !== 'builtin').map(skill => (
+            <div key={skill.id} style={{ padding: '8px 10px', marginBottom: 6, borderRadius: 6, border: '1px solid var(--border)', background: skill.enabled ? 'var(--bg-warm)' : 'var(--bg)', opacity: skill.enabled ? 1 : 0.5 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text)', flex: 1 }}>{skill.name}</span>
+                <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: skill.type === 'learned' ? '#d4edda' : 'var(--accent-soft)', color: skill.type === 'learned' ? '#155724' : 'var(--accent-hover)' }}>
+                  {skill.type === 'learned' ? '已学习' : '自定义'}
+                </span>
+                <button onClick={() => toggleSkill(skill.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: skill.enabled ? 'var(--success)' : 'var(--text-muted)' }}>
+                  {skill.enabled ? '开' : '关'}
+                </button>
+                <button onClick={() => setEditingSkill(skill)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 10, color: 'var(--text-muted)' }}>编辑</button>
+                <button onClick={() => deleteSkill(skill.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 10, color: 'var(--danger)' }}>删除</button>
+              </div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>{skill.description}</div>
+            </div>
+          ))}
+
+          {skills.filter(s => s.type !== 'builtin').length === 0 && !editingSkill && (
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center', padding: '12px 0', marginBottom: 16 }}>
+              点击「+ 新技能」添加自定义 Prompt 指令
+            </div>
+          )}
+
+          {/* Built-in tools */}
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginTop: 16, marginBottom: 8 }}>内置工具</div>
+          {BUILTIN_TOOLS.map(tool => (
+            <div key={tool.name} style={{ padding: '6px 10px', marginBottom: 4, borderRadius: 6, background: 'var(--bg)', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <code style={{ fontSize: 10, color: 'var(--accent)', background: 'var(--accent-soft)', padding: '1px 6px', borderRadius: 4 }}>{tool.name}</code>
+              <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{tool.desc}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}

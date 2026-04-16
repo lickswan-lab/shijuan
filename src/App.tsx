@@ -4,8 +4,8 @@ import PdfViewer from './components/PdfViewer/PdfViewer'
 import AnnotationPanel from './components/AnnotationPanel/AnnotationPanel'
 import MemoEditor from './components/Memo/MemoEditor'
 import ReadingLogView from './components/ReadingLog/ReadingLogView'
-import LectureMode from './components/Lecture/LectureMode'
-import AgentPanel from './components/Agent/AgentPanel'
+// Shelved: import LectureMode from './components/Lecture/LectureMode'
+// Shelved: import AgentPanel from './components/Agent/AgentPanel'
 import TopBar from './components/TopBar/TopBar'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useLibraryStore } from './store/libraryStore'
@@ -148,20 +148,6 @@ export default function App() {
     return () => document.removeEventListener('keydown', handler)
   }, [])
 
-  // Auto-import files downloaded from the built-in resource browser
-  useEffect(() => {
-    if (!window.electronAPI?.onResourceDownloaded) return
-    const cleanup = window.electronAPI.onResourceDownloaded(async (filePath: string) => {
-      const { importByPaths } = useLibraryStore.getState()
-      const added = await importByPaths([filePath])
-      if (added > 0) {
-        useUiStore.getState().setSidebarTab('library')
-        console.log(`[resource-browser] auto-imported: ${filePath}`)
-      }
-    })
-    return cleanup
-  }, [])
-
   // Global drag-drop file import
   const handleDragOver = useCallback((e: React.DragEvent) => {
     // Only respond to external file drops (not internal app drags)
@@ -299,12 +285,8 @@ export default function App() {
           </ErrorBoundary>
         )}
 
-        {/* Main content: Lecture / Reading log / Memo editor / PDF viewer */}
-        {activeLectureId ? (
-          <ErrorBoundary fallbackLabel="听课模式">
-            <LectureMode />
-          </ErrorBoundary>
-        ) : activeReadingLogDate ? (
+        {/* Main content: Reading log / Memo editor / PDF viewer */}
+        {activeReadingLogDate ? (
           <ErrorBoundary fallbackLabel="阅读日志">
             <ReadingLogView />
           </ErrorBoundary>
@@ -318,13 +300,6 @@ export default function App() {
                 <AnnotationPanel />
               </ErrorBoundary>
             )}
-            {!annotationPanelCollapsed && rightPanel === 'agent' && (
-              <ErrorBoundary fallbackLabel="Agent">
-                <div style={{ width: 360, flexShrink: 0, borderLeft: '1px solid var(--border-light)', height: '100%' }}>
-                  <AgentPanel />
-                </div>
-              </ErrorBoundary>
-            )}
             {annotationPanelCollapsed && (
               <DraggableToggle onClick={toggleAnnotationPanel} />
             )}
@@ -334,20 +309,11 @@ export default function App() {
             <ErrorBoundary fallbackLabel="PDF 阅读器">
               <PdfViewer />
             </ErrorBoundary>
-            {/* Show annotation panel: always when not immersive, or in immersive single-page mode */}
             {(!immersiveMode || !dualPageMode) && !annotationPanelCollapsed && rightPanel === 'annotation' && (
               <ErrorBoundary fallbackLabel="注释面板">
                 <AnnotationPanel />
               </ErrorBoundary>
             )}
-            {(!immersiveMode || !dualPageMode) && !annotationPanelCollapsed && rightPanel === 'agent' && (
-              <ErrorBoundary fallbackLabel="Agent">
-                <div style={{ width: 360, flexShrink: 0, borderLeft: '1px solid var(--border-light)', height: '100%' }}>
-                  <AgentPanel />
-                </div>
-              </ErrorBoundary>
-            )}
-            {/* Show floating toggle to open annotation panel */}
             {annotationPanelCollapsed && (!immersiveMode || !dualPageMode) && (
               <DraggableToggle onClick={toggleAnnotationPanel} />
             )}

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { Library, PdfMeta, HistoryEntry, ReadingLogEvent, ReadingLog } from '../src/types/library'
+import type { Library, PdfMeta, HistoryEntry, ReadingLogEvent, ReadingLog, LectureSession, AgentConversation, HermesSkill, HermesInsight } from '../src/types/library'
 
 const electronAPI = {
   // Library (central storage)
@@ -60,7 +60,7 @@ const electronAPI = {
   aiGetConfigured: (): Promise<Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>> =>
     ipcRenderer.invoke('ai-get-configured'),
 
-  // === Legacy GLM compat (OCR, instant feedback) ===
+  // === Legacy GLM compat (still used by OCR, instant feedback) ===
   setGlmApiKey: (key: string): Promise<boolean> =>
     ipcRenderer.invoke('set-glm-api-key', key),
   getGlmApiKeyStatus: (): Promise<'set' | 'not-set'> =>
@@ -98,11 +98,42 @@ const electronAPI = {
     return () => { ipcRenderer.removeListener('ai-stream-error', handler) }
   },
 
-  // === Agent (memory only — for Hermes-enhanced AI answers) ===
-  agentLoadMemory: (): Promise<{ success: boolean; content?: string; error?: string }> =>
-    ipcRenderer.invoke('agent-load-memory'),
-  agentExecuteTool: (toolName: string, argsJson: string): Promise<{ success: boolean; result: string }> =>
-    ipcRenderer.invoke('agent-execute-tool', toolName, argsJson),
+  // === Lecture ===
+  lectureSave: (session: LectureSession): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('lecture-save', session),
+  lectureSaveAudio: (sessionId: string, buffer: ArrayBuffer): Promise<{ success: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('lecture-save-audio', sessionId, Buffer.from(buffer)),
+  lectureDeleteAudio: (sessionId: string): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('lecture-delete-audio', sessionId),
+  lectureXfyunSign: (appid: string, apikey: string): Promise<{ success: boolean; url?: string; error?: string }> =>
+    ipcRenderer.invoke('lecture-xfyun-sign', appid, apikey),
+  lectureAliyunToken: (akid: string, aksecret: string): Promise<{ success: boolean; token?: string; expireTime?: number; error?: string }> =>
+    ipcRenderer.invoke('lecture-aliyun-token', akid, aksecret),
+
+  // === Built-in Browser ===
+  openResourceBrowser: (startUrl?: string) => ipcRenderer.send('open-resource-browser', startUrl),
+  scanBrowserResources: (): Promise<{ success: boolean; resources: Array<{ url: string; name: string; ext: string }>; url?: string; title?: string; error?: string }> =>
+    ipcRenderer.invoke('scan-browser-resources'),
+  browserNavigate: (url: string) => ipcRenderer.send('browser-navigate', url),
+  browserDownload: (url: string) => ipcRenderer.send('browser-download', url),
+  onResourceDownloaded: (callback: (filePath: string) => void) => {
+    const handler = (_event: any, filePath: string) => callback(filePath)
+    ipcRenderer.on('resource-downloaded', handler)
+    return () => { ipcRenderer.removeListener('resource-downloaded', handler) }
+  },
+
+  // === Web Resource Scraping ===
+  scrapeResources: (url: string): Promise<{
+    success: boolean; resources: Array<{ url: string; name: string; ext: string }>;
+    pageTitle?: string; error?: string;
+  }> => ipcRenderer.invoke('scrape-resources', url),
+  downloadResource: (fileUrl: string, fileName: string): Promise<{ success: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('download-resource', fileUrl, fileName),
+  onDownloadResourceProgress: (callback: (pct: number) => void) => {
+    const handler = (_event: any, pct: number) => callback(pct)
+    ipcRenderer.on('download-resource-progress', handler)
+    return () => { ipcRenderer.removeListener('download-resource-progress', handler) }
+  },
 
   // === Auto Update ===
   checkUpdate: (): Promise<{
@@ -121,6 +152,26 @@ const electronAPI = {
 
   // === Theme ===
   setTitleBarTheme: (dark: boolean) => ipcRenderer.send('set-title-bar-theme', dark),
+
+  // === Agent ===
+  agentLoadMemory: (): Promise<{ success: boolean; content?: string; error?: string }> =>
+    ipcRenderer.invoke('agent-load-memory'),
+  agentSaveMemory: (content: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('agent-save-memory', content),
+  agentLoadConversations: (): Promise<{ success: boolean; conversations: AgentConversation[]; error?: string }> =>
+    ipcRenderer.invoke('agent-load-conversations'),
+  agentSaveConversation: (conv: AgentConversation): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('agent-save-conversation', conv),
+  agentExecuteTool: (toolName: string, argsJson: string): Promise<{ success: boolean; result: string }> =>
+    ipcRenderer.invoke('agent-execute-tool', toolName, argsJson),
+  agentLoadInsight: (): Promise<{ success: boolean; insight: HermesInsight | null }> =>
+    ipcRenderer.invoke('agent-load-insight'),
+  agentSaveInsight: (insight: HermesInsight): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('agent-save-insight', insight),
+  agentLoadSkills: (): Promise<{ success: boolean; skills: HermesSkill[] }> =>
+    ipcRenderer.invoke('agent-load-skills'),
+  agentSaveSkills: (skills: HermesSkill[]): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('agent-save-skills', skills),
 
   // === Reading Log ===
   readingLogCollectEvents: (date: string): Promise<{ success: boolean; events: ReadingLogEvent[]; error?: string }> =>

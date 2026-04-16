@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import Markdown from 'react-markdown'
-import ReactMarkdown from 'react-markdown'
+const ReactMarkdown = Markdown  // alias for compatibility
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import rehypeRaw from 'rehype-raw'
