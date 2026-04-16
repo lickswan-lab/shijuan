@@ -1386,18 +1386,18 @@ export default function PdfViewer() {
     return () => { cancelled = true }
   }, [library?.entries.length, currentEntry?.id])
 
-  // Memoize marks & annotations to prevent useEffect from re-running on every render
-  const annsJson = JSON.stringify((currentPdfMeta?.annotations || []).map(a => a.id + a.anchor.selectedText))
+  // Memoize marks & annotations — use annotation array reference as dependency
+  const annotations = currentPdfMeta?.annotations
+  const marks = currentPdfMeta?.marks
   const memoizedAnnotations = useMemo(() => {
-    return (currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))
-  }, [annsJson])
+    return (annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))
+  }, [annotations])
 
-  const marksJson = JSON.stringify(currentPdfMeta?.marks || [])
   const memoizedMarks = useMemo(() => {
-    return (currentPdfMeta?.marks || []).map(m => ({
+    return (marks || []).map(m => ({
       id: m.id, type: m.type as 'underline' | 'bold', color: m.color, selectedText: m.selectedText
     }))
-  }, [marksJson])
+  }, [marks])
 
   const handleRemoveMark = useCallback((markId: string) => {
     document.querySelectorAll(`.ocr-mark[data-mark-id="${markId}"]`).forEach(el => {

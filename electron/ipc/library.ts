@@ -235,109 +235,78 @@ export function registerLibraryIpc(): void {
     }
   })
 
-  // Full-text search across OCR texts and annotations
+  // Full-text search across OCR texts and annotations (parallelized)
   ipcMain.handle('full-text-search', async (_event, query: string, libraryData: any) => {
     if (!query || query.length < 2) return []
 
-    const results: Array<{
-      entryId: string
-      entryTitle: string
-      type: 'ocr' | 'annotation'
-      text: string        // matched snippet
-      pageNumber?: number
-      annotationId?: string
-    }> = []
-
-    const q = query.toLowerCase()
-    const entries = libraryData?.entries || []
-
-    for (const entry of entries) {
-      // Search OCR text
-      try {
-        const ocrPath = entry.absPath.replace(/\.pdf$/i, '.ocr.txt')
-        const ocrText = await fs.readFile(ocrPath, 'utf-8')
-        const lines = ocrText.split('\n')
-        let currentPage = 1
-        for (const line of lines) {
-          const pageMatch = line.match(/^=== 第 (\d+) 页 ===$/)
-          if (pageMatch) { currentPage = parseInt(pageMatch[1]); continue }
-          if (line.toLowerCase().includes(q)) {
-            // Extract snippet around match
-            const idx = line.toLowerCase().indexOf(q)
-            const start = Math.max(0, idx - 30)
-            const end = Math.min(line.length, idx + query.length + 30)
-            results.push({
-              entryId: entry.id,
-              entryTitle: entry.title,
-              type: 'ocr',
-              text: (start > 0 ? '...' : '') + line.slice(start, end) + (end < line.length ? '...' : ''),
-              pageNumber: currentPage,
-            })
-            if (results.filter(r => r.entryId === entry.id && r.type === 'ocr').length >= 5) break
-          }
-        }
-      } catch { /* no OCR file */ }
-
-      // Search TXT/MD/DOCX content (read raw file for text types)
-      if (/\.(txt|md)$/i.test(entry.absPath)) {
-        try {
-          const text = await fs.readFile(entry.absPath, 'utf-8')
-          const lines = text.split('\n')
-          for (const line of lines) {
-            if (line.toLowerCase().includes(q)) {
-              const idx = line.toLowerCase().indexOf(q)
-              const start = Math.max(0, idx - 30)
-              const end = Math.min(line.length, idx + query.length + 30)
-              results.push({
-                entryId: entry.id,
-                entryTitle: entry.title,
-                type: 'ocr',
-                text: (start > 0 ? '...' : '') + line.slice(start, end) + (end < line.length ? '...' : ''),
-              })
-              if (results.filter(r => r.entryId === entry.id && r.type === 'ocr').length >= 5) break
-            }
-          }
-        } catch { /* file not readable */ }
-      }
-
-      // Search annotations
-      try {
-        const metaContent = await fs.readFile(metaPath(entry.id), 'utf-8')
-        const meta = JSON.parse(metaContent) as PdfMeta
-        for (const ann of (meta.annotations || [])) {
-          // Search selected text
-          if (ann.anchor.selectedText.toLowerCase().includes(q)) {
-            results.push({
-              entryId: entry.id,
-              entryTitle: entry.title,
-              type: 'annotation',
-              text: ann.anchor.selectedText.slice(0, 80),
-              pageNumber: ann.anchor.pageNumber,
-              annotationId: ann.id,
-            })
-          }
-          // Search history chain content
-          for (const h of (ann.historyChain || [])) {
-            if (h.content.toLowerCase().includes(q)) {
-              const idx = h.content.toLowerCase().indexOf(q)
-              const start = Math.max(0, idx - 20)
-              const end = Math.min(h.content.length, idx + query.length + 20)
-              results.push({
-                entryId: entry.id,
-                entryTitle: entry.title,
-                type: 'annotation',
-                text: (start > 0 ? '...' : '') + h.content.slice(start, end) + (end < h.content.length ? '...' : ''),
-                pageNumber: ann.anchor.pageNumber,
-                annotationId: ann.id,
-              })
-              break  // one match per annotation is enough
-            }
-          }
-        }
-      } catch { /* no meta */ }
+    type SearchResult = {
+      entryId: string; entryTitle: string; type: 'ocr' | 'annotation';
+      text: string; pageNumber?: number; annotationId?: string;
     }
 
-    return results.slice(0, 50)  // limit results
+    const q = query.toLowerCase()
+    const entries = (libraryData?.entries || []) as Array<{ id: string; title: string; absPath: string }>
+
+    // Helper: extract snippet around match
+    const snippet = (text: string, idx: number, qLen: number, pad: number = 30) => {
+      const s = Math.max(0, idx - pad)
+      const e = Math.min(text.length, idx + qLen + pad)
+      return (s > 0 ? '...' : '') + text.slice(s, e) + (e < text.length ? '...' : '')
+    }
+
+    // Search each entry in parallel (batches of 10)
+    const allResults: SearchResult[] = []
+    for (let i = 0; i < entries.length && allResults.length < 50; i += 10) {
+      const batch = entries.slice(i, i + 10)
+      const batchResults = await Promise.all(batch.map(async (entry): Promise<SearchResult[]> => {
+        const results: SearchResult[] = []
+        // Read OCR + meta in parallel
+        const [ocrText, metaText, rawText] = await Promise.all([
+          fs.readFile(entry.absPath.replace(/\.pdf$/i, '.ocr.txt'), 'utf-8').catch(() => null),
+          fs.readFile(metaPath(entry.id), 'utf-8').catch(() => null),
+          /\.(txt|md)$/i.test(entry.absPath) ? fs.readFile(entry.absPath, 'utf-8').catch(() => null) : null,
+        ])
+
+        // Search OCR/TXT content
+        const textContent = ocrText || rawText
+        if (textContent) {
+          const lines = textContent.split('\n')
+          let page = 1, found = 0
+          for (const line of lines) {
+            const pm = line.match(/^=== 第 (\d+) 页 ===$/)
+            if (pm) { page = parseInt(pm[1]); continue }
+            const idx = line.toLowerCase().indexOf(q)
+            if (idx >= 0 && found < 3) {
+              results.push({ entryId: entry.id, entryTitle: entry.title, type: 'ocr', text: snippet(line, idx, query.length), pageNumber: page })
+              found++
+            }
+          }
+        }
+
+        // Search annotations
+        if (metaText) {
+          try {
+            const meta = JSON.parse(metaText) as PdfMeta
+            for (const ann of (meta.annotations || []).slice(0, 20)) {
+              if (ann.anchor.selectedText.toLowerCase().includes(q)) {
+                results.push({ entryId: entry.id, entryTitle: entry.title, type: 'annotation', text: ann.anchor.selectedText.slice(0, 80), pageNumber: ann.anchor.pageNumber, annotationId: ann.id })
+              }
+              for (const h of (ann.historyChain || [])) {
+                const idx = h.content.toLowerCase().indexOf(q)
+                if (idx >= 0) {
+                  results.push({ entryId: entry.id, entryTitle: entry.title, type: 'annotation', text: snippet(h.content, idx, query.length, 20), pageNumber: ann.anchor.pageNumber, annotationId: ann.id })
+                  break
+                }
+              }
+            }
+          } catch {}
+        }
+        return results
+      }))
+      allResults.push(...batchResults.flat())
+    }
+
+    return allResults.slice(0, 50)
   })
 
   // Export file with save dialog

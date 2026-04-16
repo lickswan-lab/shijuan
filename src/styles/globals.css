@@ -430,17 +430,6 @@ html, body, #root {
   box-shadow: var(--shadow-md);
 }
 
-/* Floating toolbar on selection */
-.floating-toolbar {
-  position: absolute;
-  display: flex; gap: 4px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 4px;
-  box-shadow: var(--shadow-md);
-  z-index: 100;
-}
 
 /* Annotation highlight */
 .annotation-highlight {
