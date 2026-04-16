@@ -148,6 +148,20 @@ export default function App() {
     return () => document.removeEventListener('keydown', handler)
   }, [])
 
+  // Auto-import files downloaded from the built-in resource browser
+  useEffect(() => {
+    if (!window.electronAPI?.onResourceDownloaded) return
+    const cleanup = window.electronAPI.onResourceDownloaded(async (filePath: string) => {
+      const { importByPaths } = useLibraryStore.getState()
+      const added = await importByPaths([filePath])
+      if (added > 0) {
+        useUiStore.getState().setSidebarTab('library')
+        console.log(`[resource-browser] auto-imported: ${filePath}`)
+      }
+    })
+    return cleanup
+  }, [])
+
   // Global drag-drop file import
   const handleDragOver = useCallback((e: React.DragEvent) => {
     // Only respond to external file drops (not internal app drags)

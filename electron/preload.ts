@@ -110,6 +110,14 @@ const electronAPI = {
   lectureAliyunToken: (akid: string, aksecret: string): Promise<{ success: boolean; token?: string; expireTime?: number; error?: string }> =>
     ipcRenderer.invoke('lecture-aliyun-token', akid, aksecret),
 
+  // === Built-in Browser ===
+  openResourceBrowser: (startUrl?: string) => ipcRenderer.send('open-resource-browser', startUrl),
+  onResourceDownloaded: (callback: (filePath: string) => void) => {
+    const handler = (_event: any, filePath: string) => callback(filePath)
+    ipcRenderer.on('resource-downloaded', handler)
+    return () => { ipcRenderer.removeListener('resource-downloaded', handler) }
+  },
+
   // === Web Resource Scraping ===
   scrapeResources: (url: string): Promise<{
     success: boolean; resources: Array<{ url: string; name: string; ext: string }>;

@@ -547,7 +547,13 @@ function LibraryPanel() {
             <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => setMultiSelect(true)} title="多选">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="5" width="14" height="14" rx="2"/><polyline points="9 12 11 14 17 8"/></svg>
             </button>
-            <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => setShowWebScraper(true)} title="在线获取">
+            <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => {
+              if (window.electronAPI?.openResourceBrowser) {
+                window.electronAPI.openResourceBrowser()
+              } else {
+                setShowWebScraper(true)  // fallback to modal
+              }
+            }} title="在线获取">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
             </button>
           </>
