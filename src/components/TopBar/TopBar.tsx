@@ -1,5 +1,133 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useUiStore } from '../../store/uiStore'
+
+// ===== Auto Update Panel =====
+function UpdatePanel() {
+  const [status, setStatus] = useState<'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error'>('idle')
+  const [info, setInfo] = useState<{ currentVersion: string; latestVersion: string; downloadUrl: string | null; releaseNotes: string; asarSize: number } | null>(null)
+  const [progress, setProgress] = useState(0)
+  const [error, setError] = useState('')
+
+  const handleCheck = useCallback(async () => {
+    if (!window.electronAPI?.checkUpdate) return
+    setStatus('checking'); setError('')
+    try {
+      const result = await window.electronAPI.checkUpdate()
+      setInfo(result)
+      setStatus(result.hasUpdate ? 'available' : 'idle')
+    } catch (err: any) {
+      setError(err.message || '检查失败')
+      setStatus('error')
+    }
+  }, [])
+
+  const handleDownload = useCallback(async () => {
+    if (!info?.downloadUrl || !window.electronAPI?.downloadUpdate) return
+    setStatus('downloading'); setProgress(0)
+
+    // Listen for progress
+    const cleanup = window.electronAPI.onUpdateProgress?.((pct: number) => setProgress(pct))
+
+    try {
+      const result = await window.electronAPI.downloadUpdate(info.downloadUrl)
+      cleanup?.()
+      if (result.success) {
+        setStatus('ready')
+      } else {
+        setError(result.error || '下载失败')
+        setStatus('error')
+      }
+    } catch (err: any) {
+      cleanup?.()
+      setError(err.message || '下载失败')
+      setStatus('error')
+    }
+  }, [info])
+
+  const handleApply = useCallback(async () => {
+    if (!window.electronAPI?.applyUpdate) return
+    await window.electronAPI.applyUpdate()
+  }, [])
+
+  return (
+    <div style={{
+      padding: '12px 14px', marginBottom: 8, borderRadius: 8,
+      border: '1px solid var(--border)', background: 'var(--bg-warm)',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>软件更新</div>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          当前版本 {info?.currentVersion || '...'}
+        </span>
+      </div>
+
+      {status === 'idle' && !info?.hasUpdate && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button className="btn btn-sm" style={{ fontSize: 11 }} onClick={handleCheck}>
+            检查更新
+          </button>
+          {info && <span style={{ fontSize: 11, color: 'var(--success)' }}>✓ 已是最新版本</span>}
+        </div>
+      )}
+
+      {status === 'checking' && (
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span className="loading-spinner" />检查中...
+        </div>
+      )}
+
+      {status === 'available' && info && (
+        <div>
+          <div style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 500, marginBottom: 6 }}>
+            发现新版本 v{info.latestVersion}
+            {info.asarSize > 0 && <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> ({(info.asarSize / 1024 / 1024).toFixed(1)} MB)</span>}
+          </div>
+          {info.releaseNotes && (
+            <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8, lineHeight: 1.6, maxHeight: 60, overflow: 'auto' }}>
+              {info.releaseNotes.slice(0, 200)}
+            </div>
+          )}
+          {info.downloadUrl ? (
+            <button className="btn btn-sm btn-primary" style={{ fontSize: 11 }} onClick={handleDownload}>
+              下载更新
+            </button>
+          ) : (
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              此版本暂无补丁包，请前往 <a href="https://github.com/lickswan-lab/shijuan/releases" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>GitHub Release</a> 下载完整版
+            </div>
+          )}
+        </div>
+      )}
+
+      {status === 'downloading' && (
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+            正在下载 v{info?.latestVersion}... {progress}%
+          </div>
+          <div style={{ width: '100%', height: 6, background: 'var(--border)', borderRadius: 3, overflow: 'hidden' }}>
+            <div style={{ width: `${progress}%`, height: '100%', background: 'var(--accent)', borderRadius: 3, transition: 'width 0.3s' }} />
+          </div>
+        </div>
+      )}
+
+      {status === 'ready' && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11, color: 'var(--success)' }}>✓ 下载完成</span>
+          <button className="btn btn-sm btn-primary" style={{ fontSize: 11 }} onClick={handleApply}>
+            立即重启更新
+          </button>
+        </div>
+      )}
+
+      {status === 'error' && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11, color: 'var(--danger)' }}>✗ {error}</span>
+          <button className="btn btn-sm" style={{ fontSize: 11 }} onClick={handleCheck}>重试</button>
+        </div>
+      )}
+    </div>
+  )
+}
 
 interface ProviderInfo {
   id: string
@@ -275,6 +403,9 @@ export default function TopBar() {
                 })}
               </div>
             </div>
+
+            {/* Auto Update */}
+            <UpdatePanel />
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
               <button className="btn" onClick={() => setShowSettings(false)}>关闭</button>

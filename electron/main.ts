@@ -8,6 +8,7 @@ import { registerPdfOperationsIpc } from './ipc/pdfOperations'
 import { registerReadingLogIpc, startMidnightScheduler } from './ipc/readingLog'
 import { registerLectureIpc } from './ipc/lecture'
 import { registerAgentIpc } from './ipc/agent'
+import { registerUpdaterIpc } from './updater'
 
 function createWindow(): BrowserWindow {
   // Remove default menu bar
@@ -118,6 +119,7 @@ if (!gotTheLock) {
   registerReadingLogIpc()
   registerLectureIpc()
   registerAgentIpc()
+  registerUpdaterIpc()
 
   app.whenReady().then(() => {
     try {

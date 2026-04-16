@@ -110,6 +110,21 @@ const electronAPI = {
   lectureAliyunToken: (akid: string, aksecret: string): Promise<{ success: boolean; token?: string; expireTime?: number; error?: string }> =>
     ipcRenderer.invoke('lecture-aliyun-token', akid, aksecret),
 
+  // === Auto Update ===
+  checkUpdate: (): Promise<{
+    hasUpdate: boolean; currentVersion: string; latestVersion: string;
+    downloadUrl: string | null; releaseNotes: string; asarSize: number;
+  }> => ipcRenderer.invoke('check-update'),
+  downloadUpdate: (downloadUrl: string): Promise<{ success: boolean; tempPath?: string; error?: string }> =>
+    ipcRenderer.invoke('download-update', downloadUrl),
+  applyUpdate: (): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('apply-update'),
+  onUpdateProgress: (callback: (pct: number) => void) => {
+    const handler = (_event: any, pct: number) => callback(pct)
+    ipcRenderer.on('update-progress', handler)
+    return () => { ipcRenderer.removeListener('update-progress', handler) }
+  },
+
   // === Theme ===
   setTitleBarTheme: (dark: boolean) => ipcRenderer.send('set-title-bar-theme', dark),
 
