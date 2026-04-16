@@ -58,20 +58,24 @@ function LearningProfile() {
 
     async function loadProfile() {
       const data: typeof profileData = []
-      for (const entry of library!.entries) {
-        try {
-          const meta = await window.electronAPI.loadPdfMeta(entry.id)
-          const annCount = meta?.annotations?.length || 0
-          const noteCount = meta?.annotations?.reduce((sum: number, a: any) =>
-            sum + a.historyChain.filter((h: any) => h.author === 'user').length, 0) || 0
-          data.push({
-            id: entry.id,
-            title: entry.title,
-            annCount,
-            noteCount,
-            lastOpened: entry.lastOpenedAt || entry.addedAt,
-          })
-        } catch {}
+      // Process in batches of 10 to avoid IPC flooding
+      const entries = library!.entries
+      for (let i = 0; i < entries.length; i += 10) {
+        if (cancelled) return
+        const batch = entries.slice(i, i + 10)
+        const results = await Promise.all(batch.map(async (entry) => {
+          try {
+            const meta = await window.electronAPI.loadPdfMeta(entry.id)
+            return {
+              id: entry.id, title: entry.title,
+              annCount: meta?.annotations?.length || 0,
+              noteCount: meta?.annotations?.reduce((sum: number, a: any) =>
+                sum + a.historyChain.filter((h: any) => h.author === 'user').length, 0) || 0,
+              lastOpened: entry.lastOpenedAt || entry.addedAt,
+            }
+          } catch { return { id: entry.id, title: entry.title, annCount: 0, noteCount: 0, lastOpened: entry.addedAt } }
+        }))
+        data.push(...results)
       }
       data.sort((a, b) => b.annCount - a.annCount)
       if (!cancelled) { setProfileData(data); setLoading(false) }

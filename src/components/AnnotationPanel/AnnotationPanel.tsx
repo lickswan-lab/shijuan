@@ -718,7 +718,9 @@ export default function AnnotationPanel() {
     ;(async () => {
       try {
         // Search other documents' annotations for related content
+        if (!window.electronAPI?.agentExecuteTool) return
         const result = await window.electronAPI.agentExecuteTool('build_knowledge_map', '{}')
+        if (!result?.success || !result.result) return
         const data = JSON.parse(result.result)
         if (!data.annotationSummary || data.totalAnnotations < 3) return
 
@@ -838,8 +840,9 @@ export default function AnnotationPanel() {
     let hermesContext = ''
     try {
       // Load Hermes memory (accumulated reading behavior insights)
-      const memory = await window.electronAPI.agentLoadMemory?.()
-      if (memory && memory.length > 20) {
+      const memResult = await window.electronAPI.agentLoadMemory?.()
+      const memory = memResult?.content || ''
+      if (memory.length > 20) {
         hermesContext += `\n\n[Hermes 记忆 — 用户的阅读偏好和历史洞察]\n${memory.slice(-800)}`
       }
 

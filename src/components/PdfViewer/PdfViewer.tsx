@@ -40,7 +40,7 @@ function cleanOcrText(raw: string): string {
     .replace(/\^(\d{1,3})(?=\D|$)/g, (_m, n) => toSuper(n))
     // Wrap bare LaTeX expressions (not inside $) in $ for remark-math
     // Strategy: find lines containing bare \ commands with braces, wrap the entire LaTeX segment
-    .replace(/^(.*?)(\\(?:frac|partial|sqrt|sum|int|prod|lim|nabla|vec|hat|bar|overline|underline)\s*\{[\s\S]*?\}(?:\s*\{[^}]*\})*(?:\s*[,，.。])?)/gm, (full, before, latex) => {
+    .replace(/^(.*?)(\\(?:frac|partial|sqrt|sum|int|prod|lim|nabla|vec|hat|bar|overline|underline)\s*\{[^}]{0,200}\}(?:\s*\{[^}]{0,200}\})*(?:\s*[,，.。])?)/gm, (full, before, latex) => {
       // Check if already inside $ delimiters
       const dollarsBefore = (before.match(/\$/g) || []).length
       if (dollarsBefore % 2 === 1) return full  // inside $ pair, don't wrap
