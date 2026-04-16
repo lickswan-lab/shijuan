@@ -130,17 +130,28 @@ function ConceptTracker({ currentEntryId, currentText, otherEntryAnnotations }: 
       return
     }
 
-    // Extract key phrases from current text (simple: 4+ char Chinese segments)
+    // Extract academic concepts — filter out common words and sentence fragments
+    // Strategy: look for noun phrases that appear as standalone terms
+    const stopWords = new Set(['的','了','在','是','和','与','对','中','为','到','从','也','都','不','有','这','那','被','把','将','于','以','及','等','而','或','但','之','所','如','其','可','要','就','会','能','很','更','最','已','一','个','些','种','次','点','上','下','里','内','外','前','后','间','时','处','者','人','年','月','日','们'])
+
     const phrases: string[] = []
-    const chineseMatches = currentText.match(/[\u4e00-\u9fff]{4,10}/g) || []
-    for (const m of chineseMatches) {
-      if (!phrases.includes(m)) phrases.push(m)
+    // Match 2-6 char terms that look like concepts (contain no stop-word-only sequences)
+    const candidates = currentText.match(/[\u4e00-\u9fff]{2,8}/g) || []
+    for (const m of candidates) {
+      // Skip if it's all stop words
+      if ([...m].every(c => stopWords.has(c))) continue
+      // Skip very generic phrases
+      if (m.length <= 2 && stopWords.has(m[0])) continue
+      // Skip if it starts/ends with a stop word particle (的/了/在/是)
+      if ('的了在是和与'.includes(m[0]) || '的了在是'.includes(m[m.length - 1])) continue
+      // Prefer longer, more specific terms
+      if (!phrases.includes(m) && m.length >= 3) phrases.push(m)
     }
     if (phrases.length === 0) { setConcepts([]); return }
 
-    // Check which phrases appear in other entries' annotations
+    // Check which phrases appear in 2+ other entries' annotations (stricter threshold)
     const found: Array<{ keyword: string; entries: Array<{ title: string; count: number }> }> = []
-    for (const phrase of phrases.slice(0, 5)) {
+    for (const phrase of phrases.slice(0, 8)) {
       const matchedEntries: Array<{ title: string; count: number }> = []
       for (const other of otherEntryAnnotations) {
         if (other.entryId === currentEntryId) continue
@@ -151,13 +162,16 @@ function ConceptTracker({ currentEntryId, currentText, otherEntryAnnotations }: 
             if (h.content.includes(phrase)) count++
           }
         }
-        if (count > 0) matchedEntries.push({ title: other.entryTitle, count })
+        if (count >= 2) matchedEntries.push({ title: other.entryTitle, count })
       }
+      // Require appearing in at least 1 other entry with 2+ mentions
       if (matchedEntries.length >= 1) {
         found.push({ keyword: phrase, entries: matchedEntries })
       }
     }
-    setConcepts(found)
+    // Sort by total cross-entry mentions (most relevant first)
+    found.sort((a, b) => b.entries.reduce((s, e) => s + e.count, 0) - a.entries.reduce((s, e) => s + e.count, 0))
+    setConcepts(found.slice(0, 5))
   }, [currentText, currentEntryId, otherEntryAnnotations])
 
   const visible = concepts.filter(c => !dismissed.has(c.keyword))
