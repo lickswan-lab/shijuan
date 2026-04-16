@@ -43,6 +43,126 @@ const EVENT_ICONS: Record<ReadingLogEvent['type'], string> = {
   mark_text: 'M4 7V4h16v3 M9 20h6 M12 4v16',
 }
 
+// ===== Learning Profile: annotation density heatmap across all documents =====
+function LearningProfile() {
+  const { library } = useLibraryStore()
+  const [profileData, setProfileData] = useState<Array<{
+    id: string; title: string; annCount: number; noteCount: number; lastOpened: string
+  }>>([])
+
+  useEffect(() => {
+    if (!library) return
+    let cancelled = false
+
+    async function loadProfile() {
+      const data: typeof profileData = []
+      for (const entry of library!.entries) {
+        try {
+          const meta = await window.electronAPI.loadPdfMeta(entry.id)
+          const annCount = meta?.annotations?.length || 0
+          const noteCount = meta?.annotations?.reduce((sum, a) =>
+            sum + a.historyChain.filter(h => h.author === 'user').length, 0) || 0
+          if (annCount > 0 || entry.lastOpenedAt) {
+            data.push({
+              id: entry.id,
+              title: entry.title,
+              annCount,
+              noteCount,
+              lastOpened: entry.lastOpenedAt || entry.addedAt,
+            })
+          }
+        } catch {}
+      }
+      // Sort by annotation count descending
+      data.sort((a, b) => b.annCount - a.annCount)
+      if (!cancelled) setProfileData(data)
+    }
+
+    loadProfile()
+    return () => { cancelled = true }
+  }, [library])
+
+  const maxAnn = Math.max(...profileData.map(d => d.annCount), 1)
+  const totalAnnotations = profileData.reduce((s, d) => s + d.annCount, 0)
+  const totalNotes = profileData.reduce((s, d) => s + d.noteCount, 0)
+  const totalEntries = library?.entries.length || 0
+
+  return (
+    <div style={{ flex: 1, overflow: 'auto', background: 'var(--bg)', padding: '28px 32px' }}>
+      <h2 style={{ fontSize: 18, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>学习档案</h2>
+      <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 24 }}>你的阅读深度一览</p>
+
+      {/* Stats overview */}
+      <div style={{ display: 'flex', gap: 16, marginBottom: 28 }}>
+        {[
+          { label: '文献总量', value: totalEntries, icon: '📚' },
+          { label: '注释总数', value: totalAnnotations, icon: '✏️' },
+          { label: '笔记条数', value: totalNotes, icon: '📝' },
+          { label: '深度阅读', value: profileData.filter(d => d.annCount >= 5).length, icon: '🔥' },
+        ].map(s => (
+          <div key={s.label} style={{
+            flex: 1, padding: '14px 16px', borderRadius: 10,
+            background: 'var(--bg-warm)', border: '1px solid var(--border)',
+          }}>
+            <div style={{ fontSize: 20, marginBottom: 4 }}>{s.icon}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text)' }}>{s.value}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Annotation density heatmap */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 12 }}>注释深度</div>
+        {profileData.length === 0 ? (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '20px 0', textAlign: 'center' }}>
+            还没有阅读记录，开始阅读并标注吧
+          </div>
+        ) : (
+          profileData.slice(0, 15).map(d => {
+            const pct = (d.annCount / maxAnn) * 100
+            const hue = pct > 80 ? 25 : pct > 50 ? 35 : pct > 20 ? 40 : 45
+            const sat = pct > 50 ? '70%' : '40%'
+            const light = pct > 80 ? '50%' : pct > 50 ? '60%' : pct > 20 ? '70%' : '80%'
+            return (
+              <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}
+                onClick={() => {
+                  const entry = library?.entries.find(e => e.id === d.id)
+                  if (entry) {
+                    useLibraryStore.getState().openEntry(entry)
+                    useUiStore.getState().setActiveReadingLogDate(null)
+                  }
+                }}
+              >
+                <div style={{
+                  width: 140, fontSize: 11, color: 'var(--text)', overflow: 'hidden',
+                  textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer', flexShrink: 0,
+                }} title={d.title}>
+                  {d.title}
+                </div>
+                <div style={{ flex: 1, height: 14, background: 'var(--border-light)', borderRadius: 3, overflow: 'hidden', cursor: 'pointer' }}>
+                  <div style={{
+                    width: `${Math.max(pct, 3)}%`, height: '100%', borderRadius: 3,
+                    background: `hsl(${hue}, ${sat}, ${light})`,
+                    transition: 'width 0.5s ease',
+                  }} />
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', width: 36, textAlign: 'right', flexShrink: 0 }}>
+                  {d.annCount} 条
+                </div>
+              </div>
+            )
+          })
+        )}
+      </div>
+
+      <p style={{ fontSize: 10, color: 'var(--text-muted)', textAlign: 'center' }}>
+        选择左侧日期查看具体日志
+      </p>
+    </div>
+  )
+}
+
 export default function ReadingLogView() {
   const { library, saveReadingLog, openEntry } = useLibraryStore()
   const { activeReadingLogDate, selectedAiModel, setActiveReadingLogDate, setActiveMemo } = useUiStore()
@@ -340,9 +460,7 @@ export default function ReadingLogView() {
       </div>
     </div>
       ) : (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
-          选择左侧日期查看日志，或点击「生成今日日志」
-        </div>
+        <LearningProfile />
       )}
     </div>
   )
