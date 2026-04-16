@@ -1,9 +1,11 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useRef, useCallback, lazy, Suspense } from 'react'
 import FileTree from './components/Sidebar/FileTree'
-import PdfViewer from './components/PdfViewer/PdfViewer'
-import AnnotationPanel from './components/AnnotationPanel/AnnotationPanel'
-import MemoEditor from './components/Memo/MemoEditor'
-import ReadingLogView from './components/ReadingLog/ReadingLogView'
+
+// Lazy-load heavy components for faster startup
+const PdfViewer = lazy(() => import('./components/PdfViewer/PdfViewer'))
+const AnnotationPanel = lazy(() => import('./components/AnnotationPanel/AnnotationPanel'))
+const MemoEditor = lazy(() => import('./components/Memo/MemoEditor'))
+const ReadingLogView = lazy(() => import('./components/ReadingLog/ReadingLogView'))
 // Shelved: import LectureMode from './components/Lecture/LectureMode'
 // Shelved: import AgentPanel from './components/Agent/AgentPanel'
 import TopBar from './components/TopBar/TopBar'
@@ -69,7 +71,7 @@ function DraggableToggle({ onClick }: { onClick: () => void }) {
 
 export default function App() {
   const { library, initLibrary, importByPaths } = useLibraryStore()
-  const { setGlmApiKeyStatus, annotationPanelCollapsed, toggleAnnotationPanel, activeMemoId, activeReadingLogDate, activeLectureId, rightPanel, setRightPanel, immersiveMode, dualPageMode } = useUiStore()
+  const { setGlmApiKeyStatus, annotationPanelCollapsed, toggleAnnotationPanel, activeMemoId, activeReadingLogDate, rightPanel, immersiveMode, dualPageMode } = useUiStore()
   const [dropActive, setDropActive] = useState(false)
   const dropCounter = useRef(0)  // track nested drag enter/leave
 
@@ -285,7 +287,8 @@ export default function App() {
           </ErrorBoundary>
         )}
 
-        {/* Main content: Reading log / Memo editor / PDF viewer */}
+        {/* Main content: Reading log / Memo editor / PDF viewer (lazy-loaded) */}
+        <Suspense fallback={<div className="empty-state"><span className="loading-spinner" /></div>}>
         {activeReadingLogDate ? (
           <ErrorBoundary fallbackLabel="阅读日志">
             <ReadingLogView />
@@ -319,6 +322,7 @@ export default function App() {
             )}
           </>
         )}
+        </Suspense>
       </div>
     </div>
   )

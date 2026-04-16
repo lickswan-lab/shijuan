@@ -10,50 +10,11 @@ import 'react-pdf/dist/esm/Page/TextLayer.css'
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
+import { cleanOcrText } from './cleanOcrText'
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 
-// Clean OCR text for display
-function cleanOcrText(raw: string): string {
-  const circled = ['①','②','③','④','⑤','⑥','⑦','⑧','⑨','⑩']
-  const superDigits: Record<string, string> = {
-    '0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹'
-  }
-  const toSuper = (s: string) => s.split('').map(c => superDigits[c] || c).join('')
-
-  return raw
-    // \textcircled{N} → circled number
-    .replace(/\$\s*\\\\?textcircled\{(\d+)\}\s*\$/g, (_m, n) => circled[parseInt(n)-1] || `(${n})`)
-    // $^{(15)}$ or $^{15}$ or $ ^{(15)} $ → superscript: ⁽¹⁵⁾
-    .replace(/\$\s*\^?\s*\{?\s*\((\d+)\)\s*\}?\s*\$/g, (_m, n) => `⁽${toSuper(n)}⁾`)
-    .replace(/\$\s*\^\s*\{(\d+)\}\s*\$/g, (_m, n) => toSuper(n))
-    .replace(/\$\s*\^\s*\{?\s*\\circ\s*\}?\s*\$/g, '°')
-    // $_{text}$ → subscript (just keep the text)
-    .replace(/\$\s*_\s*\{([^}]+)\}\s*\$/g, (_m, t) => t)
-    // Remove image bbox references
-    .replace(/!\[[^\]]*\]\(page=\d+,\s*bbox=\[[^\]]*\]\)/g, '')
-    .replace(/!\[\]\([^)]*\)/g, '')
-    // Remaining $...$ LaTeX: keep for remark-math / KaTeX to render
-    // (don't strip — let the math renderer handle it)
-    // Bare superscripts without $ wrapper: ^{83} or ^83
-    .replace(/\^{?\{(\d+)\}?}/g, (_m, n) => toSuper(n))
-    .replace(/\^(\d{1,3})(?=\D|$)/g, (_m, n) => toSuper(n))
-    // Wrap bare LaTeX expressions (not inside $) in $ for remark-math
-    // Strategy: find lines containing bare \ commands with braces, wrap the entire LaTeX segment
-    .replace(/^(.*?)(\\(?:frac|partial|sqrt|sum|int|prod|lim|nabla|vec|hat|bar|overline|underline)\s*\{[^}]{0,200}\}(?:\s*\{[^}]{0,200}\})*(?:\s*[,，.。])?)/gm, (full, before, latex) => {
-      // Check if already inside $ delimiters
-      const dollarsBefore = (before.match(/\$/g) || []).length
-      if (dollarsBefore % 2 === 1) return full  // inside $ pair, don't wrap
-      return `${before} $${latex.trim()}$ `
-    })
-    // Also wrap simpler bare LaTeX like \partial x or \alpha
-    .replace(/(?<!\$)\\(partial|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|omega|pi|phi|psi|infty|cdot|times|div|pm|mp|leq|geq|neq|approx|equiv|forall|exists)(?=[^a-zA-Z])/g, (match) => {
-      return ` $${match}$ `
-    })
-    // Clean up excessive blank lines
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-}
+// cleanOcrText and highlight utils are now in separate files
 
 // ===== Append Annotation List (warm theme, grouped by page, with cross-entry support) =====
 import type { Annotation } from '../../types/library'
@@ -224,54 +185,7 @@ function AppendAnnotationList({ annotations, otherEntries, onAppend, onAppendOth
   )
 }
 
-// ===== Robust text highlighting in rendered DOM =====
-// Collects all text nodes, builds a flat string, finds match positions,
-// then maps back to DOM ranges for wrapping. Handles multiple matches correctly.
-
-function collectTextNodes(root: Node): Text[] {
-  const nodes: Text[] = []
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-  while (walker.nextNode()) nodes.push(walker.currentNode as Text)
-  return nodes
-}
-
-function wrapRange(
-  textNodes: Text[],
-  startNodeIdx: number, startOffset: number,
-  endNodeIdx: number, endOffset: number,
-  wrapFn: () => HTMLElement,
-): HTMLElement | null {
-  try {
-    if (startNodeIdx === endNodeIdx) {
-      // Simple case: match within a single text node
-      const node = textNodes[startNodeIdx]
-      if (!node.isConnected) return null
-      const range = document.createRange()
-      range.setStart(node, startOffset)
-      range.setEnd(node, endOffset)
-      const wrapper = wrapFn()
-      range.surroundContents(wrapper)
-      return wrapper
-    }
-    // Cross-node: wrap each segment individually inside a common span is complex,
-    // fall back to wrapping just the first node's portion
-    const node = textNodes[startNodeIdx]
-    if (!node.isConnected) return null
-    const text = node.textContent || ''
-    const matchText = text.substring(startOffset)
-    const parent = node.parentNode!
-    const wrapper = wrapFn()
-    wrapper.textContent = matchText
-    if (startOffset > 0) {
-      node.textContent = text.substring(0, startOffset)
-      parent.insertBefore(wrapper, node.nextSibling)
-    } else {
-      parent.insertBefore(wrapper, node)
-      parent.removeChild(node)
-    }
-    return wrapper
-  } catch { return null }
-}
+// ===== DOM text highlighting utilities =====
 
 function findAndWrapAll(
   container: HTMLElement,

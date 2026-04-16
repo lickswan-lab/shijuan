@@ -899,10 +899,16 @@ export default function AnnotationPanel() {
     })
 
     try {
-      const result = await window.electronAPI.aiChatStream(streamId, aiModel, messages)
-      if (!result.success) fullText = `错误：${result.error}`
+      // Timeout protection: 60s max for AI response
+      const result = await Promise.race([
+        window.electronAPI.aiChatStream(streamId, aiModel, messages),
+        new Promise<{ success: false; error: string }>((resolve) =>
+          setTimeout(() => resolve({ success: false, error: 'AI 响应超时（60秒）' }), 60000)
+        ),
+      ])
+      if (!result.success) fullText = fullText || `错误：${result.error}`
     } catch (err: any) {
-      fullText = `错误：${err.message}`
+      fullText = fullText || `错误：${err.message}`
     } finally {
       cleanupChunk()
     }
