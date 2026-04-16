@@ -834,11 +834,40 @@ export default function AnnotationPanel() {
       }
     }
 
+    // === Hermes 融合: 注入跨文献记忆和关联注释 ===
+    let hermesContext = ''
+    try {
+      // Load Hermes memory (accumulated reading behavior insights)
+      const memory = await window.electronAPI.agentLoadMemory?.()
+      if (memory && memory.length > 20) {
+        hermesContext += `\n\n[Hermes 记忆 — 用户的阅读偏好和历史洞察]\n${memory.slice(-800)}`
+      }
+
+      // Gather related annotations from other documents
+      const relatedAnns: string[] = []
+      for (const other of otherEntryAnnotations.slice(0, 5)) {
+        for (const ann of other.annotations) {
+          // Check if this annotation's text has any overlap with current context
+          const overlap = anchorText.split('').filter(c => ann.anchor.selectedText.includes(c) && /[\u4e00-\u9fff]/.test(c)).length
+          if (overlap >= 4) {
+            const userNotes = ann.historyChain.filter(h => h.author === 'user').map(h => h.content).join('; ')
+            relatedAnns.push(`《${other.entryTitle}》: 「${ann.anchor.selectedText.slice(0, 50)}」${userNotes ? ` — 用户笔记: ${userNotes.slice(0, 80)}` : ''}`)
+          }
+        }
+      }
+      if (relatedAnns.length > 0) {
+        hermesContext += `\n\n[跨文献关联 — 用户在其他文献中对相似内容的标注]\n${relatedAnns.slice(0, 5).join('\n')}`
+      }
+    } catch {}
+
     let systemContent = socraticMode
-      ? `你是一位苏格拉底式的学术导师，正在辅导学生阅读文献「${docTitle}」。\n\n核心原则：\n- 绝不直接给出答案，而是通过1-2个精准的追问引导学生自己思考\n- 追问要针对学生问题的核心假设、隐含前提或推理漏洞\n- 如果学生说"直接告诉我"，才给出正面回答\n- 追问结尾可以给出一个小提示方向（但不能是答案本身）\n\n用户选中的文本：\n「${contextForAi}」`
-      : `你是一位非常熟悉文献「${docTitle}」的学术导师。请基于文献上下文回答用户关于选中文本的问题。\n\n用户选中的文本：\n「${contextForAi}」`
+      ? `你是 Hermes，拾卷的学术研究助手，正在以苏格拉底式方法辅导学生阅读文献「${docTitle}」。\n\n核心原则：\n- 绝不直接给出答案，而是通过1-2个精准的追问引导学生自己思考\n- 追问要针对学生问题的核心假设、隐含前提或推理漏洞\n- 如果学生说"直接告诉我"，才给出正面回答\n- 可以引用用户在其他文献中的注释来建立关联\n\n用户选中的文本：\n「${contextForAi}」`
+      : `你是 Hermes，拾卷的学术研究助手。你非常熟悉文献「${docTitle}」，并且了解用户在整个文献库中的阅读历史和笔记。请基于文献上下文和跨文献关联回答用户的问题。如果发现用户的问题与其他文献的内容有关联，主动指出。\n\n用户选中的文本：\n「${contextForAi}」`
     if (surroundingContext) {
       systemContent += `\n\n选中文本的前后上下文（来自同一篇文献）：\n${surroundingContext}`
+    }
+    if (hermesContext) {
+      systemContent += hermesContext
     }
 
     const messages: Array<{ role: string; content: string }> = [

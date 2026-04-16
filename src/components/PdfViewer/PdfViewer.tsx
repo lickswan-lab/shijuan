@@ -1323,6 +1323,7 @@ export default function PdfViewer() {
   const [scale, setScale] = useState(1.0)
   const [pdfFileUrl, setPdfFileUrl] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [rereadingReminder, setRereadingReminder] = useState<{ annCount: number; lastTime: string } | null>(null)
   const [ocrProgress, setOcrProgress] = useState<{ status: string } | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('pdf')
   const [ocrFullText, setOcrFullText] = useState<string | null>(null)
@@ -1436,8 +1437,21 @@ export default function PdfViewer() {
     setEditMode(false)
     setEditContent('')
     setEditDirty(false)
+    setRereadingReminder(null)
 
     if (!currentEntry) return
+
+    // Re-reading detection: if this doc was opened before and has annotations, show reminder
+    if (currentEntry.lastOpenedAt) {
+      window.electronAPI.loadPdfMeta(currentEntry.id).then(meta => {
+        if (meta && meta.annotations && meta.annotations.length >= 2) {
+          setRereadingReminder({
+            annCount: meta.annotations.length,
+            lastTime: new Date(currentEntry.lastOpenedAt!).toLocaleDateString('zh-CN'),
+          })
+        }
+      }).catch(() => {})
+    }
 
     const ext = currentEntry.absPath.split('.').pop()?.toLowerCase() || ''
     const fileUrl = 'file:///' + currentEntry.absPath.replace(/\\/g, '/')
@@ -2066,6 +2080,25 @@ export default function PdfViewer() {
           </svg>
         </button>}
       </div>
+
+      {/* Re-reading reminder */}
+      {rereadingReminder && (
+        <div style={{
+          padding: '8px 16px', background: 'var(--accent-soft)', borderBottom: '1px solid var(--border)',
+          fontSize: 12, color: 'var(--accent-hover)', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <span>
+            📖 你上次在 {rereadingReminder.lastTime} 阅读过这篇文献，留下了 {rereadingReminder.annCount} 条注释。
+            <button onClick={() => {
+              useUiStore.getState().toggleAnnotationPanel()
+              setRereadingReminder(null)
+            }} style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline', fontSize: 12, marginLeft: 4 }}>
+              查看注释
+            </button>
+          </span>
+          <button onClick={() => setRereadingReminder(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 14 }}>×</button>
+        </div>
+      )}
 
       {/* OCR Progress */}
       {ocrProgress && (
