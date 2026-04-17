@@ -9,6 +9,7 @@
     "preview": "electron-vite preview",
     "pack": "electron-vite build && electron-builder --dir",
     "dist": "electron-vite build && electron-builder",
+    "pack-portable": "electron-vite build && node scripts/pack-portable.mjs",
     "postinstall": "electron-builder install-app-deps"
   },
   "build": {
@@ -87,6 +88,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^34.2.0",
     "electron-builder": "^25.1.8",
+    "electron-packager": "^17.1.2",
     "electron-vite": "^3.0.0",
     "typescript": "^5.7.3",
     "vite": "^6.0.7"
