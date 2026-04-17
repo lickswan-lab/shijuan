@@ -122,6 +122,20 @@ const electronAPI = {
   // === Theme ===
   setTitleBarTheme: (dark: boolean) => ipcRenderer.send('set-title-bar-theme', dark),
 
+  // === Diagnostics ===
+  getDiagnosticInfo: (): Promise<{
+    appVersion: string
+    electronVersion: string
+    platform: string
+    arch: string
+    dataDir: string
+    libraryJsonSize: number
+    metaCount: number
+    ocrFilesCount: number
+    errorLogs: Array<{ name: string; mtime: string; content: string }>
+  }> => ipcRenderer.invoke('get-diagnostic-info'),
+  openDataDir: (): Promise<void> => ipcRenderer.invoke('open-data-dir'),
+
   // === Reading Log ===
   readingLogCollectEvents: (date: string): Promise<{ success: boolean; events: ReadingLogEvent[]; error?: string }> =>
     ipcRenderer.invoke('reading-log-collect-events', date),

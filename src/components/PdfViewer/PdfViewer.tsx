@@ -737,13 +737,16 @@ function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationCli
 }
 
 // Simple text file reader
-function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRemoveMark, activeSelectionText }: {
+function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRemoveMark, activeSelectionText, fontSize, fontWeight, color }: {
   absPath: string
   annotations?: Array<{ id: string; selectedText: string }>
   onAnnotationClick?: (id: string) => void
   marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
   onRemoveMark?: (id: string) => void
   activeSelectionText?: string
+  fontSize?: number
+  fontWeight?: number
+  color?: string
 }) {
   const [text, setText] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -817,7 +820,13 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
 
   if (!text) return <div style={{ color: 'var(--text-muted)' }}>加载中...</div>
   return (
-    <div ref={containerRef} className="ocr-markdown-content" style={{ fontSize: 14, lineHeight: 2, position: 'relative' }}>
+    <div ref={containerRef} className="ocr-markdown-content" style={{
+      fontSize: fontSize ?? 16,
+      fontWeight: fontWeight ?? 400,
+      lineHeight: 2,
+      position: 'relative',
+      color: color || undefined,
+    }}>
       <Markdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{text}</Markdown>
       {markMenu && (
         <div style={{ position: 'fixed', left: markMenu.x, top: markMenu.y, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, boxShadow: '0 2px 8px rgba(0,0,0,0.15)', zIndex: 100, padding: 4 }}>
@@ -1733,12 +1742,58 @@ export default function PdfViewer() {
   // ===== RENDER =====
 
   if (!currentEntry) {
+    // Different welcome depending on whether the library is empty
+    const libraryEmpty = !library || library.entries.length === 0
     return (
       <div className="pdf-area">
-        <div className="empty-state">
-          <span style={{ fontSize: 48 }}></span>
-          <span>从左侧选择文献开始阅读</span>
-          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>支持 PDF · HTML · EPUB · DOCX · TXT · MD</span>
+        <div className="empty-state" style={{ maxWidth: 520, margin: '0 auto', textAlign: 'center', padding: '40px 32px' }}>
+          {libraryEmpty ? (
+            <>
+              <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--text)', marginBottom: 14 }}>
+                欢迎使用拾卷
+              </div>
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.9, marginBottom: 22 }}>
+                本地优先的学术文献管理工具<br />
+                导入、阅读、注释、关联思考 —— 都在一个温暖的界面里
+              </div>
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 26 }}>
+                <button
+                  className="btn btn-primary"
+                  style={{ padding: '8px 18px', fontSize: 13 }}
+                  onClick={() => useLibraryStore.getState().importFiles()}
+                >
+                  导入文件
+                </button>
+                <button
+                  className="btn"
+                  style={{ padding: '8px 18px', fontSize: 13 }}
+                  onClick={() => useLibraryStore.getState().importFolder()}
+                >
+                  导入文件夹
+                </button>
+              </div>
+              <div style={{
+                textAlign: 'left', fontSize: 12, color: 'var(--text-muted)',
+                background: 'var(--bg-warm)', padding: '14px 18px', borderRadius: 10,
+                border: '1px solid var(--border-light)',
+              }}>
+                <div style={{ fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>开始之前：</div>
+                <div style={{ lineHeight: 1.9 }}>
+                  • 支持 PDF · EPUB · DOCX · HTML · TXT · Markdown<br />
+                  • 扫描件 PDF 可通过设置里的 <strong>智谱 GLM API Key</strong> 做 OCR 识别<br />
+                  • 所有数据存在本地 <code style={{ background: 'var(--bg)', padding: '0 5px', borderRadius: 3, fontSize: 11 }}>~/.lit-manager/</code>，不上传云端<br />
+                  • 支持拖拽文件到窗口任意位置导入
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <span style={{ fontSize: 15, color: 'var(--text-secondary)' }}>从左侧选择文献开始阅读</span>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, display: 'block' }}>
+                提示：按 <kbd style={{ background: 'var(--bg-warm)', padding: '1px 6px', borderRadius: 3, border: '1px solid var(--border)', fontSize: 10 }}>Ctrl+P</kbd> 快速搜索文献
+              </span>
+            </>
+          )}
         </div>
       </div>
     )
@@ -1795,7 +1850,7 @@ export default function PdfViewer() {
             <span style={{ fontSize: 12, minWidth: 45, textAlign: 'center' }}>{Math.round(scale * 100)}%</span>
             <button className="btn btn-sm" onClick={() => setScale(s => Math.min(3, s + 0.2))}>+</button>
           </>
-        ) : (viewMode === 'ocr' || ['docx', 'doc'].includes(fileExt)) ? (
+        ) : (viewMode === 'ocr' || ['docx', 'doc'].includes(fileExt) || isText) ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>字号</span>
             <input type="range" min="12" max="24" value={ocrFontSize}
@@ -2208,8 +2263,11 @@ export default function PdfViewer() {
             />
           </div>
         ) : (
-          /* Normal single-column TXT/MD */
-          <div className="pdf-scroll-area" style={{ alignItems: 'stretch', padding: 0, background: 'var(--bg-warm)' }} onMouseUp={handleMouseUp}>
+          /* Normal single-column TXT/MD — respect OCR font/background settings */
+          <div className="pdf-scroll-area" style={{
+            alignItems: 'stretch', padding: 0,
+            background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
+          }} onMouseUp={handleMouseUp}>
             <div style={{ maxWidth: 800, margin: '0 auto', padding: '40px 48px', minHeight: '100%' }} data-page-number="1">
               <TextFileContent
                 key={currentEntry?.id}
@@ -2219,6 +2277,9 @@ export default function PdfViewer() {
                 marks={currentPdfMeta?.marks?.map(m => ({ id: m.id, type: m.type, color: m.color, selectedText: m.selectedText })) || []}
                 onRemoveMark={handleRemoveMark}
                 activeSelectionText={textSelection?.text}
+                fontSize={ocrFontSize}
+                fontWeight={ocrFontWeight}
+                color={ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`}
               />
             </div>
           </div>

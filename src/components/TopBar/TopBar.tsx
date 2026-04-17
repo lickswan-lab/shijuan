@@ -129,6 +129,139 @@ function UpdatePanel() {
   )
 }
 
+// ===== Diagnostic Panel (collapsible) =====
+interface DiagnosticInfo {
+  appVersion: string
+  electronVersion: string
+  platform: string
+  arch: string
+  dataDir: string
+  libraryJsonSize: number
+  metaCount: number
+  ocrFilesCount: number
+  errorLogs: Array<{ name: string; mtime: string; content: string }>
+}
+
+function DiagnosticPanel() {
+  const [expanded, setExpanded] = useState(false)
+  const [info, setInfo] = useState<DiagnosticInfo | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const load = useCallback(async () => {
+    if (!window.electronAPI?.getDiagnosticInfo) return
+    setLoading(true)
+    try {
+      const data = await window.electronAPI.getDiagnosticInfo()
+      setInfo(data)
+    } catch { /* ignore */ }
+    setLoading(false)
+  }, [])
+
+  const handleToggle = () => {
+    const next = !expanded
+    setExpanded(next)
+    if (next && !info) load()
+  }
+
+  const copyAll = useCallback(() => {
+    if (!info) return
+    const lines = [
+      `拾卷 v${info.appVersion}`,
+      `Electron: ${info.electronVersion}`,
+      `Platform: ${info.platform} (${info.arch})`,
+      `Data: ${info.dataDir}`,
+      `library.json: ${(info.libraryJsonSize / 1024).toFixed(1)} KB`,
+      `meta files: ${info.metaCount}`,
+      '',
+      ...info.errorLogs.flatMap(log => [
+        `=== ${log.name} (${log.mtime}) ===`,
+        log.content,
+        '',
+      ]),
+    ]
+    navigator.clipboard?.writeText(lines.join('\n')).catch(() => {})
+  }, [info])
+
+  return (
+    <div style={{
+      padding: '12px 14px', marginBottom: 8, borderRadius: 8,
+      border: '1px solid var(--border)', background: 'var(--bg-warm)',
+    }}>
+      <div
+        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+        onClick={handleToggle}
+      >
+        <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>诊断信息</div>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          {expanded ? '▾ 收起' : '▸ 展开（反馈问题时点开复制）'}
+        </span>
+      </div>
+
+      {expanded && (
+        <div style={{ marginTop: 10 }}>
+          {loading && <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>加载中...</div>}
+          {info && (
+            <>
+              <div style={{
+                fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.8,
+                fontFamily: 'ui-monospace, "Cascadia Code", Consolas, monospace',
+                background: 'var(--bg)', padding: '8px 10px', borderRadius: 4,
+                border: '1px solid var(--border-light)',
+              }}>
+                <div>拾卷 v{info.appVersion} · Electron {info.electronVersion}</div>
+                <div>{info.platform} / {info.arch}</div>
+                <div>library.json: {(info.libraryJsonSize / 1024).toFixed(1)} KB</div>
+                <div>文献元数据: {info.metaCount} 个</div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>{info.dataDir}</div>
+              </div>
+
+              {info.errorLogs.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--danger)', marginBottom: 4 }}>
+                    ⚠ 错误日志 ({info.errorLogs.length})
+                  </div>
+                  {info.errorLogs.map((log, i) => (
+                    <details key={i} style={{
+                      fontSize: 10, background: 'var(--bg)', padding: '6px 10px',
+                      borderRadius: 4, border: '1px solid var(--border-light)', marginBottom: 4,
+                    }}>
+                      <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)' }}>
+                        {log.name} · <span style={{ color: 'var(--text-muted)' }}>{new Date(log.mtime).toLocaleString('zh-CN')}</span>
+                      </summary>
+                      <pre style={{
+                        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                        margin: '6px 0 0', fontSize: 10, color: 'var(--text-muted)',
+                        fontFamily: 'ui-monospace, "Cascadia Code", Consolas, monospace',
+                        maxHeight: 160, overflow: 'auto',
+                      }}>{log.content}</pre>
+                    </details>
+                  ))}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                <button className="btn btn-sm" style={{ fontSize: 10 }} onClick={copyAll}>
+                  复制全部信息
+                </button>
+                <button
+                  className="btn btn-sm"
+                  style={{ fontSize: 10 }}
+                  onClick={() => window.electronAPI?.openDataDir?.()}
+                >
+                  打开数据目录
+                </button>
+                <button className="btn btn-sm" style={{ fontSize: 10 }} onClick={load}>
+                  刷新
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 interface ProviderInfo {
   id: string
   name: string
@@ -406,6 +539,9 @@ export default function TopBar() {
 
             {/* Auto Update */}
             <UpdatePanel />
+
+            {/* Diagnostics (collapsible) */}
+            <DiagnosticPanel />
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
               <button className="btn" onClick={() => setShowSettings(false)}>关闭</button>

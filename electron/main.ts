@@ -6,6 +6,7 @@ import { registerAiApiIpc } from './ipc/aiApi'
 import { registerReadingLogIpc, startMidnightScheduler } from './ipc/readingLog'
 import { registerUpdaterIpc } from './updater'
 import { registerAgentIpc } from './ipc/agent'  // Needed for Hermes memory + knowledge map
+import { registerDiagnosticIpc } from './ipc/diagnostic'
 
 function createWindow(): BrowserWindow {
   // Remove default menu bar
@@ -101,6 +102,7 @@ if (!gotTheLock) {
   registerReadingLogIpc()
   registerAgentIpc()   // Hermes memory + tools (used by annotation AI)
   registerUpdaterIpc()
+  registerDiagnosticIpc()
 
   app.whenReady().then(() => {
     try {
