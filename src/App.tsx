@@ -6,6 +6,7 @@ const PdfViewer = lazy(() => import('./components/PdfViewer/PdfViewer'))
 const AnnotationPanel = lazy(() => import('./components/AnnotationPanel/AnnotationPanel'))
 const MemoEditor = lazy(() => import('./components/Memo/MemoEditor'))
 const ReadingLogView = lazy(() => import('./components/ReadingLog/ReadingLogView'))
+const QuickOpenModal = lazy(() => import('./components/QuickOpen/QuickOpenModal'))
 import TopBar from './components/TopBar/TopBar'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useLibraryStore } from './store/libraryStore'
@@ -87,6 +88,13 @@ export default function App() {
       if (ctrl && e.key === ',') {
         e.preventDefault()
         useUiStore.getState().setShowSettings(true)
+        return
+      }
+
+      // Ctrl+P → Quick open (search entries + memos)
+      if (ctrl && e.key === 'p' && !shift) {
+        e.preventDefault()
+        useUiStore.getState().setShowQuickOpen(true)
         return
       }
 
@@ -322,6 +330,11 @@ export default function App() {
         )}
         </Suspense>
       </div>
+
+      {/* Quick open modal (Ctrl+P) */}
+      <Suspense fallback={null}>
+        <QuickOpenModal />
+      </Suspense>
     </div>
   )
 }

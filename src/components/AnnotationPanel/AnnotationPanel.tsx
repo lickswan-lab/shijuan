@@ -456,6 +456,8 @@ export default function AnnotationPanel() {
   const [noteInput, setNoteInput] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
   const [streamingText, setStreamingText] = useState('')
+  // Annotation list search (filters both current and other-entries annotations)
+  const [annSearch, setAnnSearch] = useState('')
   // Socratic mode: AI asks guiding questions instead of direct answers
   const [socraticMode, setSocraticMode] = useState(() => {
     try { return localStorage.getItem('sj-socraticMode') === 'true' } catch { return false }
@@ -1098,6 +1100,27 @@ export default function AnnotationPanel() {
 
   const totalOtherAnnotations = otherEntryAnnotations.reduce((sum, e) => sum + e.annotations.length, 0)
 
+  // ===== Search filtering (match selectedText + history chain contents) =====
+  const annMatchesSearch = (ann: Annotation, q: string): boolean => {
+    if (!q) return true
+    const needle = q.toLowerCase()
+    if ((ann.anchor?.selectedText || '').toLowerCase().includes(needle)) return true
+    for (const h of ann.historyChain || []) {
+      if ((h.content || '').toLowerCase().includes(needle)) return true
+    }
+    return false
+  }
+  const q = annSearch.trim()
+  const filteredCurrentAnns = q && currentPdfMeta
+    ? currentPdfMeta.annotations.filter(a => annMatchesSearch(a, q))
+    : (currentPdfMeta?.annotations || [])
+  const filteredOtherAnns = q
+    ? otherEntryAnnotations
+        .map(e => ({ ...e, annotations: e.annotations.filter(a => annMatchesSearch(a, q)) }))
+        .filter(e => e.annotations.length > 0)
+    : otherEntryAnnotations
+  const filteredOtherTotal = filteredOtherAnns.reduce((sum, e) => sum + e.annotations.length, 0)
+
   // ===== Empty state (all annotations list) =====
   if (!textSelection && !activeAnnotationId) {
     const hasCurrentAnnotations = currentPdfMeta && currentPdfMeta.annotations.length > 0
@@ -1117,52 +1140,76 @@ export default function AnnotationPanel() {
         </div>
 
         {hasAny ? (
-          <div style={{ flex: 1, overflow: 'auto', padding: 10 }}>
-            {/* Current entry's annotations */}
-            {hasCurrentAnnotations && (
-              <>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 4px 10px', fontWeight: 500 }}>
-                  本文献的注释 ({currentPdfMeta!.annotations.length})
-                </div>
-                {currentPdfMeta!.annotations.map(ann =>
-                  renderAnnotationItem(ann, () => setActiveAnnotation(ann.id))
-                )}
-              </>
+          <>
+            {/* Search bar (only show when >= 5 annotations exist — avoids clutter for light users) */}
+            {(currentPdfMeta!.annotations.length + totalOtherAnnotations) >= 5 && (
+              <div style={{ padding: '6px 10px', borderBottom: '1px solid var(--border-light)' }}>
+                <input
+                  type="text"
+                  placeholder="搜索注释内容..."
+                  value={annSearch}
+                  onChange={e => setAnnSearch(e.target.value)}
+                  style={{
+                    width: '100%', padding: '5px 9px', border: '1px solid var(--border)',
+                    borderRadius: 4, fontSize: 11, outline: 'none',
+                    background: 'var(--bg-warm)', color: 'var(--text)',
+                  }}
+                />
+              </div>
             )}
-
-            {/* Divider + Other entries' annotations */}
-            {totalOtherAnnotations > 0 && (
-              <>
-                <div style={{
-                  margin: '16px 0 12px', padding: '10px 0 0',
-                  borderTop: '2px solid var(--border-light)',
-                  fontSize: 11, color: 'var(--text-muted)', fontWeight: 500,
-                }}>
-                  其他文献的注释 ({totalOtherAnnotations})
-                </div>
-                {otherEntryAnnotations.map(other => (
-                  <div key={other.entryId}>
-                    <div style={{
-                      fontSize: 10, color: 'var(--accent)', fontWeight: 600,
-                      padding: '6px 4px 4px', opacity: 0.7,
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    }}>
-                      📄 {other.entryTitle}
-                    </div>
-                    {other.annotations.map(ann =>
-                      renderAnnotationItem(
-                        ann,
-                        () => handleJumpToOtherAnnotation(other.entryId, ann.id),
-                        other.entryTitle,
-                        other.entryId,
-                        other.entryTitle,
-                      )
-                    )}
+            <div style={{ flex: 1, overflow: 'auto', padding: 10 }}>
+              {/* Current entry's annotations */}
+              {filteredCurrentAnns.length > 0 && (
+                <>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 4px 10px', fontWeight: 500 }}>
+                    本文献的注释 ({q ? `${filteredCurrentAnns.length}/${currentPdfMeta!.annotations.length}` : currentPdfMeta!.annotations.length})
                   </div>
-                ))}
-              </>
-            )}
-          </div>
+                  {filteredCurrentAnns.map(ann =>
+                    renderAnnotationItem(ann, () => setActiveAnnotation(ann.id))
+                  )}
+                </>
+              )}
+
+              {/* Divider + Other entries' annotations */}
+              {filteredOtherTotal > 0 && (
+                <>
+                  <div style={{
+                    margin: '16px 0 12px', padding: '10px 0 0',
+                    borderTop: '2px solid var(--border-light)',
+                    fontSize: 11, color: 'var(--text-muted)', fontWeight: 500,
+                  }}>
+                    其他文献的注释 ({q ? `${filteredOtherTotal}/${totalOtherAnnotations}` : totalOtherAnnotations})
+                  </div>
+                  {filteredOtherAnns.map(other => (
+                    <div key={other.entryId}>
+                      <div style={{
+                        fontSize: 10, color: 'var(--accent)', fontWeight: 600,
+                        padding: '6px 4px 4px', opacity: 0.7,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>
+                        📄 {other.entryTitle}
+                      </div>
+                      {other.annotations.map(ann =>
+                        renderAnnotationItem(
+                          ann,
+                          () => handleJumpToOtherAnnotation(other.entryId, ann.id),
+                          other.entryTitle,
+                          other.entryId,
+                          other.entryTitle,
+                        )
+                      )}
+                    </div>
+                  ))}
+                </>
+              )}
+
+              {q && filteredCurrentAnns.length === 0 && filteredOtherTotal === 0 && (
+                <div style={{ padding: '24px 8px', textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
+                  没有匹配「{q}」的注释
+                </div>
+              )}
+            </div>
+          </>
         ) : (
           <div className="empty-state">
             <span style={{ fontSize: 13 }}>选中 PDF 中的文字</span>

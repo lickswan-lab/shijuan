@@ -55,6 +55,9 @@ interface UiState {
   darkMode: boolean
   dualPageMode: boolean  // true = dual-page spread in immersive; false = single-page + side annotation
 
+  // Quick open modal (Ctrl+P)
+  showQuickOpen: boolean
+
   // Actions
   toggleSidebar: () => void
   toggleAnnotationPanel: () => void
@@ -78,6 +81,7 @@ interface UiState {
   setImmersiveMode: (on: boolean) => void
   toggleDarkMode: () => void
   setDualPageMode: (on: boolean) => void
+  setShowQuickOpen: (show: boolean) => void
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -102,6 +106,7 @@ export const useUiStore = create<UiState>((set) => ({
   immersiveMode: false,
   darkMode: (() => { try { return localStorage.getItem('sj-darkMode') === 'true' } catch { return false } })(),
   dualPageMode: (() => { try { const v = localStorage.getItem('sj-dualPageMode'); return v !== null ? v === 'true' : true } catch { return true } })(),
+  showQuickOpen: false,
 
   toggleSidebar: () => set(s => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   toggleAnnotationPanel: () => set(s => ({ annotationPanelCollapsed: !s.annotationPanelCollapsed, rightPanel: 'annotation' as const })),
@@ -145,6 +150,7 @@ export const useUiStore = create<UiState>((set) => ({
     }
   },
   setDualPageMode: (on) => { set({ dualPageMode: on }); try { localStorage.setItem('sj-dualPageMode', String(on)) } catch {} },
+  setShowQuickOpen: (show) => set({ showQuickOpen: show }),
   setRightPanel: (panel) => set({ rightPanel: panel, annotationPanelCollapsed: false, ...(panel === 'agent' ? { hermesHasInsight: false } : {}) }),
   setHermesHasInsight: (has) => set({ hermesHasInsight: has }),
 }))

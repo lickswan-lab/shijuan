@@ -85,6 +85,7 @@ async function collectEventsForDate(date: string): Promise<ReadingLogEvent[]> {
             type: 'annotate',
             entryId: entry.id,
             entryTitle: entry.title,
+            annotationId: ann.id,
             detail: `在「${entry.title}」中添加了注释`,
             selectedText: clip(ann.anchor?.selectedText),
           })
@@ -102,6 +103,7 @@ async function collectEventsForDate(date: string): Promise<ReadingLogEvent[]> {
             type: evType,
             entryId: entry.id,
             entryTitle: entry.title,
+            annotationId: ann.id,
             detail: `在「${entry.title}」的注释中${label}`,
             selectedText: clip(he.content),
           })

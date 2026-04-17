@@ -438,6 +438,13 @@ export default function ReadingLogView() {
                         if (entry) {
                           openEntry(entry)
                           setActiveReadingLogDate(null)
+                          // Jump to the specific annotation if this event references one
+                          if (event.annotationId) {
+                            // openEntry is async (loads meta), give it a tick to settle
+                            setTimeout(() => {
+                              useUiStore.getState().setActiveAnnotation(event.annotationId!)
+                            }, 250)
+                          }
                         }
                       } else if (event.memoId) {
                         setActiveMemo(event.memoId)
@@ -446,7 +453,7 @@ export default function ReadingLogView() {
                     }}
                     onMouseEnter={e => { if (event.entryId || event.memoId) (e.currentTarget.style.background = 'var(--bg-hover)') }}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                    title={event.entryId ? '点击打开该文献' : event.memoId ? '点击打开该笔记' : ''}
+                    title={event.entryId ? (event.annotationId ? '点击跳转到该注释' : '点击打开该文献') : event.memoId ? '点击打开该笔记' : ''}
                   >
                     <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.5 }}>
                       {event.detail}

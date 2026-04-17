@@ -151,6 +151,7 @@ export interface ReadingLogEvent {
   entryTitle?: string
   memoId?: string
   memoTitle?: string
+  annotationId?: string            // For annotate/note/question/stance/ai_interaction — jump target (v1.2.7+)
   detail: string                   // e.g. "在《论法的精神》第3页添加了注释"
   selectedText?: string            // excerpt (≤80 chars)
 }

@@ -1239,6 +1239,7 @@ export default function PdfViewer() {
   const [scale, setScale] = useState(1.0)
   const [pdfFileUrl, setPdfFileUrl] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [loadProgress, setLoadProgress] = useState<number>(0)
   const [rereadingReminder, setRereadingReminder] = useState<{ annCount: number; lastTime: string } | null>(null)
   const [ocrProgress, setOcrProgress] = useState<{ status: string } | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('pdf')
@@ -1341,6 +1342,7 @@ export default function PdfViewer() {
   useEffect(() => {
     // Reset everything
     setPdfFileUrl(null)
+    setLoadProgress(0)
     setNumPages(0)
     setLoadError(null)
     setOcrFullText(null)
@@ -1377,15 +1379,27 @@ export default function PdfViewer() {
       setPdfFileUrl(fileUrl)
     }
 
-    // Restore scroll position after content renders (delayed to let async content load)
-    setTimeout(() => {
-      if (scrollRef.current) {
-        try {
-          const saved = localStorage.getItem(`sj-scroll-${currentEntry.id}`)
-          scrollRef.current.scrollTop = saved ? Number(saved) : 0
-        } catch { scrollRef.current.scrollTop = 0 }
+    // Restore scroll position. We retry up to 10 times over 3s because large PDFs / OCR
+    // documents keep growing in height as pages/content render in. If we set scrollTop too
+    // early, the container is shorter than the target and the jump silently fails.
+    let restoreAttempts = 0
+    let savedScroll = 0
+    try { savedScroll = Number(localStorage.getItem(`sj-scroll-${currentEntry.id}`) || 0) } catch {}
+    if (savedScroll > 0) {
+      const tryRestore = () => {
+        const el = scrollRef.current
+        if (!el) return
+        // Only jump if container is tall enough — otherwise retry
+        if (el.scrollHeight >= savedScroll + el.clientHeight) {
+          el.scrollTop = savedScroll
+          return
+        }
+        if (restoreAttempts++ < 10) setTimeout(tryRestore, 300)
       }
-    }, 300)
+      setTimeout(tryRestore, 200)
+    } else if (scrollRef.current) {
+      scrollRef.current.scrollTop = 0
+    }
 
     // Load HTML content for HTML files
     if (['html', 'htm'].includes(ext)) {
@@ -2044,7 +2058,22 @@ export default function PdfViewer() {
               file={pdfFileUrl}
               onLoadSuccess={onDocumentLoadSuccess}
               onLoadError={onDocumentLoadError}
-              loading={<div className="empty-state"><span>解析 PDF...</span></div>}
+              onLoadProgress={({ loaded, total }: { loaded: number; total: number }) => {
+                if (total > 0) setLoadProgress(Math.round((loaded / total) * 100))
+              }}
+              loading={
+                <div className="empty-state">
+                  <span className="loading-spinner" />
+                  <span style={{ marginTop: 10 }}>
+                    解析 PDF{loadProgress > 0 ? ` · ${loadProgress}%` : '...'}
+                  </span>
+                  {loadProgress > 0 && loadProgress < 100 && (
+                    <div style={{ width: 180, height: 3, background: 'var(--border)', borderRadius: 2, marginTop: 10, overflow: 'hidden' }}>
+                      <div style={{ width: `${loadProgress}%`, height: '100%', background: 'var(--accent)', transition: 'width 0.2s' }} />
+                    </div>
+                  )}
+                </div>
+              }
               error={<div className="empty-state"><span>PDF 解析失败</span></div>}
             >
               {immersiveMode && dualPageMode ? (
