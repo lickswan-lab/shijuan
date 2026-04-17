@@ -263,6 +263,25 @@ export default function App() {
           useLibraryStore.getState().saveReadingLog(log)
         }
       })
+      // Background update check: only if ≥ 24h since last check (avoid hitting GitHub
+      // on every startup). Runs 3s after mount so initial render isn't blocked.
+      setTimeout(() => {
+        try {
+          const last = Number(localStorage.getItem('sj-lastUpdateCheck') || '0')
+          if (Date.now() - last < 24 * 3600 * 1000) return
+          if (!window.electronAPI?.checkUpdate) return
+          window.electronAPI.checkUpdate().then(res => {
+            localStorage.setItem('sj-lastUpdateCheck', String(Date.now()))
+            if (res.hasUpdate) {
+              useUiStore.getState().setUpdateAvailable({
+                version: res.latestVersion,
+                downloadUrl: res.downloadUrl,
+                asarSize: res.asarSize,
+              })
+            }
+          }).catch(() => { /* silent — don't bother user if network flakes */ })
+        } catch { /* ignore localStorage errors */ }
+      }, 3000)
       return cleanup
     }
   }, [])

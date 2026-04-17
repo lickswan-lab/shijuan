@@ -1373,6 +1373,9 @@ export default function PdfViewer() {
   const [outline, setOutline] = useState<Array<{ title: string; dest: any; items?: any[] }> | null>(null)
   const [showOutline, setShowOutline] = useState(false)
   const pdfDocRef = useRef<any>(null)  // PDFDocumentProxy from react-pdf for getPageIndex
+  // Page jump: input state + refs for the toolbar input
+  const [pageJumpInput, setPageJumpInput] = useState('')
+  const pageJumpRef = useRef<HTMLInputElement>(null)
   const [rereadingReminder, setRereadingReminder] = useState<{ annCount: number; lastTime: string } | null>(null)
   const [ocrProgress, setOcrProgress] = useState<{ status: string } | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('pdf')
@@ -1622,12 +1625,21 @@ export default function PdfViewer() {
     pdfDocRef.current = null
   }, [currentEntry?.id])
 
-  // Jump to a specific PDF page (1-indexed) by scrolling its .pdf-page-wrapper into view.
+  // Jump to a specific page (1-indexed). Works for:
+  //   - PDF view: finds .pdf-page-wrapper[data-page-number="N"]
+  //   - OCR view: finds any element with [data-page-number="N"]
+  //   (OcrContent wraps each "=== 第 N 页 ===" section with data-page-number)
   const scrollToPage = useCallback((pageNumber: number) => {
     const container = scrollRef.current
     if (!container) return
-    const el = container.querySelector(`.pdf-page-wrapper[data-page-number="${pageNumber}"]`) as HTMLElement | null
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    // Try PDF-specific first, then any matching data-page-number
+    const el = (container.querySelector(`.pdf-page-wrapper[data-page-number="${pageNumber}"]`)
+      || container.querySelector(`[data-page-number="${pageNumber}"]`)) as HTMLElement | null
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return true
+    }
+    return false
   }, [])
 
   // Resolve a PDF outline item's destination → page number → scroll.
@@ -1650,6 +1662,59 @@ export default function PdfViewer() {
   const onDocumentLoadError = useCallback((err: Error) => {
     setLoadError('PDF 解析失败: ' + err.message)
   }, [])
+
+  // Page-jump submission handler (for toolbar input)
+  const handlePageJump = useCallback(() => {
+    const n = parseInt(pageJumpInput, 10)
+    if (!Number.isFinite(n) || n < 1) return
+    const ok = scrollToPage(n)
+    if (ok) setPageJumpInput('')
+  }, [pageJumpInput, scrollToPage])
+
+  // Keyboard shortcuts for PDF viewing
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!currentEntry) return
+      const tag = (e.target as HTMLElement)?.tagName
+      const isEditing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable
+      const ctrl = e.ctrlKey || e.metaKey
+
+      // Ctrl+G → focus page-jump input
+      if (ctrl && (e.key === 'g' || e.key === 'G')) {
+        if (isEditing) return
+        e.preventDefault()
+        pageJumpRef.current?.focus()
+        pageJumpRef.current?.select()
+        return
+      }
+      // Ctrl+= / Ctrl++ → zoom in (PDF only; OCR uses font-size slider)
+      if (ctrl && (e.key === '=' || e.key === '+')) {
+        if (isEditing) return
+        if (viewMode !== 'pdf' || !isPdf) return
+        e.preventDefault()
+        setScale(s => Math.min(3, +(s + 0.15).toFixed(2)))
+        return
+      }
+      // Ctrl+- → zoom out
+      if (ctrl && e.key === '-') {
+        if (isEditing) return
+        if (viewMode !== 'pdf' || !isPdf) return
+        e.preventDefault()
+        setScale(s => Math.max(0.5, +(s - 0.15).toFixed(2)))
+        return
+      }
+      // Ctrl+0 → reset zoom to 100%
+      if (ctrl && e.key === '0') {
+        if (isEditing) return
+        if (viewMode !== 'pdf' || !isPdf) return
+        e.preventDefault()
+        setScale(1.0)
+        return
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [currentEntry, viewMode, isPdf])
 
   // ===== OCR: Send entire PDF file to GLM-OCR =====
   const handleOcr = useCallback(async () => {
@@ -2001,6 +2066,33 @@ export default function PdfViewer() {
         </span>
         {numPages > 0 && (
           <span style={{ color: 'var(--text-muted)', marginLeft: 8, flexShrink: 0 }}>{numPages} 页</span>
+        )}
+        {/* Page jump (PDF view only — for OCR we could support it too but the user
+            generally navigates by scroll in OCR. Uses the same input for both modes.) */}
+        {(numPages > 0 || (viewMode === 'ocr' && /=== 第 \d+ 页 ===/.test(ocrFullText || ''))) && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginLeft: 6, flexShrink: 0 }}>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>跳转</span>
+            <input
+              ref={pageJumpRef}
+              type="number"
+              min={1}
+              max={numPages || undefined}
+              value={pageJumpInput}
+              onChange={e => setPageJumpInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') { e.preventDefault(); handlePageJump() }
+                else if (e.key === 'Escape') { e.currentTarget.blur(); setPageJumpInput('') }
+              }}
+              placeholder="页"
+              title="输入页码后回车跳转 (Ctrl+G)"
+              style={{
+                width: 44, padding: '2px 5px', fontSize: 11,
+                border: '1px solid var(--border)', borderRadius: 4,
+                background: 'var(--bg-warm)', color: 'var(--text)',
+                outline: 'none',
+              }}
+            />
+          </div>
         )}
         {/* PDF outline toggle — only shown when a PDF is loaded AND it has a real TOC */}
         {isPdf && outline && outline.length > 0 && (

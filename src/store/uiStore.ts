@@ -81,6 +81,9 @@ interface UiState {
   // Batch OCR queue — sequential OCR over multiple entries
   ocrQueue: OcrQueueState
 
+  // Update check (populated by App.tsx's daily background check)
+  updateAvailable: { version: string; downloadUrl: string | null; asarSize: number } | null
+
   // Actions
   toggleSidebar: () => void
   toggleAnnotationPanel: () => void
@@ -112,6 +115,7 @@ interface UiState {
   setOcrChunkProgress: (p: { chunkIndex: number; totalChunks: number } | null) => void
   cancelOcrQueue: () => void
   dismissOcrQueue: () => void
+  setUpdateAvailable: (u: { version: string; downloadUrl: string | null; asarSize: number } | null) => void
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -147,6 +151,7 @@ export const useUiStore = create<UiState>((set) => ({
     cancelled: false,
     currentChunk: null,
   },
+  updateAvailable: null,
 
   toggleSidebar: () => set(s => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   toggleAnnotationPanel: () => set(s => ({ annotationPanelCollapsed: !s.annotationPanelCollapsed, rightPanel: 'annotation' as const })),
@@ -226,6 +231,7 @@ export const useUiStore = create<UiState>((set) => ({
       errors: [], completed: [], cancelled: false, currentChunk: null,
     },
   }),
+  setUpdateAvailable: (u) => set({ updateAvailable: u }),
   setRightPanel: (panel) => set({ rightPanel: panel, annotationPanelCollapsed: false, ...(panel === 'agent' ? { hermesHasInsight: false } : {}) }),
   setHermesHasInsight: (has) => set({ hermesHasInsight: has }),
 }))

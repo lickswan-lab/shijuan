@@ -541,6 +541,46 @@ function LiveMemoEditor({ content, onChange, blocks, memoId, onJumpBlock }: {
             value={content}
             onChange={e => onChange(e.target.value)}
             onBlur={() => setEditing(false)}
+            onKeyDown={e => {
+              // Markdown shortcuts: Ctrl+B bold, Ctrl+I italic, Ctrl+K link
+              const ctrl = e.ctrlKey || e.metaKey
+              if (!ctrl) return
+              const ta = e.currentTarget
+              const s = ta.selectionStart, eSel = ta.selectionEnd
+              const selected = content.slice(s, eSel)
+              const wrap = (left: string, right: string, placeholder = '') => {
+                e.preventDefault()
+                const inner = selected || placeholder
+                const next = content.slice(0, s) + left + inner + right + content.slice(eSel)
+                onChange(next)
+                // Restore selection to the inserted inner text on next tick
+                setTimeout(() => {
+                  ta.focus()
+                  if (selected) {
+                    ta.selectionStart = s + left.length
+                    ta.selectionEnd = s + left.length + inner.length
+                  } else {
+                    ta.selectionStart = ta.selectionEnd = s + left.length + inner.length
+                  }
+                }, 0)
+              }
+              if (e.key === 'b' || e.key === 'B') wrap('**', '**', '粗体')
+              else if (e.key === 'i' || e.key === 'I') wrap('*', '*', '斜体')
+              else if (e.key === 'k' || e.key === 'K') {
+                e.preventDefault()
+                const url = prompt('链接地址：', 'https://')
+                if (!url) return
+                const text = selected || '链接文字'
+                const next = content.slice(0, s) + `[${text}](${url})` + content.slice(eSel)
+                onChange(next)
+                setTimeout(() => {
+                  ta.focus()
+                  const pos = s + 1
+                  ta.selectionStart = pos
+                  ta.selectionEnd = pos + text.length
+                }, 0)
+              }
+            }}
             style={{
               flex: 1, padding: '20px 28px', border: 'none', outline: 'none', resize: 'none',
               fontSize: 14, lineHeight: 2, fontFamily: 'var(--font)',
