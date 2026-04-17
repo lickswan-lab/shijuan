@@ -50,6 +50,11 @@ export default function BatchOcrProgress() {
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}>
               正在处理: {currentItem.title}
+              {ocrQueue.currentChunk && ocrQueue.currentChunk.totalChunks > 1 && (
+                <span style={{ color: 'var(--accent)', marginLeft: 4 }}>
+                  （片段 {ocrQueue.currentChunk.chunkIndex + 1}/{ocrQueue.currentChunk.totalChunks}）
+                </span>
+              )}
             </div>
           )}
           {isDone && (

@@ -1,7 +1,60 @@
-import { ipcMain, app } from 'electron'
+import { ipcMain, app, BrowserWindow } from 'electron'
 import fs from 'fs/promises'
 import path from 'path'
 import type { HistoryEntry } from '../../src/types/library'
+
+// ===== GLM-OCR service limits (per their docs, 2026-04) =====
+// PDF: ≤ 50 MB, ≤ 100 pages. We stay well under both with a 40MB / 80-page soft cap
+// so that a PDF right at the edge (with large fonts / embedded images) doesn't 400.
+const GLM_OCR_MAX_PAGES = 80
+const GLM_OCR_MAX_BYTES = 40 * 1024 * 1024
+
+// Split a PDF buffer into page-count-bounded chunks using pdf-lib.
+// Returns array of { chunkBuffer, startPage (1-indexed), endPage (1-indexed) }.
+// If chunks after splitting are still > GLM_OCR_MAX_BYTES, we further bisect them.
+async function splitPdfForOcr(pdfBuffer: Buffer): Promise<Array<{ buffer: Buffer; startPage: number; endPage: number }>> {
+  const { PDFDocument } = await import('pdf-lib')
+  const srcDoc = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true })
+  const totalPages = srcDoc.getPageCount()
+
+  // Build initial chunks by page count. Each chunk spans [startIdx, endIdx) zero-based.
+  const initialRanges: Array<[number, number]> = []
+  for (let i = 0; i < totalPages; i += GLM_OCR_MAX_PAGES) {
+    initialRanges.push([i, Math.min(i + GLM_OCR_MAX_PAGES, totalPages)])
+  }
+
+  const results: Array<{ buffer: Buffer; startPage: number; endPage: number }> = []
+
+  async function buildAndMaybeSplit(startIdx: number, endIdx: number): Promise<void> {
+    const indices: number[] = []
+    for (let i = startIdx; i < endIdx; i++) indices.push(i)
+    const newDoc = await PDFDocument.create()
+    const copied = await newDoc.copyPages(srcDoc, indices)
+    for (const p of copied) newDoc.addPage(p)
+    const bytes = await newDoc.save({ useObjectStreams: false })
+    const buf = Buffer.from(bytes)
+    if (buf.length > GLM_OCR_MAX_BYTES && endIdx - startIdx > 1) {
+      // Bisect
+      const mid = Math.floor((startIdx + endIdx) / 2)
+      await buildAndMaybeSplit(startIdx, mid)
+      await buildAndMaybeSplit(mid, endIdx)
+    } else {
+      results.push({ buffer: buf, startPage: startIdx + 1, endPage: endIdx })
+    }
+  }
+
+  for (const [s, e] of initialRanges) await buildAndMaybeSplit(s, e)
+  return results
+}
+
+// Send per-chunk progress to all windows, so the UI can show sub-progress during
+// long multi-chunk OCR runs.
+function reportOcrProgress(entryId: string | undefined, chunkIndex: number, totalChunks: number, phase: 'start' | 'done' | 'error') {
+  const payload = { entryId, chunkIndex, totalChunks, phase }
+  for (const win of BrowserWindow.getAllWindows()) {
+    try { win.webContents.send('glm-ocr-progress', payload) } catch {}
+  }
+}
 
 // ===== Provider definitions =====
 
@@ -514,48 +567,114 @@ export function registerAiApiIpc(): void {
     }
   })
 
-  ipcMain.handle('glm-ocr-pdf', async (_event, pdfAbsPath: string) => {
+  ipcMain.handle('glm-ocr-pdf', async (_event, pdfAbsPath: string, opts?: { entryId?: string }) => {
     try {
       const key = apiKeys['glm']
       if (!key) throw new Error('GLM API Key 未设置（OCR 需要智谱 GLM）')
+      const entryId = opts?.entryId
 
       const pdfBuffer = await fs.readFile(pdfAbsPath)
-      const pdfBase64 = pdfBuffer.toString('base64')
 
-      const response = await fetch(GLM_OCR_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-        body: JSON.stringify({ model: 'glm-ocr', file: `data:application/pdf;base64,${pdfBase64}` }),
-      })
-      if (!response.ok) {
-        const errText = await response.text()
-        throw new Error(`GLM-OCR API error ${response.status}: ${errText}`)
-      }
-      const data = await response.json()
-
-      let text = data.md_results || ''
-      if (!text && data.layout_details) {
-        const blocks: string[] = []
-        for (const page of data.layout_details) {
-          for (const block of page) { if (block.content) blocks.push(block.content) }
+      // Decide whether to split. Quick check: if the raw file is already small and ≤100 pages,
+      // we can send it in one shot. Otherwise, split.
+      let chunks: Array<{ buffer: Buffer; startPage: number; endPage: number }>
+      if (pdfBuffer.length <= GLM_OCR_MAX_BYTES) {
+        // Cheap page count via pdf-lib (only on medium-small PDFs)
+        try {
+          const { PDFDocument } = await import('pdf-lib')
+          const probe = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true })
+          if (probe.getPageCount() <= GLM_OCR_MAX_PAGES) {
+            chunks = [{ buffer: pdfBuffer, startPage: 1, endPage: probe.getPageCount() }]
+          } else {
+            console.log('[glm-ocr-pdf] PDF has', probe.getPageCount(), 'pages — splitting')
+            chunks = await splitPdfForOcr(pdfBuffer)
+          }
+        } catch {
+          // pdf-lib couldn't parse — try as single chunk; let the API give us a real error
+          chunks = [{ buffer: pdfBuffer, startPage: 1, endPage: 0 }]
         }
-        text = blocks.join('\n\n')
+      } else {
+        console.log('[glm-ocr-pdf] PDF size', Math.round(pdfBuffer.length / 1024 / 1024), 'MB exceeds cap — splitting')
+        chunks = await splitPdfForOcr(pdfBuffer)
       }
+
+      console.log(`[glm-ocr-pdf] Processing ${chunks.length} chunk(s) for ${path.basename(pdfAbsPath)}`)
+
       const circled = ['①','②','③','④','⑤','⑥','⑦','⑧','⑨','⑩']
-      text = text
-        .replace(/\$\\textcircled\{(\d+)\}\$/g, (_m: string, n: string) => circled[parseInt(n)-1] || `(${n})`)
-        .replace(/\$\\\\textcircled\{(\d+)\}\$/g, (_m: string, n: string) => circled[parseInt(n)-1] || `(${n})`)
-        .replace(/\n{4,}/g, '\n\n\n').trim()
+      const allPageTexts: string[] = []
+      const chunkTextParts: string[] = []
+      let totalReportedPages = 0
+
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i]
+        reportOcrProgress(entryId, i, chunks.length, 'start')
+
+        try {
+          const pdfBase64 = chunk.buffer.toString('base64')
+          const response = await fetch(GLM_OCR_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+            body: JSON.stringify({ model: 'glm-ocr', file: `data:application/pdf;base64,${pdfBase64}` }),
+          })
+          if (!response.ok) {
+            const errText = await response.text()
+            throw new Error(`GLM-OCR API error ${response.status}: ${errText}`)
+          }
+          const data = await response.json()
+
+          // Prefer layout_details (per-page) so we can merge pageTexts accurately.
+          // md_results is the fallback whole-doc markdown.
+          let chunkText = ''
+          const chunkPageTexts: string[] = []
+          if (data.layout_details && Array.isArray(data.layout_details)) {
+            for (const page of data.layout_details) {
+              const pageText = page.map((b: any) => b.content || '').filter(Boolean).join('\n\n')
+              chunkPageTexts.push(pageText)
+            }
+            chunkText = chunkPageTexts.join('\n\n')
+          } else {
+            chunkText = data.md_results || ''
+          }
+
+          // Normalize circled numbers and excessive blank lines
+          chunkText = chunkText
+            .replace(/\$\\textcircled\{(\d+)\}\$/g, (_m: string, n: string) => circled[parseInt(n)-1] || `(${n})`)
+            .replace(/\$\\\\textcircled\{(\d+)\}\$/g, (_m: string, n: string) => circled[parseInt(n)-1] || `(${n})`)
+            .replace(/\n{4,}/g, '\n\n\n').trim()
+
+          allPageTexts.push(...chunkPageTexts)
+          totalReportedPages += data.data_info?.num_pages || chunkPageTexts.length
+
+          // Insert a visible chunk boundary if we actually split the PDF — helps downstream
+          // text highlights / annotation anchors stay aligned with page numbers.
+          if (chunks.length > 1 && chunkText) {
+            chunkTextParts.push(`=== 第 ${chunk.startPage}-${chunk.endPage} 页 ===\n\n${chunkText}`)
+          } else if (chunkText) {
+            chunkTextParts.push(chunkText)
+          }
+
+          reportOcrProgress(entryId, i, chunks.length, 'done')
+        } catch (err: any) {
+          reportOcrProgress(entryId, i, chunks.length, 'error')
+          // If we had no success yet, fail the whole thing; otherwise keep partial result
+          if (allPageTexts.length === 0 && chunkTextParts.length === 0) throw err
+          console.warn(`[glm-ocr-pdf] chunk ${i + 1}/${chunks.length} failed: ${err.message}`)
+          chunkTextParts.push(`=== 第 ${chunk.startPage}-${chunk.endPage} 页（OCR 失败：${err.message}）===`)
+        }
+      }
+
+      const text = chunkTextParts.join('\n\n\n').trim()
       if (!text) throw new Error('OCR 未能提取到文字')
 
-      const pageTexts: string[] = []
-      if (data.layout_details && Array.isArray(data.layout_details)) {
-        for (const page of data.layout_details) {
-          pageTexts.push(page.map((b: any) => b.content || '').join('\n\n'))
-        }
+      return {
+        success: true,
+        text,
+        pageTexts: allPageTexts,
+        pageCount: totalReportedPages || allPageTexts.length,
+        chunks: chunks.length,
       }
-      return { success: true, text, pageTexts, pageCount: data.data_info?.num_pages || pageTexts.length }
     } catch (err: any) {
+      console.error('[glm-ocr-pdf] Error:', err.message)
       return { success: false, error: err.message }
     }
   })

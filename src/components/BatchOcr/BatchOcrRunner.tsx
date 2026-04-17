@@ -16,11 +16,31 @@ import { useLibraryStore } from '../../store/libraryStore'
 export default function BatchOcrRunner() {
   const ocrQueue = useUiStore(s => s.ocrQueue)
   const advanceOcrQueue = useUiStore(s => s.advanceOcrQueue)
+  const setOcrChunkProgress = useUiStore(s => s.setOcrChunkProgress)
   const updateEntry = useLibraryStore(s => s.updateEntry)
 
   // Track which (currentIndex) we've already kicked off, so React re-renders
   // don't retrigger the same OCR request twice.
   const activeIdxRef = useRef<number>(-1)
+
+  // Subscribe to per-chunk OCR progress from the main process. Filtered by entryId
+  // so stale events from a previously-running OCR don't bleed in.
+  useEffect(() => {
+    const api = window.electronAPI
+    if (!api?.onOcrProgress) return
+    const cleanup = api.onOcrProgress((payload) => {
+      const currentItem = ocrQueue.items[ocrQueue.currentIndex]
+      if (!currentItem) return
+      if (payload.entryId && payload.entryId !== currentItem.entryId) return
+      // Show (chunkIndex+1)/total at "start"; reset on final "done" of last chunk
+      if (payload.phase === 'start') {
+        setOcrChunkProgress({ chunkIndex: payload.chunkIndex, totalChunks: payload.totalChunks })
+      } else if (payload.phase === 'done' && payload.chunkIndex >= payload.totalChunks - 1) {
+        setOcrChunkProgress(null)
+      }
+    })
+    return cleanup
+  }, [ocrQueue.items, ocrQueue.currentIndex, setOcrChunkProgress])
 
   useEffect(() => {
     if (ocrQueue.status !== 'running') return
@@ -40,13 +60,12 @@ export default function BatchOcrRunner() {
       try {
         const api = window.electronAPI
         if (!api?.glmOcrPdf) throw new Error('OCR API unavailable')
-        const result = await api.glmOcrPdf(item.absPath)
+        // Pass entryId so the backend's chunk-progress events can be correlated here
+        const result = await api.glmOcrPdf(item.absPath, { entryId: item.entryId })
         if (stopped) return
 
         if (result.success && result.text) {
-          // Save OCR text next to the PDF
           const savedPath = await api.saveOcrText(item.absPath, result.text)
-          // Update entry metadata
           await updateEntry(item.entryId, {
             ocrStatus: 'complete',
             ocrFilePath: savedPath,
@@ -70,7 +89,6 @@ export default function BatchOcrRunner() {
     })()
 
     return () => { stopped = true }
-    // Re-fire only when status or currentIndex changes
   }, [ocrQueue.status, ocrQueue.currentIndex, ocrQueue.cancelled, ocrQueue.items, advanceOcrQueue, updateEntry])
 
   return null

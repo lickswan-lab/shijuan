@@ -67,8 +67,13 @@ const electronAPI = {
     ipcRenderer.invoke('get-glm-api-key-status'),
   glmOcr: (imageBase64: string): Promise<{ success: boolean; text?: string; error?: string }> =>
     ipcRenderer.invoke('glm-ocr', imageBase64),
-  glmOcrPdf: (pdfAbsPath: string): Promise<{ success: boolean; text?: string; pageTexts?: string[]; pageCount?: number; error?: string }> =>
-    ipcRenderer.invoke('glm-ocr-pdf', pdfAbsPath),
+  glmOcrPdf: (pdfAbsPath: string, opts?: { entryId?: string }): Promise<{ success: boolean; text?: string; pageTexts?: string[]; pageCount?: number; chunks?: number; error?: string }> =>
+    ipcRenderer.invoke('glm-ocr-pdf', pdfAbsPath, opts),
+  onOcrProgress: (callback: (payload: { entryId?: string; chunkIndex: number; totalChunks: number; phase: 'start' | 'done' | 'error' }) => void) => {
+    const handler = (_event: any, payload: any) => callback(payload)
+    ipcRenderer.on('glm-ocr-progress', handler)
+    return () => { ipcRenderer.removeListener('glm-ocr-progress', handler) }
+  },
   glmInterpret: (text: string, context: string): Promise<{ success: boolean; text?: string; error?: string }> =>
     ipcRenderer.invoke('glm-interpret', text, context),
   glmInstantFeedback: (

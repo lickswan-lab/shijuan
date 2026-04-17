@@ -21,6 +21,8 @@ export interface OcrQueueState {
   errors: Array<{ entryId: string; title: string; error: string }>
   completed: string[]         // entryIds that finished successfully
   cancelled: boolean          // set by user; runner checks between items
+  // Sub-progress: when a large PDF is split into chunks for OCR, report which chunk we're on
+  currentChunk: { chunkIndex: number; totalChunks: number } | null
 }
 
 interface UiState {
@@ -107,6 +109,7 @@ interface UiState {
   // Batch OCR
   startOcrQueue: (items: OcrQueueItem[]) => void
   advanceOcrQueue: (result: { entryId: string; success: boolean; error?: string }) => void
+  setOcrChunkProgress: (p: { chunkIndex: number; totalChunks: number } | null) => void
   cancelOcrQueue: () => void
   dismissOcrQueue: () => void
 }
@@ -142,6 +145,7 @@ export const useUiStore = create<UiState>((set) => ({
     errors: [],
     completed: [],
     cancelled: false,
+    currentChunk: null,
   },
 
   toggleSidebar: () => set(s => ({ sidebarCollapsed: !s.sidebarCollapsed })),
@@ -191,7 +195,7 @@ export const useUiStore = create<UiState>((set) => ({
   startOcrQueue: (items) => set({
     ocrQueue: {
       items, currentIndex: 0, status: 'running',
-      errors: [], completed: [], cancelled: false,
+      errors: [], completed: [], cancelled: false, currentChunk: null,
     },
   }),
   advanceOcrQueue: (result) => set(s => {
@@ -208,16 +212,18 @@ export const useUiStore = create<UiState>((set) => ({
           ...q.errors,
           { entryId: result.entryId, title: q.items[q.currentIndex]?.title || '', error: result.error || 'unknown' },
         ],
+        currentChunk: null,  // reset sub-progress between items
       },
     }
   }),
+  setOcrChunkProgress: (p) => set(s => ({ ocrQueue: { ...s.ocrQueue, currentChunk: p } })),
   cancelOcrQueue: () => set(s => ({
     ocrQueue: { ...s.ocrQueue, cancelled: true },
   })),
   dismissOcrQueue: () => set({
     ocrQueue: {
       items: [], currentIndex: -1, status: 'idle',
-      errors: [], completed: [], cancelled: false,
+      errors: [], completed: [], cancelled: false, currentChunk: null,
     },
   }),
   setRightPanel: (panel) => set({ rightPanel: panel, annotationPanelCollapsed: false, ...(panel === 'agent' ? { hermesHasInsight: false } : {}) }),
