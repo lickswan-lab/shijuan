@@ -338,16 +338,14 @@ export default function TopBar() {
           )}
         </button>
 
-        {/* Agent button (hidden for now, feature in development) */}
-        {false && <button
+        {/* Hermes Agent button */}
+        <button
           className="btn btn-sm btn-icon"
           onClick={() => {
             if (rightPanel === 'agent' && !annotationPanelCollapsed) {
               // Already showing agent → collapse panel and reset to annotation mode
-              // Don't use setRightPanel here (it forces collapsed=false)
               useUiStore.setState({ rightPanel: 'annotation', annotationPanelCollapsed: true })
             } else {
-              // Open agent panel
               setRightPanel('agent')
             }
           }}
@@ -367,7 +365,7 @@ export default function TopBar() {
               border: '1.5px solid var(--bg-warm)',
             }} />
           )}
-        </button>}
+        </button>
         {/* Lecture mode button (hidden for now, feature in development) */}
         {false && <button
           className="btn btn-sm btn-icon"

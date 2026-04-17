@@ -98,11 +98,25 @@ const electronAPI = {
     return () => { ipcRenderer.removeListener('ai-stream-error', handler) }
   },
 
-  // === Agent (memory only — for Hermes-enhanced AI answers) ===
+  // === Agent (Hermes research assistant) ===
   agentLoadMemory: (): Promise<{ success: boolean; content?: string; error?: string }> =>
     ipcRenderer.invoke('agent-load-memory'),
+  agentSaveMemory: (content: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('agent-save-memory', content),
   agentExecuteTool: (toolName: string, argsJson: string): Promise<{ success: boolean; result: string }> =>
     ipcRenderer.invoke('agent-execute-tool', toolName, argsJson),
+  agentLoadConversations: (): Promise<{ success: boolean; conversations: any[]; error?: string }> =>
+    ipcRenderer.invoke('agent-load-conversations'),
+  agentSaveConversation: (conversation: any): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('agent-save-conversation', conversation),
+  agentLoadInsight: (): Promise<{ success: boolean; insight: any | null }> =>
+    ipcRenderer.invoke('agent-load-insight'),
+  agentSaveInsight: (insight: any): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('agent-save-insight', insight),
+  agentLoadSkills: (): Promise<{ success: boolean; skills: any[] }> =>
+    ipcRenderer.invoke('agent-load-skills'),
+  agentSaveSkills: (skills: any[]): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('agent-save-skills', skills),
 
   // === Auto Update ===
   checkUpdate: (): Promise<{

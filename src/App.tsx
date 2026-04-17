@@ -6,6 +6,7 @@ const PdfViewer = lazy(() => import('./components/PdfViewer/PdfViewer'))
 const AnnotationPanel = lazy(() => import('./components/AnnotationPanel/AnnotationPanel'))
 const MemoEditor = lazy(() => import('./components/Memo/MemoEditor'))
 const ReadingLogView = lazy(() => import('./components/ReadingLog/ReadingLogView'))
+const AgentPanel = lazy(() => import('./components/Agent/AgentPanel'))
 const QuickOpenModal = lazy(() => import('./components/QuickOpen/QuickOpenModal'))
 const BatchOcrRunner = lazy(() => import('./components/BatchOcr/BatchOcrRunner'))
 const BatchOcrProgress = lazy(() => import('./components/BatchOcr/BatchOcrProgress'))
@@ -321,6 +322,11 @@ export default function App() {
                 <AnnotationPanel />
               </ErrorBoundary>
             )}
+            {!annotationPanelCollapsed && rightPanel === 'agent' && (
+              <ErrorBoundary fallbackLabel="Hermes Agent">
+                <AgentPanel />
+              </ErrorBoundary>
+            )}
             {annotationPanelCollapsed && (
               <DraggableToggle onClick={toggleAnnotationPanel} />
             )}
@@ -333,6 +339,11 @@ export default function App() {
             {(!immersiveMode || !dualPageMode) && !annotationPanelCollapsed && rightPanel === 'annotation' && (
               <ErrorBoundary fallbackLabel="注释面板">
                 <AnnotationPanel />
+              </ErrorBoundary>
+            )}
+            {(!immersiveMode || !dualPageMode) && !annotationPanelCollapsed && rightPanel === 'agent' && (
+              <ErrorBoundary fallbackLabel="Hermes Agent">
+                <AgentPanel />
               </ErrorBoundary>
             )}
             {annotationPanelCollapsed && (!immersiveMode || !dualPageMode) && (
