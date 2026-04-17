@@ -9,6 +9,7 @@ import { useUiStore } from '../../store/uiStore'
 import type { AgentMessage, AgentConversation, HermesSkill, HermesInsight } from '../../types/library'
 import { buildAgentSystemPrompt, type AgentContext } from './agentPrompt'
 import { parseToolCalls, hasToolCalls, extractMemoryUpdate, cleanResponse, executeTool } from './agentTools'
+import { buildApprenticePrompt } from './apprenticePrompt'
 
 // ===== Built-in tool definitions (display only) =====
 const BUILTIN_TOOLS: Array<{ name: string; desc: string; category?: string }> = [
@@ -33,7 +34,19 @@ interface ConfiguredProvider {
   models: Array<{ id: string; name: string }>
 }
 
-type PanelTab = 'chat' | 'insights' | 'skills'
+type PanelTab = 'chat' | 'insights' | 'skills' | 'apprentice'
+
+// Format "X 天前" / "上周" / "N 周前"
+function formatTimeAgo(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  const days = Math.floor(diff / 86400000)
+  if (days < 1) return '刚刚'
+  if (days === 1) return '昨天'
+  if (days < 7) return `${days} 天前`
+  const weeks = Math.floor(days / 7)
+  if (weeks === 1) return '上周'
+  return `${weeks} 周前`
+}
 
 // ===== Main Component =====
 export default function AgentPanel() {
@@ -65,6 +78,13 @@ export default function AgentPanel() {
   const [skills, setSkills] = useState<HermesSkill[]>([])
   const [editingSkill, setEditingSkill] = useState<HermesSkill | null>(null)
 
+  // Apprentice — weekly observation logs written by Hermes-as-companion
+  const [apprenticeEntries, setApprenticeEntries] = useState<Array<{ weekCode: string; size: number; mtime: string }>>([])
+  const [currentApprenticeWeek, setCurrentApprenticeWeek] = useState<string | null>(null)
+  const [currentApprenticeContent, setCurrentApprenticeContent] = useState<string>('')
+  const [generatingApprentice, setGeneratingApprentice] = useState(false)
+  const [apprenticeStreamText, setApprenticeStreamText] = useState('')
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Load everything on mount
@@ -83,6 +103,18 @@ export default function AgentPanel() {
     })
     window.electronAPI.agentLoadInsight().then(r => { if (r.success && r.insight?.content) setInsight(r.insight) })
     window.electronAPI.agentLoadSkills().then(r => { if (r.success) setSkills(r.skills) })
+    // Load apprentice logs list — pick the most recent one to display first
+    window.electronAPI.apprenticeList?.().then(r => {
+      if (!r.success) return
+      setApprenticeEntries(r.entries)
+      if (r.entries.length > 0) {
+        const latest = r.entries[0].weekCode
+        setCurrentApprenticeWeek(latest)
+        window.electronAPI.apprenticeLoad!(latest).then(l => {
+          if (l.success && l.content) setCurrentApprenticeContent(l.content)
+        })
+      }
+    })
     const timer = setTimeout(loadMemory, 4000)
     return () => clearTimeout(timer)
   }, [])
@@ -252,6 +284,79 @@ ${memory.slice(-3000)}`
     setGeneratingInsight(false)
   }, [memory, agentModel, generatingInsight])
 
+  // ===== Apprentice: generate this week's observation =====
+  const generateApprentice = useCallback(async (targetDateIso?: string) => {
+    if (generatingApprentice) return
+    setGeneratingApprentice(true)
+    setApprenticeStreamText('')
+
+    try {
+      // 1. Collect context from the backend
+      const ctxResult = await window.electronAPI.apprenticeCollectContext(targetDateIso)
+      if (!ctxResult.success || !ctxResult.context) {
+        throw new Error(ctxResult.error || '收集本周痕迹失败')
+      }
+      const ctx = ctxResult.context
+
+      // 2. Build prompt + stream AI response
+      const { system, user } = buildApprenticePrompt(ctx)
+      const streamId = uuid()
+      let fullText = ''
+      const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => {
+        if (sid === streamId) { fullText += chunk; setApprenticeStreamText(fullText) }
+      })
+      try {
+        const res = await window.electronAPI.aiChatStream(streamId, agentModel, [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ])
+        if (!res.success) throw new Error(res.error || 'AI 调用失败')
+      } finally { cleanup() }
+
+      if (!fullText.trim()) throw new Error('AI 未返回任何内容')
+
+      // 3. Persist
+      await window.electronAPI.apprenticeSave(ctx.weekCode, fullText)
+
+      // 4. Refresh list + select this week
+      setCurrentApprenticeWeek(ctx.weekCode)
+      setCurrentApprenticeContent(fullText)
+      const listRes = await window.electronAPI.apprenticeList()
+      if (listRes.success) setApprenticeEntries(listRes.entries)
+    } catch (err: any) {
+      setCurrentApprenticeContent(`生成失败：${err.message || err}\n\n你可能需要先在设置里配置一个 AI Key。`)
+    } finally {
+      setGeneratingApprentice(false)
+      setApprenticeStreamText('')
+    }
+  }, [agentModel, generatingApprentice])
+
+  const loadApprenticeWeek = useCallback(async (weekCode: string) => {
+    const r = await window.electronAPI.apprenticeLoad(weekCode)
+    if (r.success && r.content) {
+      setCurrentApprenticeWeek(weekCode)
+      setCurrentApprenticeContent(r.content)
+    }
+  }, [])
+
+  const deleteApprenticeWeek = useCallback(async (weekCode: string) => {
+    if (!confirm(`删除 ${weekCode} 的观察报告？`)) return
+    await window.electronAPI.apprenticeDelete(weekCode)
+    const listRes = await window.electronAPI.apprenticeList()
+    if (listRes.success) {
+      setApprenticeEntries(listRes.entries)
+      // If we deleted the currently displayed one, pick the next most recent
+      if (currentApprenticeWeek === weekCode) {
+        if (listRes.entries.length > 0) {
+          loadApprenticeWeek(listRes.entries[0].weekCode)
+        } else {
+          setCurrentApprenticeWeek(null)
+          setCurrentApprenticeContent('')
+        }
+      }
+    }
+  }, [currentApprenticeWeek, loadApprenticeWeek])
+
   // ===== Skill CRUD =====
   const saveSkill = useCallback(async (skill: HermesSkill) => {
     const updated = skills.find(s => s.id === skill.id)
@@ -302,6 +407,9 @@ ${memory.slice(-3000)}`
       {/* Tab bar */}
       <div style={{ display: 'flex', borderBottom: '1px solid var(--border-light)', flexShrink: 0 }}>
         <button style={tabStyle('chat')} onClick={() => setTab('chat')}>对话</button>
+        <button style={tabStyle('apprentice')} onClick={() => setTab('apprentice')}>
+          学徒{apprenticeEntries.length > 0 && <span style={{ fontSize: 9, marginLeft: 3, opacity: 0.6 }}>({apprenticeEntries.length})</span>}
+        </button>
         <button style={tabStyle('insights')} onClick={() => setTab('insights')}>
           洞察{behaviorCount > 0 && <span style={{ fontSize: 9, marginLeft: 3, opacity: 0.6 }}>({behaviorCount})</span>}
         </button>
@@ -376,6 +484,127 @@ ${memory.slice(-3000)}`
             </button>
           </div>
         </>
+      )}
+
+      {/* ===== Tab: Apprentice (weekly observation log) ===== */}
+      {tab === 'apprentice' && (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          {/* Action bar */}
+          <div style={{
+            padding: '10px 12px', borderBottom: '1px solid var(--border-light)',
+            display: 'flex', alignItems: 'center', gap: 8,
+          }}>
+            <button
+              onClick={() => generateApprentice()}
+              disabled={generatingApprentice}
+              style={{
+                padding: '6px 14px', fontSize: 11, fontWeight: 500,
+                border: 'none', borderRadius: 6, cursor: generatingApprentice ? 'wait' : 'pointer',
+                background: generatingApprentice ? 'var(--border)' : 'var(--accent)',
+                color: generatingApprentice ? 'var(--text-muted)' : '#fff',
+                display: 'flex', alignItems: 'center', gap: 6,
+              }}
+            >
+              {generatingApprentice && <span className="loading-spinner" style={{ width: 10, height: 10 }} />}
+              {generatingApprentice ? '学徒正在观察...' : '生成本周观察'}
+            </button>
+            {apprenticeEntries.length > 0 && (
+              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                上次: {apprenticeEntries[0].weekCode} · {formatTimeAgo(apprenticeEntries[0].mtime)}
+              </span>
+            )}
+          </div>
+
+          {/* Intro (shown only when no logs exist) */}
+          {apprenticeEntries.length === 0 && !generatingApprentice && (
+            <div style={{
+              padding: '24px 18px', fontSize: 12, color: 'var(--text-secondary)',
+              lineHeight: 1.8, textAlign: 'left',
+            }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 10 }}>
+                关于学徒
+              </div>
+              <p style={{ marginBottom: 12 }}>
+                Hermes 不是帮你答题的助手,而是跟你并肩读书的同伴。
+              </p>
+              <p style={{ marginBottom: 12 }}>
+                每次点击"生成本周观察",它会读过你这周的全部痕迹——打开了哪些文献、停在哪一页、写下了什么、
+                哪些立场和之前矛盾——然后写一份观察报告交给你。
+              </p>
+              <p style={{ marginBottom: 12 }}>
+                它说的是<strong>你自己没注意到的模式</strong>,不是总结流水账。
+              </p>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 16, fontStyle: 'italic' }}>
+                建议每周读书结束后生成一次。数据越多,观察越有意思。
+              </p>
+            </div>
+          )}
+
+          {/* Streaming preview */}
+          {generatingApprentice && apprenticeStreamText && (
+            <div style={{ flex: 1, overflow: 'auto', padding: '14px 18px', background: 'var(--bg-warm)' }}>
+              <div className="annotation-markdown" style={{ fontSize: 13, lineHeight: 1.8 }}>
+                <ReactMarkdown
+                  rehypePlugins={[rehypeRaw, rehypeKatex]}
+                  remarkPlugins={[remarkMath]}
+                >
+                  {apprenticeStreamText}
+                </ReactMarkdown>
+              </div>
+            </div>
+          )}
+
+          {/* Current log */}
+          {!generatingApprentice && currentApprenticeContent && (
+            <div style={{ flex: 1, overflow: 'auto', padding: '14px 18px' }}>
+              <div className="annotation-markdown" style={{ fontSize: 13, lineHeight: 1.8, color: 'var(--text)' }}>
+                <ReactMarkdown
+                  rehypePlugins={[rehypeRaw, rehypeKatex]}
+                  remarkPlugins={[remarkMath]}
+                >
+                  {currentApprenticeContent}
+                </ReactMarkdown>
+              </div>
+            </div>
+          )}
+
+          {/* History list at bottom */}
+          {apprenticeEntries.length > 0 && !generatingApprentice && (
+            <div style={{
+              borderTop: '1px solid var(--border-light)', background: 'var(--bg-warm)',
+              padding: '6px 10px', maxHeight: 140, overflow: 'auto', flexShrink: 0,
+            }}>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4, fontWeight: 500 }}>
+                历史观察
+              </div>
+              {apprenticeEntries.map(e => (
+                <div key={e.weekCode}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    padding: '4px 6px', borderRadius: 3, cursor: 'pointer',
+                    background: currentApprenticeWeek === e.weekCode ? 'var(--accent-soft)' : 'transparent',
+                    color: currentApprenticeWeek === e.weekCode ? 'var(--accent-hover)' : 'var(--text-secondary)',
+                    fontSize: 11,
+                  }}
+                  onMouseEnter={evt => { if (currentApprenticeWeek !== e.weekCode) evt.currentTarget.style.background = 'var(--bg-hover)' }}
+                  onMouseLeave={evt => { if (currentApprenticeWeek !== e.weekCode) evt.currentTarget.style.background = 'transparent' }}
+                  onClick={() => loadApprenticeWeek(e.weekCode)}
+                >
+                  <span style={{ flex: 1 }}>{e.weekCode}</span>
+                  <span style={{ fontSize: 9, color: 'var(--text-muted)' }}>{formatTimeAgo(e.mtime)}</span>
+                  <button
+                    onClick={evt => { evt.stopPropagation(); deleteApprenticeWeek(e.weekCode) }}
+                    title="删除"
+                    style={{
+                      background: 'transparent', border: 'none', cursor: 'pointer',
+                      color: 'var(--text-muted)', fontSize: 11, padding: '0 3px',
+                    }}
+                  >✕</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       {/* ===== Tab: Insights ===== */}

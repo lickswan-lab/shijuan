@@ -118,6 +118,18 @@ const electronAPI = {
   agentSaveSkills: (skills: any[]): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('agent-save-skills', skills),
 
+  // === Apprentice (weekly observation log) ===
+  apprenticeCollectContext: (targetDateIso?: string): Promise<{ success: boolean; context?: any; error?: string }> =>
+    ipcRenderer.invoke('apprentice-collect-context', targetDateIso),
+  apprenticeList: (): Promise<{ success: boolean; entries: Array<{ weekCode: string; size: number; mtime: string }>; error?: string }> =>
+    ipcRenderer.invoke('apprentice-list'),
+  apprenticeLoad: (weekCode: string): Promise<{ success: boolean; content?: string; error?: string }> =>
+    ipcRenderer.invoke('apprentice-load', weekCode),
+  apprenticeSave: (weekCode: string, content: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('apprentice-save', weekCode, content),
+  apprenticeDelete: (weekCode: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('apprentice-delete', weekCode),
+
   // === Auto Update ===
   checkUpdate: (): Promise<{
     hasUpdate: boolean; currentVersion: string; latestVersion: string;

@@ -6,6 +6,7 @@ import { registerAiApiIpc } from './ipc/aiApi'
 import { registerReadingLogIpc, startMidnightScheduler } from './ipc/readingLog'
 import { registerUpdaterIpc } from './updater'
 import { registerAgentIpc } from './ipc/agent'  // Needed for Hermes memory + knowledge map
+import { registerApprenticeIpc } from './ipc/apprentice'  // Hermes apprentice log (weekly observation)
 import { registerDiagnosticIpc } from './ipc/diagnostic'
 
 function createWindow(): BrowserWindow {
@@ -101,6 +102,7 @@ if (!gotTheLock) {
   registerAiApiIpc()
   registerReadingLogIpc()
   registerAgentIpc()   // Hermes memory + tools (used by annotation AI)
+  registerApprenticeIpc()  // Hermes apprentice weekly observation log
   registerUpdaterIpc()
   registerDiagnosticIpc()
 
