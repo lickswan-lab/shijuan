@@ -8,9 +8,11 @@ import rehypeRaw from 'rehype-raw'
 import { v4 as uuid } from 'uuid'
 import 'react-pdf/dist/esm/Page/TextLayer.css'
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css'
+import 'katex/dist/katex.min.css'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
 import { cleanOcrText } from './cleanOcrText'
+import { collectTextNodes } from './highlights'
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 

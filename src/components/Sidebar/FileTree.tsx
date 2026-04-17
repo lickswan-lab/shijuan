@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, DragEvent, MouseEvent } from 'react'
+import { useState, useRef, useEffect, memo, DragEvent, MouseEvent } from 'react'
 import type { LibraryEntry, VirtualFolder } from '../../types/library'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
@@ -52,7 +52,7 @@ function ContextMenu({ pos, items, onClose }: ContextMenuProps) {
 }
 
 // ===== Single file entry item =====
-function EntryItem({ entry, multiSelect, selected, onToggleSelect }: {
+const EntryItem = memo(function EntryItem({ entry, multiSelect, selected, onToggleSelect }: {
   entry: LibraryEntry
   multiSelect?: boolean
   selected?: boolean
@@ -164,7 +164,7 @@ function EntryItem({ entry, multiSelect, selected, onToggleSelect }: {
       )}
     </>
   )
-}
+})
 
 // Two-step context menu for entry
 function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep, onDeleteConfirm, onShowInFolder }: {

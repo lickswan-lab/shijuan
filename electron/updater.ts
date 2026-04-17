@@ -1,7 +1,9 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { join, dirname } from 'path'
 import { createWriteStream } from 'fs'
-import { rename, unlink, stat } from 'fs/promises'
+import { rename, unlink, stat, writeFile, chmod } from 'fs/promises'
+import { spawn } from 'child_process'
+import os from 'os'
 import https from 'https'
 import http from 'http'
 
@@ -81,15 +83,12 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
     const release = await fetchLatestRelease()
     const latestVersion = release.tagName.replace(/^v/, '')
 
-    // Find app.asar or patch asset
+    // Hot-patch updates require an `app.asar` (or patch `*.asar`) asset in the release.
+    // If none is uploaded, downloadUrl stays null and the UI falls back to "please
+    // download the full installer from GitHub Release".
     const asarAsset = release.assets.find(a =>
       a.name === 'app.asar' ||
-      a.name.includes('patch') && a.name.endsWith('.asar')
-    )
-
-    // Also check for full zip as fallback
-    const zipAsset = release.assets.find(a =>
-      a.name.includes('win') && a.name.endsWith('.zip')
+      (a.name.includes('patch') && a.name.endsWith('.asar'))
     )
 
     const hasUpdate = isNewer(latestVersion, currentVersion)
@@ -215,27 +214,89 @@ export function registerUpdaterIpc() {
     }
   })
 
-  // Apply update: replace app.asar and relaunch
+  // Apply update: replace app.asar and relaunch.
+  // On Windows, app.asar is memory-mapped by the running Electron process, so an in-process
+  // `rename` will always fail with EBUSY. We work around this by spawning a detached helper
+  // script that waits for this process to exit, then performs the swap and relaunches.
   ipcMain.handle('apply-update', async () => {
     const asarPath = getAsarPath()
     const tempPath = asarPath + '.update'
-    const backupPath = asarPath + '.backup'
+    const exePath = process.execPath
+    const isWin = process.platform === 'win32'
+    const scriptPath = join(
+      os.tmpdir(),
+      `shijuan-update-${Date.now()}.${isWin ? 'cmd' : 'sh'}`
+    )
 
     try {
-      // Backup current asar
-      await rename(asarPath, backupPath).catch(() => {})
-      // Move new asar into place
-      await rename(tempPath, asarPath)
-      // Clean up backup
-      await unlink(backupPath).catch(() => {})
+      // Verify the .update file exists before kicking off the swap
+      await stat(tempPath)
 
-      // Relaunch the app
-      app.relaunch()
-      app.quit()
+      if (isWin) {
+        // Retry loop: after app.quit() fires, the asar file lock may linger a second or two.
+        // We retry up to 15 times at 1s intervals. `move /Y` replaces atomically once unlocked.
+        const script = `@echo off
+chcp 65001 >nul
+timeout /t 2 /nobreak >nul
+set /a RETRIES=15
+:retry
+move /Y "${tempPath}" "${asarPath}" 1>nul 2>nul
+if errorlevel 1 (
+  set /a RETRIES-=1
+  if %RETRIES% LEQ 0 goto failed
+  timeout /t 1 /nobreak >nul
+  goto retry
+)
+start "" "${exePath}"
+(goto) 2>nul & del "%~f0"
+exit /b 0
+:failed
+echo Update failed - app.asar still locked after 17 seconds >"${asarPath}.update-error.log"
+start "" "${exePath}"
+(goto) 2>nul & del "%~f0"
+exit /b 1
+`
+        await writeFile(scriptPath, script, 'utf8')
+        const child = spawn('cmd.exe', ['/c', scriptPath], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        })
+        child.unref()
+      } else {
+        // macOS/Linux: file unlink-then-rename is atomic; the live mmap keeps working via
+        // the old inode until this process exits.
+        const script = `#!/bin/bash
+sleep 2
+for i in $(seq 1 15); do
+  if mv -f "${tempPath}" "${asarPath}" 2>/dev/null; then
+    open "${exePath}" 2>/dev/null || "${exePath}" &
+    rm -f "$0"
+    exit 0
+  fi
+  sleep 1
+done
+echo "Update failed - app.asar still locked" >"${asarPath}.update-error.log"
+open "${exePath}" 2>/dev/null || "${exePath}" &
+rm -f "$0"
+exit 1
+`
+        await writeFile(scriptPath, script, 'utf8')
+        await chmod(scriptPath, 0o755)
+        const child = spawn('/bin/bash', [scriptPath], {
+          detached: true,
+          stdio: 'ignore',
+        })
+        child.unref()
+      }
+
+      // Quit so the OS releases the file lock. The spawned script will relaunch us.
+      setTimeout(() => app.quit(), 200)
       return { success: true }
     } catch (err: any) {
-      // Try to restore backup
-      try { await rename(backupPath, asarPath) } catch {}
+      // Clean up failed temp file and script
+      await unlink(tempPath).catch(() => {})
+      await unlink(scriptPath).catch(() => {})
       return { success: false, error: err.message }
     }
   })

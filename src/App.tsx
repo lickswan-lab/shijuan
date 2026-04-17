@@ -6,20 +6,19 @@ const PdfViewer = lazy(() => import('./components/PdfViewer/PdfViewer'))
 const AnnotationPanel = lazy(() => import('./components/AnnotationPanel/AnnotationPanel'))
 const MemoEditor = lazy(() => import('./components/Memo/MemoEditor'))
 const ReadingLogView = lazy(() => import('./components/ReadingLog/ReadingLogView'))
-// Shelved: import LectureMode from './components/Lecture/LectureMode'
-// Shelved: import AgentPanel from './components/Agent/AgentPanel'
 import TopBar from './components/TopBar/TopBar'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useLibraryStore } from './store/libraryStore'
 import { useUiStore } from './store/uiStore'
 import './styles/globals.css'
-import 'katex/dist/katex.min.css'
+// katex CSS moved to components that actually render math (PdfViewer, AnnotationPanel, MemoEditor, ReadingLogView)
+// to avoid eager loading on app startup
 
-// Shared position state for the floating toggle (persists across show/hide)
-const floatingTogglePos = { x: -1, y: -1 }
+// Shared position state for the floating toggle (persists across show/hide via ref)
+const floatingTogglePosRef = { current: { x: -1, y: -1 } }
 
 function DraggableToggle({ onClick }: { onClick: () => void }) {
-  const [pos, setPos] = useState({ x: floatingTogglePos.x, y: floatingTogglePos.y })
+  const [pos, setPos] = useState(() => ({ ...floatingTogglePosRef.current }))
   const dragging = useRef(false)
   const moved = useRef(false)
   const startPos = useRef({ x: 0, y: 0, bx: 0, by: 0 })
@@ -38,8 +37,7 @@ function DraggableToggle({ onClick }: { onClick: () => void }) {
       const nx = Math.max(0, Math.min(window.innerWidth - 40, startPos.current.bx + dx))
       const ny = Math.max(36, Math.min(window.innerHeight - 40, startPos.current.by + dy))
       setPos({ x: nx, y: ny })
-      floatingTogglePos.x = nx
-      floatingTogglePos.y = ny
+      floatingTogglePosRef.current = { x: nx, y: ny }
     }
     const onUp = () => {
       dragging.current = false

@@ -84,7 +84,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     setTimeout(async () => {
       try {
         await window.electronAPI.saveLibrary(library)
-      } catch {}
+      } catch (err) {
+        console.error('[library] Failed to save library on init:', err)
+      }
 
       // Scan OCR files in parallel
       const unchecked = library.entries.filter(e => e.ocrStatus !== 'complete' && e.absPath)
@@ -102,7 +104,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         )
         if (results.some(r => r.status === 'fulfilled' && r.value)) {
           set({ library: { ...library } })
-          try { await window.electronAPI.saveLibrary(library) } catch {}
+          try { await window.electronAPI.saveLibrary(library) } catch (err) {
+            console.error('[library] Failed to save after OCR scan:', err)
+          }
         }
       }
     }, 100)

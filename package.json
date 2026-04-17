@@ -1,6 +1,6 @@
 {
   "name": "shijuan",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "description": "拾卷 ShiJuan - 智能文献管理与阅读笔记工具",
   "main": "./out/main/index.js",
   "scripts": {
@@ -51,7 +51,10 @@
       "target": [
         {
           "target": "zip",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "icon": "build/icon.png",
@@ -59,7 +62,6 @@
     }
   },
   "dependencies": {
-    "chokidar": "^4.0.3",
     "epubjs": "^0.3.93",
     "katex": "^0.16.45",
     "mammoth": "^1.12.0",
@@ -68,12 +70,10 @@
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
     "react-pdf": "^9.2.1",
-    "react-resizable-panels": "^2.1.7",
     "rehype-katex": "^7.0.1",
     "rehype-raw": "^7.0.0",
     "remark-math": "^6.0.0",
     "uuid": "^11.1.0",
-    "vditor": "^3.11.2",
     "zustand": "^5.0.3"
   },
   "devDependencies": {

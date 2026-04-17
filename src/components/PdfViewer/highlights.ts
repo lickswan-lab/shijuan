@@ -59,11 +59,12 @@ export function findAndWrapAll(
       for (let si = segments.length - 1; si >= 0; si--) {
         const seg = segments[si]
         if (!seg.node.isConnected) continue
+        const parent = seg.node.parentNode
+        if (!parent) continue
         const raw = seg.node.textContent || ''
         const before = raw.substring(0, seg.startOffset)
         const match = raw.substring(seg.startOffset, seg.endOffset)
         const after = raw.substring(seg.endOffset)
-        const parent = seg.node.parentNode!
 
         const wrapper = wrapFn(target)
         wrapper.textContent = match
@@ -72,7 +73,7 @@ export function findAndWrapAll(
         parent.insertBefore(wrapper, seg.node.nextSibling)
         if (before) { seg.node.textContent = before } else { parent.removeChild(seg.node) }
       }
-    } catch { /* DOM changed, skip */ }
+    } catch { /* DOM changed mid-highlight, skip safely */ }
   }
 }
 

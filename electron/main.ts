@@ -1,14 +1,11 @@
 import { app, BrowserWindow, Menu, shell, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
-import { registerFileSystemIpc } from './ipc/fileSystem'
 import { registerLibraryIpc } from './ipc/library'
 import { registerAiApiIpc } from './ipc/aiApi'
-import { registerPdfOperationsIpc } from './ipc/pdfOperations'
 import { registerReadingLogIpc, startMidnightScheduler } from './ipc/readingLog'
 import { registerUpdaterIpc } from './updater'
 import { registerAgentIpc } from './ipc/agent'  // Needed for Hermes memory + knowledge map
-// Shelved: import { registerLectureIpc } from './ipc/lecture'
 
 function createWindow(): BrowserWindow {
   // Remove default menu bar
@@ -99,10 +96,8 @@ if (!gotTheLock) {
   })
 
   // Register all IPC handlers
-  registerFileSystemIpc()
   registerLibraryIpc()
   registerAiApiIpc()
-  registerPdfOperationsIpc()
   registerReadingLogIpc()
   registerAgentIpc()   // Hermes memory + tools (used by annotation AI)
   registerUpdaterIpc()
