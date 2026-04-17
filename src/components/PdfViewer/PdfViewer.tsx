@@ -327,14 +327,63 @@ function useAnnotationHighlights(
   }, deps)
 }
 
+// ===== Search highlight: wraps every occurrence of the query term in a .sj-search-hit span =====
+// Auto-scrolls to the first match. Doesn't collide with annotation highlights (uses skipClass).
+function useSearchHighlight(
+  containerRef: React.RefObject<HTMLDivElement | null>,
+  query: string | null | undefined,
+  deps: unknown[]
+) {
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    function clearOld() {
+      try {
+        container!.querySelectorAll('.sj-search-hit').forEach(el => {
+          const parent = el.parentNode
+          if (parent) {
+            while (el.firstChild) parent.insertBefore(el.firstChild, el)
+            parent.removeChild(el)
+          }
+        })
+        container!.normalize()
+      } catch {}
+    }
+
+    const q = (query || '').trim()
+    if (!q || q.length < 2) { clearOld(); return }
+
+    const raf = requestAnimationFrame(() => {
+      clearOld()
+      try {
+        findAndWrapAll(container, [{ text: q }], () => {
+          const span = document.createElement('span')
+          span.className = 'sj-search-hit'
+          return span
+        }, 'sj-search-hit')
+
+        // Scroll the first hit into view (centered if possible)
+        const first = container.querySelector('.sj-search-hit') as HTMLElement | null
+        first?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      } catch {}
+    })
+    return () => {
+      cancelAnimationFrame(raf)
+      // Don't clearOld on cleanup — next effect run handles it. Clearing here causes flicker.
+    }
+  }, deps)
+}
+
 // OCR Content component with per-page sections and markdown rendering
-function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText, marks, onRemoveMark }: {
+function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText, marks, onRemoveMark, searchHighlight }: {
   text: string
   annotations: Array<{ id: string; selectedText: string }>
   onAnnotationClick: (id: string) => void
   activeSelectionText?: string
   marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
   onRemoveMark?: (id: string) => void
+  searchHighlight?: string | null
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const cleaned = useMemo(() => cleanOcrText(text), [text])
@@ -348,6 +397,8 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
 
   // Highlight annotations after render
   useAnnotationHighlights(containerRef, annotations, onAnnotationClick, [cleaned, annotations])
+  // Search highlight + auto-scroll to first hit
+  useSearchHighlight(containerRef, searchHighlight, [cleaned, searchHighlight])
 
   // Render marks (underline/bold) after annotations
   useEffect(() => {
@@ -654,7 +705,7 @@ function EpubViewer({ absPath, onTextSelect }: {
 }
 
 // DOCX viewer: convert to HTML using mammoth
-function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationClick, onRemoveMark, activeSelectionText }: {
+function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationClick, onRemoveMark, activeSelectionText, searchHighlight }: {
   absPath: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
   annotations?: Array<{ id: string; selectedText: string }>
@@ -662,6 +713,7 @@ function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationCli
   onAnnotationClick?: (id: string) => void
   onRemoveMark?: (id: string) => void
   activeSelectionText?: string
+  searchHighlight?: string | null
 }) {
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -684,6 +736,8 @@ function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationCli
 
   // Highlight annotations
   useAnnotationHighlights(containerRef, annotations || [], onAnnotationClick || (() => {}), [html, annotations])
+  // Search highlight
+  useSearchHighlight(containerRef, searchHighlight, [html, searchHighlight])
 
   // Render marks
   useEffect(() => {
@@ -737,7 +791,7 @@ function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationCli
 }
 
 // Simple text file reader
-function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRemoveMark, activeSelectionText, fontSize, fontWeight, color }: {
+function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRemoveMark, activeSelectionText, fontSize, fontWeight, color, searchHighlight }: {
   absPath: string
   annotations?: Array<{ id: string; selectedText: string }>
   onAnnotationClick?: (id: string) => void
@@ -747,6 +801,7 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
   fontSize?: number
   fontWeight?: number
   color?: string
+  searchHighlight?: string | null
 }) {
   const [text, setText] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -761,6 +816,8 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
 
   // Highlight annotations
   useAnnotationHighlights(containerRef, annotations || [], onAnnotationClick || (() => {}), [text, annotations])
+  // Search highlight
+  useSearchHighlight(containerRef, searchHighlight, [text, searchHighlight])
 
   // Render marks (underline/bold)
   useEffect(() => {
@@ -1243,7 +1300,7 @@ type ViewMode = 'pdf' | 'ocr'
 
 export default function PdfViewer() {
   const { currentEntry, currentPdfMeta, updatePdfMeta, updateEntry } = useLibraryStore()
-  const { textSelection, setTextSelection, setActiveAnnotation, glmApiKeyStatus, immersiveMode, darkMode, dualPageMode } = useUiStore()
+  const { textSelection, setTextSelection, setActiveAnnotation, glmApiKeyStatus, immersiveMode, darkMode, dualPageMode, searchHighlight, setSearchHighlight } = useUiStore()
   const [numPages, setNumPages] = useState(0)
   const [scale, setScale] = useState(1.0)
   const [pdfFileUrl, setPdfFileUrl] = useState<string | null>(null)
@@ -1799,8 +1856,36 @@ export default function PdfViewer() {
     )
   }
 
+  // Active search-highlight banner (only shown when current entry matches target)
+  const activeSearchQuery = searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight?.query : null
+
   return (
     <div className="pdf-area">
+      {/* Search highlight banner — visible right below toolbar when user came from a search result */}
+      {activeSearchQuery && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '5px 12px', fontSize: 11,
+          background: 'var(--accent-soft)', color: 'var(--accent-hover)',
+          borderBottom: '1px solid var(--border-light)',
+        }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <span>正在高亮：<strong>{activeSearchQuery}</strong></span>
+          <button
+            onClick={() => setSearchHighlight(null)}
+            style={{
+              marginLeft: 'auto', padding: '1px 6px', fontSize: 10,
+              background: 'transparent', border: '1px solid var(--accent)',
+              color: 'var(--accent)', borderRadius: 3, cursor: 'pointer',
+            }}
+            title="清除搜索高亮 (Esc)"
+          >
+            ✕ 清除
+          </button>
+        </div>
+      )}
       {/* Toolbar */}
       <div className="pdf-toolbar">
         <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 250 }}>
@@ -1899,12 +1984,15 @@ export default function PdfViewer() {
                     { label: '深棕', h: 30, s: 20, l: 16 },
                     { label: '紫夜', h: 270, s: 12, l: 15 },
                   ] : [
-                    { label: '暖', h: 40, s: 30, l: 97 },
-                    { label: '护眼', h: 128, s: 45, l: 88 },
-                    { label: '绿', h: 100, s: 25, l: 95 },
-                    { label: '蓝', h: 210, s: 20, l: 96 },
-                    { label: '灰', h: 0, s: 0, l: 94 },
-                    { label: '暗', h: 30, s: 10, l: 88 },
+                    // v1.2.7: re-tuned presets. Previously 5 of 6 clustered at L≈94-97
+                    // (visually indistinguishable); now each preset has clearly
+                    // different hue + stronger saturation and L spread 82-92.
+                    { label: '暖', h: 38, s: 55, l: 92 },      // 米黄 — 纸本质感
+                    { label: '护眼', h: 128, s: 45, l: 88 },    // 浅绿 — 保留原经典色
+                    { label: '晨雾', h: 30, s: 35, l: 86 },    // 淡杏 — 黄昏阅读
+                    { label: '蓝', h: 210, s: 40, l: 90 },     // 冷蓝 — 集中
+                    { label: '石灰', h: 60, s: 10, l: 87 },    // 暖灰 — 中性
+                    { label: '檀', h: 22, s: 45, l: 82 },      // 深棕 — 低强度
                   ]).map(p => {
                     const active = ocrBgHue === p.h && ocrBgSat === p.s && ocrBgLight === p.l
                     return (
@@ -2235,6 +2323,7 @@ export default function PdfViewer() {
               marks={memoizedMarks}
               onRemoveMark={handleRemoveMark}
               activeSelectionText={textSelection?.text}
+              searchHighlight={searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight.query : null}
             />
           </div>
         )
@@ -2280,6 +2369,7 @@ export default function PdfViewer() {
                 fontSize={ocrFontSize}
                 fontWeight={ocrFontWeight}
                 color={ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`}
+                searchHighlight={searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight.query : null}
               />
             </div>
           </div>
@@ -2364,6 +2454,7 @@ export default function PdfViewer() {
                 activeSelectionText={toolbar?.text || textSelection?.text || undefined}
                 marks={memoizedMarks}
                 onRemoveMark={handleRemoveMark}
+                searchHighlight={searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight.query : null}
               />
             </div>
           )}

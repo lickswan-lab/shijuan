@@ -404,6 +404,36 @@ function LibraryPanel() {
     setShowMoveMenu(false)
   }
 
+  // Batch OCR: filter to PDF entries that don't already have OCR, then queue them.
+  const handleBatchOcr = () => {
+    const { ocrQueue, startOcrQueue } = useUiStore.getState()
+    if (ocrQueue.status === 'running') {
+      alert('已有 OCR 任务在进行中，请等待完成或取消后重试。')
+      return
+    }
+    if (!library) return
+
+    const items = Array.from(selectedIds)
+      .map(id => library.entries.find(e => e.id === id))
+      .filter((e): e is LibraryEntry => !!e)
+      .filter(e => e.absPath.toLowerCase().endsWith('.pdf'))
+      .filter(e => e.ocrStatus !== 'complete')
+      .map(e => ({ entryId: e.id, title: e.title, absPath: e.absPath }))
+
+    if (items.length === 0) {
+      alert('选中的文献中没有可 OCR 的 PDF（可能都已完成 OCR 或非 PDF 格式）')
+      return
+    }
+
+    // Confirm with the user — batch OCR costs API tokens
+    const ok = confirm(`将对 ${items.length} 个 PDF 执行批量 OCR（顺序执行，可随时取消）\n\n继续吗？`)
+    if (!ok) return
+
+    startOcrQueue(items)
+    setSelectedIds(new Set())
+    setMultiSelect(false)
+  }
+
   const filtered = searchQuery
     ? entries.filter(e =>
         e.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -473,6 +503,8 @@ function LibraryPanel() {
               onClick={() => {
                 const entry = library?.entries.find(e => e.id === r.entryId)
                 if (entry) {
+                  // Set highlight BEFORE openEntry so the viewer applies it as soon as content mounts
+                  useUiStore.getState().setSearchHighlight({ query: searchQuery, pageNumber: r.pageNumber, targetEntryId: entry.id })
                   openEntry(entry)
                   if (r.annotationId) {
                     useUiStore.getState().setActiveAnnotation(r.annotationId)
@@ -577,6 +609,9 @@ function LibraryPanel() {
               </div>
             )}
           </div>
+          <button className="btn btn-sm" style={{ fontSize: 10 }} onClick={handleBatchOcr} title="对选中的 PDF 批量执行 OCR">
+            OCR
+          </button>
           <button className="btn btn-sm" style={{ fontSize: 10 }} onClick={handleBatchRemove}>
             移除
           </button>

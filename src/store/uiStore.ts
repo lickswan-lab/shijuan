@@ -8,6 +8,21 @@ interface TextSelection {
   rect?: { x: number; y: number; width: number; height: number }
 }
 
+// ===== Batch OCR queue (v1.2.7) =====
+export interface OcrQueueItem {
+  entryId: string
+  title: string
+  absPath: string
+}
+export interface OcrQueueState {
+  items: OcrQueueItem[]
+  currentIndex: number        // index of item currently processing; -1 if not started
+  status: 'idle' | 'running' | 'done'
+  errors: Array<{ entryId: string; title: string; error: string }>
+  completed: string[]         // entryIds that finished successfully
+  cancelled: boolean          // set by user; runner checks between items
+}
+
 interface UiState {
   // Panels
   sidebarCollapsed: boolean
@@ -58,6 +73,12 @@ interface UiState {
   // Quick open modal (Ctrl+P)
   showQuickOpen: boolean
 
+  // Search highlight — applied when this entry is open; cleared when user switches away or manually dismisses
+  searchHighlight: { query: string; pageNumber?: number; targetEntryId: string } | null
+
+  // Batch OCR queue — sequential OCR over multiple entries
+  ocrQueue: OcrQueueState
+
   // Actions
   toggleSidebar: () => void
   toggleAnnotationPanel: () => void
@@ -82,6 +103,12 @@ interface UiState {
   toggleDarkMode: () => void
   setDualPageMode: (on: boolean) => void
   setShowQuickOpen: (show: boolean) => void
+  setSearchHighlight: (h: { query: string; pageNumber?: number; targetEntryId: string } | null) => void
+  // Batch OCR
+  startOcrQueue: (items: OcrQueueItem[]) => void
+  advanceOcrQueue: (result: { entryId: string; success: boolean; error?: string }) => void
+  cancelOcrQueue: () => void
+  dismissOcrQueue: () => void
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -107,6 +134,15 @@ export const useUiStore = create<UiState>((set) => ({
   darkMode: (() => { try { return localStorage.getItem('sj-darkMode') === 'true' } catch { return false } })(),
   dualPageMode: (() => { try { const v = localStorage.getItem('sj-dualPageMode'); return v !== null ? v === 'true' : true } catch { return true } })(),
   showQuickOpen: false,
+  searchHighlight: null,
+  ocrQueue: {
+    items: [],
+    currentIndex: -1,
+    status: 'idle',
+    errors: [],
+    completed: [],
+    cancelled: false,
+  },
 
   toggleSidebar: () => set(s => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   toggleAnnotationPanel: () => set(s => ({ annotationPanelCollapsed: !s.annotationPanelCollapsed, rightPanel: 'annotation' as const })),
@@ -151,6 +187,39 @@ export const useUiStore = create<UiState>((set) => ({
   },
   setDualPageMode: (on) => { set({ dualPageMode: on }); try { localStorage.setItem('sj-dualPageMode', String(on)) } catch {} },
   setShowQuickOpen: (show) => set({ showQuickOpen: show }),
+  setSearchHighlight: (h) => set({ searchHighlight: h }),
+  startOcrQueue: (items) => set({
+    ocrQueue: {
+      items, currentIndex: 0, status: 'running',
+      errors: [], completed: [], cancelled: false,
+    },
+  }),
+  advanceOcrQueue: (result) => set(s => {
+    const q = s.ocrQueue
+    const nextIndex = q.currentIndex + 1
+    const isDone = nextIndex >= q.items.length || q.cancelled
+    return {
+      ocrQueue: {
+        ...q,
+        currentIndex: nextIndex,
+        status: isDone ? 'done' : 'running',
+        completed: result.success ? [...q.completed, result.entryId] : q.completed,
+        errors: result.success ? q.errors : [
+          ...q.errors,
+          { entryId: result.entryId, title: q.items[q.currentIndex]?.title || '', error: result.error || 'unknown' },
+        ],
+      },
+    }
+  }),
+  cancelOcrQueue: () => set(s => ({
+    ocrQueue: { ...s.ocrQueue, cancelled: true },
+  })),
+  dismissOcrQueue: () => set({
+    ocrQueue: {
+      items: [], currentIndex: -1, status: 'idle',
+      errors: [], completed: [], cancelled: false,
+    },
+  }),
   setRightPanel: (panel) => set({ rightPanel: panel, annotationPanelCollapsed: false, ...(panel === 'agent' ? { hermesHasInsight: false } : {}) }),
   setHermesHasInsight: (has) => set({ hermesHasInsight: has }),
 }))

@@ -7,6 +7,8 @@ const AnnotationPanel = lazy(() => import('./components/AnnotationPanel/Annotati
 const MemoEditor = lazy(() => import('./components/Memo/MemoEditor'))
 const ReadingLogView = lazy(() => import('./components/ReadingLog/ReadingLogView'))
 const QuickOpenModal = lazy(() => import('./components/QuickOpen/QuickOpenModal'))
+const BatchOcrRunner = lazy(() => import('./components/BatchOcr/BatchOcrRunner'))
+const BatchOcrProgress = lazy(() => import('./components/BatchOcr/BatchOcrProgress'))
 import TopBar from './components/TopBar/TopBar'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useLibraryStore } from './store/libraryStore'
@@ -96,6 +98,16 @@ export default function App() {
         e.preventDefault()
         useUiStore.getState().setShowQuickOpen(true)
         return
+      }
+
+      // Esc → Clear search highlight (if any)
+      if (e.key === 'Escape' && !isEditing) {
+        const sh = useUiStore.getState().searchHighlight
+        if (sh) {
+          e.preventDefault()
+          useUiStore.getState().setSearchHighlight(null)
+          return
+        }
       }
 
       // Ctrl+B → Toggle sidebar
@@ -334,6 +346,12 @@ export default function App() {
       {/* Quick open modal (Ctrl+P) */}
       <Suspense fallback={null}>
         <QuickOpenModal />
+      </Suspense>
+
+      {/* Batch OCR: headless runner + floating progress bar */}
+      <Suspense fallback={null}>
+        <BatchOcrRunner />
+        <BatchOcrProgress />
       </Suspense>
     </div>
   )

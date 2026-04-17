@@ -1,14 +1,16 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
-  /* Warm palette */
-  --bg: #FFFDF7;
-  --bg-warm: #FBF8F1;
-  --bg-sidebar: #F7F3EA;
-  --bg-hover: #F0EBE0;
-  --bg-active: #EDE4D3;
-  --border: #E8E0D0;
-  --border-light: #F0EAD8;
+  /* Warm palette (v1.2.7: lowered overall luminance per user feedback — the old
+     #FFFDF7 main bg was perceived as "too bright / glarey".
+     Each layer drops 3% lightness for clearer visual hierarchy.) */
+  --bg: #F7F2E4;          /* hsl(42, 55%, 95%) — main reading area */
+  --bg-warm: #F0E9D6;     /* hsl(42, 48%, 91%) — cards, inputs */
+  --bg-sidebar: #E9E0C8;  /* hsl(42, 42%, 88%) — sidebar */
+  --bg-hover: #DFD3B4;    /* hsl(42, 38%, 83%) — hover state */
+  --bg-active: #D3C4A0;   /* hsl(42, 38%, 77%) — selected/active */
+  --border: #D0C19C;      /* hsl(42, 35%, 72%) — normal border */
+  --border-light: #E3D8BE; /* hsl(42, 40%, 85%) — subtle divider */
 
   --text: #3D3529;
   --text-secondary: #7A6F5F;
@@ -473,6 +475,24 @@ html, body, #root {
 /* Annotation list item hover actions */
 .annotation-list-item:hover .annotation-list-actions {
   opacity: 1 !important;
+}
+
+/* Search result highlight (v1.2.7) — warm yellow, distinct from annotation underline */
+.sj-search-hit {
+  background: rgba(251, 213, 107, 0.55);
+  box-shadow: 0 0 0 1px rgba(212, 168, 75, 0.5);
+  border-radius: 2px;
+  padding: 0 1px;
+  animation: sjSearchHitFade 0.5s ease-out;
+}
+:root.dark-mode .sj-search-hit {
+  background: rgba(251, 213, 107, 0.28);
+  box-shadow: 0 0 0 1px rgba(212, 168, 75, 0.45);
+  color: #ffe8a8;
+}
+@keyframes sjSearchHitFade {
+  from { background: rgba(251, 213, 107, 0.95); }
+  to { background: rgba(251, 213, 107, 0.55); }
 }
 
 /* ========== OCR MARKDOWN ========== */

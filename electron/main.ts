@@ -20,10 +20,10 @@ function createWindow(): BrowserWindow {
     title: '拾卷',
     icon: join(__dirname, '../../build/icon.png'),
     show: false,
-    backgroundColor: '#F7F3EA',
+    backgroundColor: '#E9E0C8',
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#F7F3EA',
+      color: '#E9E0C8',
       symbolColor: '#3D3529',
       height: 36
     },
@@ -44,10 +44,10 @@ function createWindow(): BrowserWindow {
   ipcMain.on('set-title-bar-theme', (_event, dark: boolean) => {
     try {
       mainWindow.setTitleBarOverlay({
-        color: dark ? '#1a1a20' : '#F7F3EA',
+        color: dark ? '#1a1a20' : '#E9E0C8',
         symbolColor: dark ? '#e0ddd5' : '#3D3529',
       })
-      mainWindow.setBackgroundColor(dark ? '#1a1a20' : '#F7F3EA')
+      mainWindow.setBackgroundColor(dark ? '#1a1a20' : '#E9E0C8')
     } catch {}
   })
 
