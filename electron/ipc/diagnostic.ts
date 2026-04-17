@@ -59,6 +59,24 @@ async function collectErrorLogs(): Promise<Array<{ name: string; mtime: string; 
   return logs
 }
 
+const CRASH_LOG = path.join(DATA_DIR, 'crash.log')
+
+// Append an entry to ~/.lit-manager/crash.log. Keeps last ~64KB (trim from head when bigger).
+async function appendCrashLog(text: string): Promise<void> {
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true })
+    const now = new Date().toISOString()
+    const entry = `\n====== ${now} ======\n${text}\n`
+    let existing = ''
+    try { existing = await fs.readFile(CRASH_LOG, 'utf-8') } catch { /* new file */ }
+    const combined = existing + entry
+    const trimmed = combined.length > 64 * 1024
+      ? combined.slice(combined.length - 64 * 1024)
+      : combined
+    await fs.writeFile(CRASH_LOG, trimmed, 'utf-8')
+  } catch { /* swallow — don't crash the crash logger */ }
+}
+
 export function registerDiagnosticIpc(): void {
   ipcMain.handle('get-diagnostic-info', async () => {
     const libraryStat = await statSafe(LIBRARY_FILE)
@@ -85,5 +103,16 @@ export function registerDiagnosticIpc(): void {
       await fs.mkdir(DATA_DIR, { recursive: true })
     } catch { /* ignore */ }
     shell.openPath(DATA_DIR)
+  })
+
+  // Renderer-initiated crash log entries (from ErrorBoundary componentDidCatch)
+  ipcMain.on('log-renderer-crash', (_event, payload: { label?: string; message?: string; stack?: string; componentStack?: string }) => {
+    const parts = [
+      `LABEL: ${payload.label || '(unknown)'}`,
+      `MESSAGE: ${payload.message || '(no message)'}`,
+      payload.stack ? `STACK:\n${payload.stack}` : '',
+      payload.componentStack ? `COMPONENT STACK:\n${payload.componentStack}` : '',
+    ].filter(Boolean)
+    appendCrashLog(parts.join('\n'))
   })
 }

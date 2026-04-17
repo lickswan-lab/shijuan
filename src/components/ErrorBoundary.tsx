@@ -11,7 +11,17 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error(`[ErrorBoundary${this.props.fallbackLabel ? ` ${this.props.fallbackLabel}` : ''}]`, error, info.componentStack)
+    const label = this.props.fallbackLabel
+    console.error(`[ErrorBoundary${label ? ` ${label}` : ''}]`, error, info.componentStack)
+    // Persist to crash.log so the diagnostic panel can surface it
+    try {
+      window.electronAPI?.logRendererCrash?.({
+        label,
+        message: error.message,
+        stack: error.stack || '',
+        componentStack: info.componentStack || '',
+      })
+    } catch { /* best-effort */ }
   }
 
   render() {

@@ -166,6 +166,8 @@ const electronAPI = {
     errorLogs: Array<{ name: string; mtime: string; content: string }>
   }> => ipcRenderer.invoke('get-diagnostic-info'),
   openDataDir: (): Promise<void> => ipcRenderer.invoke('open-data-dir'),
+  logRendererCrash: (payload: { label?: string; message?: string; stack?: string; componentStack?: string }): void =>
+    ipcRenderer.send('log-renderer-crash', payload),
 
   // === Reading Log ===
   readingLogCollectEvents: (date: string): Promise<{ success: boolean; events: ReadingLogEvent[]; error?: string }> =>

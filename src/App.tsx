@@ -246,7 +246,30 @@ export default function App() {
 
   // Init library on mount
   useEffect(() => {
-    initLibrary()
+    initLibrary().then(() => {
+      // Auto-restore last-opened entry (if file still exists).
+      // Opt-out: user can disable via localStorage sj-noAutoRestore = "true"
+      try {
+        if (localStorage.getItem('sj-noAutoRestore') === 'true') return
+      } catch { return }
+      const lib = useLibraryStore.getState().library
+      if (!lib) return
+      // Find most recently opened entry (by lastOpenedAt), ignoring the session we
+      // just updated in initLibrary. Use a 5-minute fudge window to tolerate that update.
+      const entries = lib.entries || []
+      if (entries.length === 0) return
+      const mostRecent = entries
+        .filter(e => e.lastOpenedAt)
+        .sort((a, b) => (b.lastOpenedAt || '').localeCompare(a.lastOpenedAt || ''))[0]
+      if (!mostRecent) return
+      // Only restore if opened within the last 14 days — avoids auto-opening
+      // something the user hasn't touched in months.
+      const ageDays = (Date.now() - new Date(mostRecent.lastOpenedAt!).getTime()) / 86400000
+      if (ageDays > 14) return
+      setTimeout(() => {
+        useLibraryStore.getState().openEntry(mostRecent).catch(() => { /* file gone — fine */ })
+      }, 300)
+    })
     if (window.electronAPI?.getGlmApiKeyStatus) {
       window.electronAPI.getGlmApiKeyStatus().then(status => {
         setGlmApiKeyStatus(status)
