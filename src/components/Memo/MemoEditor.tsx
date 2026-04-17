@@ -38,6 +38,7 @@ function cleanOcrTextForCite(raw: string): string {
 }
 
 // ===== Preprocess #N block references in memo content =====
+// The rendered span carries `data-block-idx` so a parent event delegate can wire click → jump.
 function preprocessBlockRefs(content: string, blocks: BlockRef[]): string {
   if (blocks.length === 0) return content
   // Match #N where N is 1-99, NOT preceded by another # (avoids ## headings)
@@ -48,7 +49,7 @@ function preprocessBlockRefs(content: string, blocks: BlockRef[]): string {
     const preview = block.blockContent.substring(0, 60).replace(/"/g, '&quot;').replace(/\n/g, ' ')
     const authorLabel = block.blockAuthor === 'ai' ? 'AI' : '我'
     const color = block.blockAuthor === 'ai' ? '#4caf50' : '#C8956C'
-    return `<span class="block-ref-inline" style="background:${color}15;border:1px solid ${color}40;border-radius:4px;padding:1px 6px;font-size:12px;cursor:pointer;display:inline-block;margin:0 2px" title="${block.entryTitle} · ${authorLabel}&#10;${preview}"><span style="color:${color};font-weight:600">#${num}</span> <span style="color:#666;font-size:11px">${preview.substring(0, 20)}${preview.length > 20 ? '…' : ''}</span></span>`
+    return `<span class="block-ref-inline" data-block-idx="${idx}" style="background:${color}15;border:1px solid ${color}40;border-radius:4px;padding:1px 6px;font-size:12px;cursor:pointer;display:inline-block;margin:0 2px" title="点击跳转 · ${block.entryTitle} · ${authorLabel}&#10;${preview}"><span style="color:${color};font-weight:600">#${num}</span> <span style="color:#666;font-size:11px">${preview.substring(0, 20)}${preview.length > 20 ? '…' : ''}</span></span>`
   })
 }
 
@@ -429,16 +430,39 @@ function AnnotationDropPicker({ data, onSelect, onClose }: {
 }
 
 // ===== Live editor: shows rendered markdown, click to edit =====
-function LiveMemoEditor({ content, onChange, blocks, memoId }: {
+function LiveMemoEditor({ content, onChange, blocks, memoId, onJumpBlock }: {
   content: string
   onChange: (val: string) => void
   blocks: BlockRef[]
   memoId: string
+  onJumpBlock?: (block: BlockRef) => void
 }) {
   const [editing, setEditing] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const previewRef = useRef<HTMLDivElement>(null)
   const { addBlockToMemo } = useLibraryStore()
   const [dropPickerData, setDropPickerData] = useState<any>(null)
+
+  // Event delegation: click on any .block-ref-inline inside preview → jump to that block.
+  // Using delegation (instead of React props on the HTML spans) because the spans are
+  // rendered from HTML strings via rehype-raw — they don't accept React props.
+  useEffect(() => {
+    const el = previewRef.current
+    if (!el || editing) return
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement
+      const span = target.closest('.block-ref-inline') as HTMLElement | null
+      if (!span) return
+      e.stopPropagation()  // don't toggle into edit mode
+      e.preventDefault()
+      const idx = parseInt(span.dataset.blockIdx || '', 10)
+      if (!Number.isFinite(idx)) return
+      const block = blocks[idx]
+      if (block && onJumpBlock) onJumpBlock(block)
+    }
+    el.addEventListener('click', handler, true)  // capture phase → runs before parent click
+    return () => el.removeEventListener('click', handler, true)
+  }, [blocks, editing, content, onJumpBlock])
 
   useEffect(() => {
     if (editing && textareaRef.current) {
@@ -526,6 +550,7 @@ function LiveMemoEditor({ content, onChange, blocks, memoId }: {
         </div>
       ) : (
         <div
+          ref={previewRef}
           style={{ flex: 1, overflow: 'auto', padding: '20px 28px', cursor: 'text', minHeight: 0 }}
           onClick={() => setEditing(true)}
           {...dragProps}
@@ -882,6 +907,7 @@ export default function MemoEditor() {
             onChange={handleContentChange}
             blocks={activeMemo.blocks}
             memoId={activeMemo.id}
+            onJumpBlock={handleJumpToBlock}
           />
 
           {/* AI section */}

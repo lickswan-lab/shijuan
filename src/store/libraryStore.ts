@@ -2,6 +2,54 @@ import { create } from 'zustand'
 import { v4 as uuid } from 'uuid'
 import type { Library, LibraryEntry, PdfMeta, VirtualFolder, Memo, BlockRef, MemoSnapshot, MemoFolder, ReadingLog, LectureSession } from '../types/library'
 import { createDefaultLibrary, createDefaultPdfMeta } from '../types/library'
+import { extractPdfMetadata } from '../utils/pdfMetadata'
+
+// Background PDF metadata enrichment. Called after import finishes — reads each
+// newly-imported PDF's Info dict and updates its title / authors / year when
+// present and non-garbage. Never blocks the import flow; runs sequentially with
+// a small delay so the UI stays responsive.
+async function enrichPdfMetadataInBackground(
+  newEntryIds: string[],
+  getLib: () => Library | null,
+  setLib: (lib: Library) => void,
+  save: (lib: Library) => Promise<unknown>,
+) {
+  for (const id of newEntryIds) {
+    const lib = getLib()
+    if (!lib) return
+    const entry = lib.entries.find(e => e.id === id)
+    if (!entry || !entry.absPath.toLowerCase().endsWith('.pdf')) continue
+
+    const meta = await extractPdfMetadata(entry.absPath)
+    if (!meta) continue
+
+    // Only overwrite title if we have something sensible and the current title
+    // is still the filename-derived default (no user edits yet).
+    const updates: Partial<LibraryEntry> = {}
+    if (meta.title && meta.title.length >= 3 && meta.title.length <= 200) {
+      updates.title = meta.title
+    }
+    if (meta.author && entry.authors.length === 0) {
+      // Split on common separators: "; " ", " "; " " & " " and "
+      const authors = meta.author.split(/\s*[,;&]\s*|\s+and\s+/i).filter(a => a.length > 1 && a.length < 80)
+      if (authors.length > 0) updates.authors = authors
+    }
+    if (meta.year && !entry.year) updates.year = meta.year
+
+    if (Object.keys(updates).length === 0) continue
+
+    // Re-fetch lib (may have changed) and patch the entry in place
+    const fresh = getLib()
+    if (!fresh) return
+    const idx = fresh.entries.findIndex(e => e.id === id)
+    if (idx < 0) continue
+    fresh.entries[idx] = { ...fresh.entries[idx], ...updates }
+    setLib({ ...fresh })
+    try { await save(fresh) } catch { /* silent */ }
+    // Yield so the UI can paint between entries
+    await new Promise(r => setTimeout(r, 30))
+  }
+}
 
 interface LibraryState {
   library: Library | null
@@ -119,6 +167,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const { library } = get()
     if (!library) return 0
 
+    const newIds: string[] = []
     let added = 0
     for (const absPath of paths) {
       if (library.entries.some(e => e.absPath === absPath)) continue
@@ -128,11 +177,22 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         folderId, ocrStatus: 'none', addedAt: new Date().toISOString()
       }
       library.entries.push(entry)
+      newIds.push(entry.id)
       added++
     }
 
     await window.electronAPI.saveLibrary(library)
     set({ library: { ...library } })
+
+    // Kick off PDF metadata enrichment in the background (non-blocking)
+    if (newIds.length > 0) {
+      enrichPdfMetadataInBackground(
+        newIds,
+        () => get().library,
+        (lib) => set({ library: lib }),
+        (lib) => window.electronAPI.saveLibrary(lib),
+      )
+    }
     return added
   },
 
@@ -143,6 +203,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const { library } = get()
     if (!library) return 0
 
+    const newIds: string[] = []
     let added = 0
     for (const absPath of paths) {
       if (library.entries.some(e => e.absPath === absPath)) continue
@@ -152,11 +213,21 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         folderId, ocrStatus: 'none', addedAt: new Date().toISOString()
       }
       library.entries.push(entry)
+      newIds.push(entry.id)
       added++
     }
 
     await window.electronAPI.saveLibrary(library)
     set({ library: { ...library } })
+
+    if (newIds.length > 0) {
+      enrichPdfMetadataInBackground(
+        newIds,
+        () => get().library,
+        (lib) => set({ library: lib }),
+        (lib) => window.electronAPI.saveLibrary(lib),
+      )
+    }
     return added
   },
 
@@ -166,6 +237,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const { library } = get()
     if (!library) return 0
 
+    const newIds: string[] = []
     let added = 0
     for (const absPath of paths) {
       if (library.entries.some(e => e.absPath === absPath)) continue
@@ -175,12 +247,20 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         folderId, ocrStatus: 'none', addedAt: new Date().toISOString()
       }
       library.entries.push(entry)
+      newIds.push(entry.id)
       added++
     }
 
     if (added > 0) {
       await window.electronAPI.saveLibrary(library)
       set({ library: { ...library } })
+
+      enrichPdfMetadataInBackground(
+        newIds,
+        () => get().library,
+        (lib) => set({ library: lib }),
+        (lib) => window.electronAPI.saveLibrary(lib),
+      )
     }
     return added
   },

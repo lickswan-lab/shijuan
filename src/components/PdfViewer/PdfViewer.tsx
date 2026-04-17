@@ -375,6 +375,69 @@ function useSearchHighlight(
   }, deps)
 }
 
+// ===== PDF Outline list (recursive) =====
+// Renders the PDF's internal table-of-contents as a collapsible tree.
+// Each leaf is clickable; dest resolution and scroll live in the parent.
+interface OutlineItem { title: string; dest: any; items?: OutlineItem[] }
+function PdfOutlineList({ items, depth, onItemClick }: {
+  items: OutlineItem[]
+  depth: number
+  onItemClick: (item: OutlineItem) => void
+}) {
+  return (
+    <>
+      {items.map((item, i) => (
+        <PdfOutlineNode key={`${depth}-${i}-${item.title}`} item={item} depth={depth} onItemClick={onItemClick} />
+      ))}
+    </>
+  )
+}
+
+function PdfOutlineNode({ item, depth, onItemClick }: {
+  item: OutlineItem
+  depth: number
+  onItemClick: (item: OutlineItem) => void
+}) {
+  // Default-expand the first 2 levels; deeper ones start collapsed to reduce noise
+  const [expanded, setExpanded] = useState(depth < 2)
+  const hasChildren = Array.isArray(item.items) && item.items.length > 0
+
+  return (
+    <div>
+      <div
+        style={{
+          display: 'flex', alignItems: 'flex-start', gap: 4,
+          padding: '4px 8px', paddingLeft: 8 + depth * 12,
+          fontSize: 12, color: 'var(--text)',
+          cursor: 'pointer', lineHeight: 1.4,
+          borderRadius: 3,
+        }}
+        onClick={() => onItemClick(item)}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+      >
+        {hasChildren ? (
+          <span
+            style={{ color: 'var(--text-muted)', fontSize: 10, width: 10, flexShrink: 0, marginTop: 2 }}
+            onClick={e => { e.stopPropagation(); setExpanded(v => !v) }}
+            title={expanded ? '折叠' : '展开'}
+          >
+            {expanded ? '▾' : '▸'}
+          </span>
+        ) : (
+          <span style={{ width: 10, flexShrink: 0 }} />
+        )}
+        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }} title={item.title}>
+          {item.title}
+        </span>
+      </div>
+      {hasChildren && expanded && item.items && (
+        <PdfOutlineList items={item.items} depth={depth + 1} onItemClick={onItemClick} />
+      )}
+    </div>
+  )
+}
+
 // OCR Content component with per-page sections and markdown rendering
 function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText, marks, onRemoveMark, searchHighlight }: {
   text: string
@@ -1306,6 +1369,10 @@ export default function PdfViewer() {
   const [pdfFileUrl, setPdfFileUrl] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [loadProgress, setLoadProgress] = useState<number>(0)
+  // PDF outline (table of contents) — populated in onDocumentLoadSuccess
+  const [outline, setOutline] = useState<Array<{ title: string; dest: any; items?: any[] }> | null>(null)
+  const [showOutline, setShowOutline] = useState(false)
+  const pdfDocRef = useRef<any>(null)  // PDFDocumentProxy from react-pdf for getPageIndex
   const [rereadingReminder, setRereadingReminder] = useState<{ annCount: number; lastTime: string } | null>(null)
   const [ocrProgress, setOcrProgress] = useState<{ status: string } | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('pdf')
@@ -1535,9 +1602,50 @@ export default function PdfViewer() {
     return () => { el.removeEventListener('scroll', handler); if (timer) clearTimeout(timer) }
   }, [currentEntry?.id])
 
-  const onDocumentLoadSuccess = useCallback(({ numPages: n }: { numPages: number }) => {
-    setNumPages(n)
+  const onDocumentLoadSuccess = useCallback(async (pdf: any) => {
+    setNumPages(pdf.numPages)
+    pdfDocRef.current = pdf
+    // Try to read the PDF's internal outline (TOC). Many scanned / generated PDFs
+    // don't have one — in that case we just silently skip.
+    try {
+      const o = await pdf.getOutline()
+      setOutline(Array.isArray(o) && o.length > 0 ? o : null)
+    } catch {
+      setOutline(null)
+    }
   }, [])
+
+  // Reset outline state when switching entries
+  useEffect(() => {
+    setOutline(null)
+    setShowOutline(false)
+    pdfDocRef.current = null
+  }, [currentEntry?.id])
+
+  // Jump to a specific PDF page (1-indexed) by scrolling its .pdf-page-wrapper into view.
+  const scrollToPage = useCallback((pageNumber: number) => {
+    const container = scrollRef.current
+    if (!container) return
+    const el = container.querySelector(`.pdf-page-wrapper[data-page-number="${pageNumber}"]`) as HTMLElement | null
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [])
+
+  // Resolve a PDF outline item's destination → page number → scroll.
+  // Destinations come in several shapes (array ref, string named dest, null); we try each.
+  const handleOutlineClick = useCallback(async (item: any) => {
+    const pdf = pdfDocRef.current
+    if (!pdf || !item?.dest) return
+    try {
+      let dest = item.dest
+      if (typeof dest === 'string') dest = await pdf.getDestination(dest)
+      if (!dest || !dest[0]) return
+      const pageIndex = await pdf.getPageIndex(dest[0])
+      scrollToPage(pageIndex + 1)
+      setShowOutline(false)
+    } catch {
+      /* ignore bad outline entries */
+    }
+  }, [scrollToPage])
 
   const onDocumentLoadError = useCallback((err: Error) => {
     setLoadError('PDF 解析失败: ' + err.message)
@@ -1894,6 +2002,24 @@ export default function PdfViewer() {
         {numPages > 0 && (
           <span style={{ color: 'var(--text-muted)', marginLeft: 8, flexShrink: 0 }}>{numPages} 页</span>
         )}
+        {/* PDF outline toggle — only shown when a PDF is loaded AND it has a real TOC */}
+        {isPdf && outline && outline.length > 0 && (
+          <button
+            className="btn btn-sm btn-icon"
+            title="显示目录"
+            onClick={() => setShowOutline(v => !v)}
+            style={{
+              marginLeft: 6, padding: '4px 8px',
+              color: showOutline ? 'var(--accent)' : 'var(--text-muted)',
+              background: showOutline ? 'var(--accent-soft)' : 'transparent',
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
+              <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
+            </svg>
+          </button>
+        )}
         <div style={{ flex: 1 }} />
 
         {/* View mode toggle — only for PDF files */}
@@ -2188,8 +2314,34 @@ export default function PdfViewer() {
 
       {/* ===== PDF View ===== */}
       {viewMode === 'pdf' && isPdf && (
+        <div style={{ position: 'relative', flex: 1, display: 'flex', minHeight: 0 }}>
+        {/* Outline drawer — absolute overlay on the left of the pdf scroll area */}
+        {showOutline && outline && (
+          <div style={{
+            position: 'absolute', top: 0, left: 0, bottom: 0, width: 240, zIndex: 5,
+            background: 'var(--bg)', borderRight: '1px solid var(--border)',
+            boxShadow: '2px 0 8px rgba(0,0,0,0.06)',
+            display: 'flex', flexDirection: 'column',
+          }}>
+            <div style={{
+              padding: '8px 12px', borderBottom: '1px solid var(--border-light)',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)',
+            }}>
+              <span>目录</span>
+              <button
+                onClick={() => setShowOutline(false)}
+                title="关闭"
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 14, padding: 0 }}
+              >✕</button>
+            </div>
+            <div style={{ flex: 1, overflow: 'auto', padding: '4px 0' }}>
+              <PdfOutlineList items={outline} depth={0} onItemClick={handleOutlineClick} />
+            </div>
+          </div>
+        )}
         <div className="pdf-scroll-area" ref={scrollRef} onMouseUp={handleMouseUp}
-          style={immersiveMode ? { background: 'var(--bg)', padding: 0 } : undefined}
+          style={{ ...(immersiveMode ? { background: 'var(--bg)', padding: 0 } : {}), flex: 1 }}
         >
           {loadError ? (
             <div className="empty-state"><span style={{ fontSize: 32 }}>❌</span><span>{loadError}</span></div>
@@ -2274,6 +2426,7 @@ export default function PdfViewer() {
               )}
             </Document>
           )}
+        </div>
         </div>
       )}
 
