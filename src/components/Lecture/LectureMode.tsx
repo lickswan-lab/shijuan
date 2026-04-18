@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import ReactMarkdown from 'react-markdown'
-import rehypeRaw from 'rehype-raw'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
 import type { LectureSession, TranscriptSegment } from '../../types/library'
@@ -659,7 +658,7 @@ export default function LectureMode() {
                   {generatingSummary && <span className="loading-spinner" style={{ width: 12, height: 12 }} />}
                 </div>
                 <div style={{ fontSize: 13, lineHeight: 1.8, color: 'var(--text)' }}>
-                  <ReactMarkdown rehypePlugins={[rehypeRaw]}>
+                  <ReactMarkdown>
                     {streamingSummary || session?.aiSummary || ''}
                   </ReactMarkdown>
                   {generatingSummary && <span className="streaming-cursor" />}

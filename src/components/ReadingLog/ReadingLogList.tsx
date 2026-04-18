@@ -136,9 +136,10 @@ export default function ReadingLogList() {
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.3, marginBottom: 12 }}>
               <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
             </svg>
-            <div style={{ fontSize: 12, marginBottom: 6 }}>还没有阅读日志</div>
-            <div style={{ fontSize: 11, lineHeight: 1.6 }}>
-              点击上方按钮生成今日日志，或在午夜时自动生成前一天的日志。
+            <div style={{ fontSize: 12, marginBottom: 6, color: 'var(--text-secondary)' }}>还没有阅读日志</div>
+            <div style={{ fontSize: 11, lineHeight: 1.7 }}>
+              读一天后，日志会自动收集你的痕迹——哪页停得久、哪条立场变了。<br />
+              今天先读点东西吧，午夜过后你再回来看。
             </div>
           </div>
         )}

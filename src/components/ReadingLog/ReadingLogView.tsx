@@ -1,11 +1,14 @@
 import { useState, useEffect } from 'react'
 import { v4 as uuid } from 'uuid'
 import ReactMarkdown from 'react-markdown'
-import rehypeRaw from 'rehype-raw'
+import remarkMath from 'remark-math'
+import { KATEX_FORGIVING, sanitizeMath } from '../../utils/markdownConfig'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
+import { openEntryById } from '../../utils/openEntryById'
 import type { ReadingLogEvent, ReadingLog } from '../../types/library'
 import ReadingLogList from './ReadingLogList'
+import { READING_LOG_SYSTEM_PROMPT, buildReadingLogUserMessage } from './readingLogPrompt'
 
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 
@@ -194,7 +197,7 @@ export default function ReadingLogView() {
     : null
 
   const handleGenerateSummary = async () => {
-    if (generatingSummary || !log) return
+    if (generatingSummary || !log || !library) return
     setGeneratingSummary(true)
     setStreamingText('')
 
@@ -203,22 +206,15 @@ export default function ReadingLogView() {
         .filter(l => l.date !== log.date && l.aiSummary)
         .slice(0, 3)
 
-      // Build the same messages that readingLog.ts would build
-      const systemPrompt = `你是一位学术阅读助手，正在和用户对话。请基于用户今天的阅读活动记录，生成一份简洁的每日阅读总结。\n\n重要：用「你」称呼用户（第二人称），像朋友和学术伙伴在跟用户聊天回顾今天的阅读。不要用「我」。禁止使用「亲爱的」等过于亲昵的称呼，直接用「你」即可。\n\n要求：\n1. 用2-4段中文概述今天的阅读和思考活动\n2. 提及具体的时间点（如"上午9点"、"下午2点"），让总结与时间线对应\n3. 如果用户在多篇文献间有关联性的注释或思考，指出这些联系\n4. 如果发现用户的注释中有值得深入思考的问题或矛盾，简要提及\n5. 语气温和、鼓励，像一位学术伙伴在跟你聊天\n6. 不要列举每一个事件，而是抓住重点和亮点\n7. 如果提供了历史日志摘要，可以提及与之前阅读的延续或变化`
-
-      const timeline = log.events.map(e => {
-        const t = new Date(e.timestamp)
-        const timeStr = `${t.getHours().toString().padStart(2, '0')}:${t.getMinutes().toString().padStart(2, '0')}`
-        return `${timeStr} - ${e.detail}${e.selectedText ? `（"${e.selectedText}"）` : ''}`
-      }).join('\n')
-
-      let userMsg = `日期：${log.date}\n\n今日活动时间线：\n${timeline}`
-      if (recentLogs.length > 0) {
-        const history = recentLogs.slice(0, 3).map(l =>
-          `${l.date}: ${(l.aiSummary || '无总结').substring(0, 200)}`
-        ).join('\n\n')
-        userMsg += `\n\n最近几天的阅读总结（供参考关联）：\n${history}`
-      }
+      // Use the shared prompt + user-message builder — single source of truth
+      // across daily log (this file) and the dormant backend IPC. Was
+      // duplicated inline here and drifted from the R18 "同伴" voice upgrade;
+      // see readingLogPrompt.ts for the canonical version.
+      const userMsg = buildReadingLogUserMessage({
+        date: log.date,
+        events: log.events,
+        recentLogs,
+      })
 
       const streamId = uuid()
       let fullText = ''
@@ -231,7 +227,7 @@ export default function ReadingLogView() {
 
       try {
         const result = await window.electronAPI.aiChatStream(streamId, selectedAiModel, [
-          { role: 'system', content: systemPrompt },
+          { role: 'system', content: READING_LOG_SYSTEM_PROMPT },
           { role: 'user', content: userMsg },
         ])
         if (!result.success) fullText = `错误：${result.error}`
@@ -309,14 +305,14 @@ export default function ReadingLogView() {
             {generatingSummary ? (
               <>
                 <span className="loading-spinner" style={{ width: 12, height: 12 }} />
-                生成中...
+                同伴正在看你今天的痕迹…
               </>
             ) : (
               <>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
                 </svg>
-                生成 AI 总结
+                让同伴写一段观察
               </>
             )}
           </button>
@@ -339,7 +335,7 @@ export default function ReadingLogView() {
               AI 正在生成总结...
             </div>
             <div style={{ fontSize: 13, lineHeight: 1.8, color: 'var(--text)' }}>
-              <ReactMarkdown rehypePlugins={[rehypeRaw]}>{streamingText}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[KATEX_FORGIVING]}>{sanitizeMath(streamingText)}</ReactMarkdown>
               <span className="streaming-cursor" />
             </div>
           </div>
@@ -375,7 +371,7 @@ export default function ReadingLogView() {
               {log.aiModel && <span style={{ fontWeight: 400, color: 'var(--text-muted)', fontSize: 10 }}>({log.aiModel})</span>}
             </div>
             <div className="reading-log-summary-content" style={{ fontSize: 13, lineHeight: 1.8, color: 'var(--text)' }}>
-              <ReactMarkdown rehypePlugins={[rehypeRaw]}>{log.aiSummary}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[KATEX_FORGIVING]}>{sanitizeMath(log.aiSummary)}</ReactMarkdown>
             </div>
             <button
               onClick={handleGenerateSummary}
@@ -432,20 +428,10 @@ export default function ReadingLogView() {
                   {/* Content — clickable to jump to document */}
                   <div
                     style={{ flex: 1, paddingBottom: isLast ? 0 : 12, cursor: event.entryId || event.memoId ? 'pointer' : 'default' }}
-                    onClick={() => {
+                    onClick={async () => {
                       if (event.entryId) {
-                        const entry = library?.entries.find(e => e.id === event.entryId)
-                        if (entry) {
-                          openEntry(entry)
-                          setActiveReadingLogDate(null)
-                          // Jump to the specific annotation if this event references one
-                          if (event.annotationId) {
-                            // openEntry is async (loads meta), give it a tick to settle
-                            setTimeout(() => {
-                              useUiStore.getState().setActiveAnnotation(event.annotationId!)
-                            }, 250)
-                          }
-                        }
+                        setActiveReadingLogDate(null)
+                        await openEntryById(event.entryId, { annotationId: event.annotationId })
                       } else if (event.memoId) {
                         setActiveMemo(event.memoId)
                         setActiveReadingLogDate(null)

@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useUiStore } from '../../store/uiStore'
+import { useLibraryStore } from '../../store/libraryStore'
+import { generateBibTeX, generateRIS } from '../../utils/citations'
 
 // ===== Auto Update Panel =====
 function UpdatePanel() {
@@ -61,7 +63,7 @@ function UpdatePanel() {
         </span>
       </div>
 
-      {status === 'idle' && !info?.hasUpdate && (
+      {status === 'idle' && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <button className="btn btn-sm" style={{ fontSize: 11 }} onClick={handleCheck}>
             检查更新
@@ -262,11 +264,187 @@ function DiagnosticPanel() {
   )
 }
 
+// ===== Data Export Panel =====
+// Lives in Settings modal. Two functions:
+// 1. Citation export (BibTeX/RIS) — lets users plug shijuan into Zotero / LaTeX
+//    pipelines instead of being a dead-end for their library.
+// 2. Full-library backup — a single JSON with library.json + all meta + agent
+//    memory + apprentice logs. Solves "electronic dies → I lose everything"
+//    anxiety. Does not include the PDF binaries themselves (they stay in the
+//    user's own folders) or OCR .txt files (they live next to the PDFs).
+function DataExportPanel() {
+  const { library, importFromBibTeX } = useLibraryStore()
+  const [status, setStatus] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const entryCount = library?.entries?.length ?? 0
+  const memoCount = library?.memos?.length ?? 0
+
+  const handleImportBibTeX = useCallback(async () => {
+    if (!window.electronAPI?.pickAndReadBibFile) {
+      setStatus('当前版本不支持 BibTeX 导入')
+      return
+    }
+    setBusy(true); setStatus(null)
+    try {
+      const pick = await window.electronAPI.pickAndReadBibFile()
+      if (pick.canceled) { setBusy(false); return }
+      if (!pick.success || !pick.content) {
+        setStatus(`读取失败：${pick.error || '未知错误'}`)
+        setBusy(false)
+        return
+      }
+      const result = await importFromBibTeX(pick.content)
+      const parts: string[] = []
+      if (result.added > 0) parts.push(`✓ 新增 ${result.added} 条`)
+      if (result.skipped > 0) parts.push(`已跳过重复 ${result.skipped} 条`)
+      if (result.missingFile > 0) parts.push(`有 ${result.missingFile} 条 PDF 路径无效（已作为元数据导入，可后续关联文件）`)
+      if (result.parseErrors > 0) parts.push(`⚠ 解析错误 ${result.parseErrors} 处`)
+      if (parts.length === 0) parts.push('未导入任何条目')
+      setStatus(parts.join('；'))
+    } catch (err: any) {
+      setStatus(`导入失败：${err.message}`)
+    } finally { setBusy(false) }
+  }, [importFromBibTeX])
+
+  const handleExportBibTeX = useCallback(async () => {
+    if (!library || entryCount === 0) {
+      setStatus('文献库为空，无需导出')
+      return
+    }
+    setBusy(true); setStatus(null)
+    try {
+      const bib = generateBibTeX(library.entries)
+      const result = await window.electronAPI.exportFile(
+        `shijuan-${new Date().toISOString().slice(0, 10)}.bib`,
+        [{ name: 'BibTeX', extensions: ['bib'] }],
+        bib,
+      )
+      if (result.success) {
+        setStatus(`✓ 已导出 ${entryCount} 条文献到 ${result.path}`)
+      } else if (result.error) {
+        setStatus(`导出失败：${result.error}`)
+      }
+    } catch (err: any) {
+      setStatus(`导出失败：${err.message}`)
+    } finally { setBusy(false) }
+  }, [library, entryCount])
+
+  const handleExportRIS = useCallback(async () => {
+    if (!library || entryCount === 0) {
+      setStatus('文献库为空，无需导出')
+      return
+    }
+    setBusy(true); setStatus(null)
+    try {
+      const ris = generateRIS(library.entries)
+      const result = await window.electronAPI.exportFile(
+        `shijuan-${new Date().toISOString().slice(0, 10)}.ris`,
+        [{ name: 'RIS', extensions: ['ris'] }],
+        ris,
+      )
+      if (result.success) {
+        setStatus(`✓ 已导出 ${entryCount} 条文献到 ${result.path}`)
+      } else if (result.error) {
+        setStatus(`导出失败：${result.error}`)
+      }
+    } catch (err: any) {
+      setStatus(`导出失败：${err.message}`)
+    } finally { setBusy(false) }
+  }, [library, entryCount])
+
+  const handleExportBackup = useCallback(async () => {
+    if (!window.electronAPI?.exportFullBackup) {
+      setStatus('当前版本不支持完整备份导出')
+      return
+    }
+    setBusy(true); setStatus(null)
+    try {
+      const result = await window.electronAPI.exportFullBackup()
+      if (result.success && result.stats) {
+        const s = result.stats
+        setStatus(`✓ 已备份 ${s.entryCount} 文献 / ${s.memoCount} 笔记 / ${s.metaCount} 注释文件 / ${s.apprenticeCount} 周报`)
+      } else if (result.error) {
+        setStatus(`备份失败：${result.error}`)
+      }
+    } catch (err: any) {
+      setStatus(`备份失败：${err.message}`)
+    } finally { setBusy(false) }
+  }, [])
+
+  return (
+    <div style={{
+      padding: '12px 14px', marginBottom: 8, borderRadius: 8,
+      border: '1px solid var(--border)', background: 'var(--bg-warm)',
+    }}>
+      <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)', marginBottom: 4 }}>
+        数据导出
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10, lineHeight: 1.5 }}>
+        文献库 {entryCount} 条 · 笔记 {memoCount} 条。<br />
+        从 Zotero 迁移：<strong>Zotero 右键文献库 → Export Library → BibTeX（勾选 Export Files）</strong> → 这里点导入
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+        <button
+          className="btn btn-sm btn-primary"
+          style={{ fontSize: 11 }}
+          onClick={handleImportBibTeX}
+          disabled={busy}
+          title="从 Zotero / JabRef / EndNote 导出的 .bib 文件批量导入"
+        >
+          导入 BibTeX (.bib)
+        </button>
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: status ? 10 : 0 }}>
+        <button
+          className="btn btn-sm"
+          style={{ fontSize: 11 }}
+          onClick={handleExportBibTeX}
+          disabled={busy || entryCount === 0}
+          title="导出 BibTeX 格式，可导入 Zotero / JabRef / LaTeX"
+        >
+          导出 BibTeX (.bib)
+        </button>
+        <button
+          className="btn btn-sm"
+          style={{ fontSize: 11 }}
+          onClick={handleExportRIS}
+          disabled={busy || entryCount === 0}
+          title="导出 RIS 格式，可导入 EndNote / Mendeley"
+        >
+          导出 RIS (.ris)
+        </button>
+        <button
+          className="btn btn-sm"
+          style={{ fontSize: 11 }}
+          onClick={handleExportBackup}
+          disabled={busy}
+          title="导出所有数据为单个 JSON 文件（不含 PDF 和 OCR 文件）"
+        >
+          完整备份 (.json)
+        </button>
+      </div>
+      {status && (
+        <div style={{
+          fontSize: 11,
+          color: status.startsWith('✓') ? 'var(--success)' : 'var(--danger)',
+          wordBreak: 'break-all',
+        }}>
+          {status}
+        </div>
+      )}
+    </div>
+  )
+}
+
 interface ProviderInfo {
   id: string
   name: string
   models: Array<{ id: string; name: string }>
   hasKey: boolean
+  noKey?: boolean  // Ollama: no API key needed, hasKey means "daemon running + models pulled"
+  apiKeyUrl?: string       // Direct link to the provider's API key page
+  freeTierHint?: string    // One-line hint about free tier / availability
 }
 
 export default function TopBar() {
@@ -437,8 +615,18 @@ export default function TopBar() {
         <div className="modal-overlay" onClick={() => setShowSettings(false)}>
           <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 520, maxHeight: '80vh', overflow: 'auto' }}>
             <h3>设置</h3>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14, lineHeight: 1.7 }}>
               配置各 AI 供应商的 API Key。OCR 功能需要智谱 GLM，问答对话支持所有已配置的模型。
+            </div>
+            <div style={{
+              fontSize: 11, color: 'var(--text-secondary)',
+              background: 'var(--bg-warm)', border: '1px solid var(--border-light)',
+              borderRadius: 6, padding: '8px 12px', marginBottom: 14, lineHeight: 1.7,
+            }}>
+              <strong style={{ color: 'var(--text)' }}>💡 第一次使用？</strong>
+              任选一家配置即可。推荐 <strong>智谱 GLM</strong>（GLM-4-Flash 免费，注册即送额度）或
+              <strong>DeepSeek</strong>（按量付费便宜，大陆直连）。各卡片下方有"获取 Key"链接直接跳转。
+              不想配 Key？看最下方的 <strong>Ollama</strong>（本地跑）或 <strong>Claude Code CLI</strong>（复用本机登录）。
             </div>
 
             {providers.map(provider => (
@@ -454,48 +642,123 @@ export default function TopBar() {
                   <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>
                     {provider.name}
                     {provider.id === 'glm' && <span style={{ fontSize: 10, color: 'var(--accent)', marginLeft: 6 }}>OCR 必需</span>}
+                    {provider.noKey && <span style={{ fontSize: 10, color: 'var(--success)', marginLeft: 6 }}>零 Key · 本地运行</span>}
                   </div>
-                  {provider.hasKey ? (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ fontSize: 11, color: 'var(--success)' }}>✓ 已配置</span>
-                      <button
-                        className="btn btn-sm"
-                        style={{ fontSize: 10, padding: '2px 8px', color: 'var(--text-muted)' }}
-                        onClick={() => handleRemoveKey(provider.id)}
-                      >
-                        移除
-                      </button>
-                    </div>
+                  {provider.noKey ? (
+                    provider.hasKey ? (
+                      <span style={{ fontSize: 11, color: 'var(--success)' }}>✓ 已连接（{provider.models.length} 个模型）</span>
+                    ) : (
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>未检测到</span>
+                    )
                   ) : (
-                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>未配置</span>
+                    provider.hasKey ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 11, color: 'var(--success)' }}>✓ 已配置</span>
+                        <button
+                          className="btn btn-sm"
+                          style={{ fontSize: 10, padding: '2px 8px', color: 'var(--text-muted)' }}
+                          onClick={() => handleRemoveKey(provider.id)}
+                        >
+                          移除
+                        </button>
+                      </div>
+                    ) : (
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>未配置</span>
+                    )
                   )}
                 </div>
 
-                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 6 }}>
-                  模型：{provider.models.map(m => m.name).join('、')}
-                </div>
+                {provider.noKey ? (
+                  <>
+                    {provider.id === 'ollama' ? (
+                      provider.hasKey ? (
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 6, lineHeight: 1.6 }}>
+                          已发现本地模型：{provider.models.map(m => m.name).join('、')}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.7 }}>
+                          可选：安装 <a href="https://ollama.com/download" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>Ollama</a> 后，在终端运行 <code style={{ background: 'var(--bg)', padding: '0 4px', borderRadius: 3, fontSize: 10 }}>ollama pull qwen2.5:7b</code> 下一个模型，点下方"刷新"即可使用。<br />
+                          <span style={{ color: 'var(--warning)' }}>注意</span>：本地模型运行在你自己电脑上，建议 <strong>8GB+ 内存</strong>（7B 小模型）或 <strong>16GB+</strong>（13B+ 更好模型），<strong>磁盘空间</strong>也会被模型占用（单个 7B 约 4-5GB）。老旧笔记本或内存紧张时不推荐。
+                        </div>
+                      )
+                    ) : provider.id === 'claude_cli' ? (
+                      provider.hasKey ? (
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 6, lineHeight: 1.6 }}>
+                          复用你本机已登录的 Claude Code 凭证。拾卷会调用 <code style={{ background: 'var(--bg)', padding: '0 4px', borderRadius: 3, fontSize: 10 }}>claude -p</code> 非交互模式，Token 成本走你 Claude Code 的账号。<span style={{ color: 'var(--text-muted)' }}>（注意：不支持流式输出，回答会整段返回）</span>
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.7 }}>
+                          可选：已登录 <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>Claude Code</a> 的话，拾卷可以直接复用，无需再配 API Key。未检测到 <code style={{ background: 'var(--bg)', padding: '0 4px', borderRadius: 3, fontSize: 10 }}>claude</code> 命令——请检查安装并确保其在系统 PATH 中，装好后点"刷新"。
+                        </div>
+                      )
+                    ) : null}
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        className="btn btn-sm"
+                        style={{ fontSize: 11, padding: '4px 10px' }}
+                        onClick={async () => {
+                          setSaving(provider.id)
+                          try {
+                            const updated = await window.electronAPI.aiGetProviders()
+                            setProviders(updated)
+                          } catch { /* ignore */ }
+                          setSaving(null)
+                        }}
+                        disabled={saving === provider.id}
+                      >
+                        {saving === provider.id ? '检测中...' : '刷新检测'}
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 6 }}>
+                      模型：{provider.models.map(m => m.name).join('、')}
+                    </div>
 
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <input
-                    type="password"
-                    placeholder={provider.hasKey ? '输入新 Key 可更新' : '输入 API Key'}
-                    value={keyInputs[provider.id] || ''}
-                    onChange={e => setKeyInputs(prev => ({ ...prev, [provider.id]: e.target.value }))}
-                    onKeyDown={e => { if (e.key === 'Enter') handleSaveKey(provider.id) }}
-                    style={{
-                      flex: 1, padding: '5px 10px', border: '1px solid var(--border)',
-                      borderRadius: 4, fontSize: 12, outline: 'none', background: 'var(--bg)',
-                    }}
-                  />
-                  <button
-                    className="btn btn-sm btn-primary"
-                    style={{ fontSize: 11, padding: '4px 10px' }}
-                    onClick={() => handleSaveKey(provider.id)}
-                    disabled={!keyInputs[provider.id]?.trim() || saving === provider.id}
-                  >
-                    {saving === provider.id ? '...' : '保存'}
-                  </button>
-                </div>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <input
+                        type="password"
+                        placeholder={provider.hasKey ? '输入新 Key 可更新' : '输入 API Key'}
+                        value={keyInputs[provider.id] || ''}
+                        onChange={e => setKeyInputs(prev => ({ ...prev, [provider.id]: e.target.value }))}
+                        onKeyDown={e => { if (e.key === 'Enter') handleSaveKey(provider.id) }}
+                        style={{
+                          flex: 1, padding: '5px 10px', border: '1px solid var(--border)',
+                          borderRadius: 4, fontSize: 12, outline: 'none', background: 'var(--bg)',
+                        }}
+                      />
+                      <button
+                        className="btn btn-sm btn-primary"
+                        style={{ fontSize: 11, padding: '4px 10px' }}
+                        onClick={() => handleSaveKey(provider.id)}
+                        disabled={!keyInputs[provider.id]?.trim() || saving === provider.id}
+                      >
+                        {saving === provider.id ? '...' : '保存'}
+                      </button>
+                    </div>
+
+                    {/* Key acquisition helper — lowers the bar for users who don't
+                        know where to get an API key. Shown only when unconfigured
+                        so it doesn't clutter the UI once saved. */}
+                    {!provider.hasKey && provider.apiKeyUrl && (
+                      <div style={{
+                        marginTop: 6, fontSize: 10, color: 'var(--text-muted)',
+                        lineHeight: 1.6,
+                      }}>
+                        还没有 Key？→ <a
+                          href={provider.apiKeyUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                        >在 {provider.name} 官网获取</a>
+                        {provider.freeTierHint && (
+                          <span style={{ marginLeft: 4, opacity: 0.85 }}>· {provider.freeTierHint}</span>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             ))}
 
@@ -541,6 +804,9 @@ export default function TopBar() {
                 })}
               </div>
             </div>
+
+            {/* Data Export (citations + full backup) */}
+            <DataExportPanel />
 
             {/* Auto Update */}
             <UpdatePanel />

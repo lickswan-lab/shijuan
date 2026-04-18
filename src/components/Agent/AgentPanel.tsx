@@ -1,32 +1,29 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import ReactMarkdown from 'react-markdown'
-import rehypeRaw from 'rehype-raw'
 import remarkMath from 'remark-math'
-import rehypeKatex from 'rehype-katex'
+import { KATEX_FORGIVING as rehypeKatex } from '../../utils/markdownConfig'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
-import type { AgentMessage, AgentConversation, HermesSkill, HermesInsight } from '../../types/library'
+import type { AgentMessage, AgentConversation, HermesInsight } from '../../types/library'
 import { buildAgentSystemPrompt, type AgentContext } from './agentPrompt'
 import { parseToolCalls, hasToolCalls, extractMemoryUpdate, cleanResponse, executeTool } from './agentTools'
 import { buildApprenticePrompt } from './apprenticePrompt'
+import { APPRENTICE_DIALOGUE_SYSTEM_PROMPT, buildApprenticeDialogueUserMessage } from './apprenticeDialoguePrompt'
 
-// ===== Built-in tool definitions (display only) =====
-const BUILTIN_TOOLS: Array<{ name: string; desc: string; category?: string }> = [
-  { name: 'search_library', desc: '搜索文献库（标题/标签/作者）', category: '基础' },
-  { name: 'get_entry_detail', desc: '获取文献完整元数据', category: '基础' },
-  { name: 'get_annotations', desc: '读取文献的注释和历史链', category: '基础' },
-  { name: 'get_document_text', desc: '获取文献全文（OCR文本）', category: '基础' },
-  { name: 'list_memos', desc: '列出所有思考笔记', category: '基础' },
-  { name: 'read_memo', desc: '读取笔记内容', category: '基础' },
-  { name: 'create_memo', desc: '创建新笔记', category: '基础' },
-  { name: 'update_memo', desc: '更新笔记内容', category: '基础' },
-  { name: 'get_reading_activity', desc: '查看最近阅读活动', category: '基础' },
-  { name: 'build_knowledge_map', desc: '构建跨文献知识图谱', category: '智能' },
-  { name: 'generate_exam', desc: '生成考试预测和模拟题', category: '智能' },
-  { name: 'build_paper_outline', desc: '从注释构建论文大纲', category: '智能' },
-  { name: 'trace_concept_evolution', desc: '追踪概念理解的演变', category: '智能' },
-]
+// NOTE: The 'Skills' panel tab was removed in batch 28. Reason:
+//   - The 13 built-in tools shown there were display-only (users couldn't
+//     enable/disable them, and the list drifted from agentPrompt.ts's real
+//     tool descriptions — two sources of truth for the same thing).
+//   - Custom skills (user-authored prompt fragments) had near-zero adoption:
+//     high prompt-engineering barrier, and the three AI companionship surfaces
+//     (instant feedback / daily / apprentice weekly) already cover the space.
+//   - The 'learned' skill type was dead code — nothing ever wrote a learned skill.
+//
+// Kept for back-compat:
+//   - agent-load-skills / agent-save-skills IPC stay registered (legacy skills.json
+//     files on users' disks continue to read/parse cleanly, just won't be surfaced)
+//   - agentPrompt.ts TOOL_DESCRIPTIONS stay — that's what the AI actually sees.
 
 interface ConfiguredProvider {
   id: string
@@ -34,7 +31,7 @@ interface ConfiguredProvider {
   models: Array<{ id: string; name: string }>
 }
 
-type PanelTab = 'chat' | 'insights' | 'skills' | 'apprentice'
+type PanelTab = 'chat' | 'insights' | 'apprentice'
 
 // Format "X 天前" / "上周" / "N 周前"
 function formatTimeAgo(iso: string): string {
@@ -74,10 +71,6 @@ export default function AgentPanel() {
   const [insight, setInsight] = useState<HermesInsight | null>(null)
   const [generatingInsight, setGeneratingInsight] = useState(false)
 
-  // Skills
-  const [skills, setSkills] = useState<HermesSkill[]>([])
-  const [editingSkill, setEditingSkill] = useState<HermesSkill | null>(null)
-
   // Apprentice — weekly observation logs written by Hermes-as-companion
   const [apprenticeEntries, setApprenticeEntries] = useState<Array<{ weekCode: string; size: number; mtime: string }>>([])
   const [currentApprenticeWeek, setCurrentApprenticeWeek] = useState<string | null>(null)
@@ -85,7 +78,37 @@ export default function AgentPanel() {
   const [generatingApprentice, setGeneratingApprentice] = useState(false)
   const [apprenticeStreamText, setApprenticeStreamText] = useState('')
 
+  // Apprentice dialogue — follow-up questions on the currently-viewed weekly report.
+  // History is ephemeral (not persisted) — it's about "this reading session's
+  // follow-ups," not a long-term record. The report itself remains the persisted
+  // artifact. Reset when switching weeks so you don't carry stale context.
+  const [dialogueHistory, setDialogueHistory] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([])
+  const [dialogueInput, setDialogueInput] = useState('')
+  const [dialogueStreaming, setDialogueStreaming] = useState(false)
+  const [dialogueStreamText, setDialogueStreamText] = useState('')
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  // Track the streamId of the current in-flight AI request so the user can abort it.
+  // Only one stream runs at a time in this panel (chat, insight, or apprentice).
+  const currentStreamIdRef = useRef<string | null>(null)
+
+  const handleStopStream = useCallback(() => {
+    const sid = currentStreamIdRef.current
+    if (sid) {
+      window.electronAPI.aiAbortStream?.(sid).catch(() => {})
+    }
+  }, [])
+
+  // Abort any in-flight stream on unmount so the backend fetch is cancelled
+  // (otherwise it keeps consuming tokens after the panel closes).
+  useEffect(() => {
+    return () => {
+      const sid = currentStreamIdRef.current
+      if (sid) {
+        window.electronAPI.aiAbortStream?.(sid).catch(() => {})
+      }
+    }
+  }, [])
 
   // Load everything on mount
   const loadMemory = useCallback(() => {
@@ -102,7 +125,6 @@ export default function AgentPanel() {
       }
     })
     window.electronAPI.agentLoadInsight().then(r => { if (r.success && r.insight?.content) setInsight(r.insight) })
-    window.electronAPI.agentLoadSkills().then(r => { if (r.success) setSkills(r.skills) })
     // Load apprentice logs list — pick the most recent one to display first
     window.electronAPI.apprenticeList?.().then(r => {
       if (!r.success) return
@@ -175,13 +197,7 @@ export default function AgentPanel() {
     setStreamingText('')
 
     try {
-      // Include custom skills in system prompt context
-      const customSkillsText = skills.filter(s => s.type !== 'builtin' && s.enabled).map(s =>
-        `[技能: ${s.name}] ${s.description}${s.prompt ? `\n指令: ${s.prompt}` : ''}`
-      ).join('\n')
-
-      const systemPrompt = buildAgentSystemPrompt(buildContext()) +
-        (customSkillsText ? `\n\n## 用户自定义技能\n\n${customSkillsText}` : '')
+      const systemPrompt = buildAgentSystemPrompt(buildContext())
 
       const llmMessages: Array<{ role: string; content: string }> = [{ role: 'system', content: systemPrompt }]
       for (const msg of updatedMessages) {
@@ -193,11 +209,14 @@ export default function AgentPanel() {
       let maxIter = 5, finalResponse = ''
       while (maxIter-- > 0) {
         const streamId = uuid()
+        currentStreamIdRef.current = streamId
         let fullText = ''
         setStreamingText('')
         const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => { if (sid === streamId) { fullText += chunk; setStreamingText(fullText) } })
-        try { await window.electronAPI.aiChatStream(streamId, agentModel, llmMessages) } finally { cleanup() }
+        try { await window.electronAPI.aiChatStream(streamId, agentModel, llmMessages) } finally { cleanup(); currentStreamIdRef.current = null }
         setStreamingText('')
+        // If the user aborted, fullText may be empty — bail without looping into another tool call.
+        if (!fullText) { finalResponse = ''; break }
 
         if (hasToolCalls(fullText)) {
           for (const call of parseToolCalls(fullText)) {
@@ -234,7 +253,7 @@ export default function AgentPanel() {
       setActiveConv({ ...conv, messages: [...updatedMessages, { id: uuid(), role: 'assistant', content: `Agent 出错：${err.message}`, timestamp: new Date().toISOString() }] })
     }
     setStreaming(false)
-  }, [input, streaming, activeConv, agentModel, memory, buildContext, storeHelpers, skills])
+  }, [input, streaming, activeConv, agentModel, memory, buildContext, storeHelpers])
 
   // ===== Insight generation =====
   const generateInsight = useCallback(async () => {
@@ -242,6 +261,7 @@ export default function AgentPanel() {
     setGeneratingInsight(true)
 
     const streamId = uuid()
+    currentStreamIdRef.current = streamId
     let fullText = ''
 
     const prompt = `你是 Hermes 研究助手的分析模块。基于以下用户行为记录，生成一份简短的研究洞察报告（3-5 个要点）。
@@ -267,7 +287,7 @@ ${memory.slice(-3000)}`
         { role: 'system', content: '你是一个专注于学术研究行为分析的AI助手。' },
         { role: 'user', content: prompt },
       ])
-    } finally { cleanup() }
+    } finally { cleanup(); currentStreamIdRef.current = null }
 
     setStreamingText('')
     if (fullText) {
@@ -301,6 +321,7 @@ ${memory.slice(-3000)}`
       // 2. Build prompt + stream AI response
       const { system, user } = buildApprenticePrompt(ctx)
       const streamId = uuid()
+      currentStreamIdRef.current = streamId
       let fullText = ''
       const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => {
         if (sid === streamId) { fullText += chunk; setApprenticeStreamText(fullText) }
@@ -311,7 +332,7 @@ ${memory.slice(-3000)}`
           { role: 'user', content: user },
         ])
         if (!res.success) throw new Error(res.error || 'AI 调用失败')
-      } finally { cleanup() }
+      } finally { cleanup(); currentStreamIdRef.current = null }
 
       if (!fullText.trim()) throw new Error('AI 未返回任何内容')
 
@@ -336,8 +357,63 @@ ${memory.slice(-3000)}`
     if (r.success && r.content) {
       setCurrentApprenticeWeek(weekCode)
       setCurrentApprenticeContent(r.content)
+      // Switching weeks resets the follow-up dialogue — questions are tied
+      // to a specific report, not portable across weeks.
+      setDialogueHistory([])
+      setDialogueInput('')
+      setDialogueStreamText('')
     }
   }, [])
+
+  // Send a follow-up question to the apprentice about the currently-viewed report
+  const sendDialogueQuestion = useCallback(async () => {
+    const q = dialogueInput.trim()
+    if (!q || !currentApprenticeContent || !currentApprenticeWeek || dialogueStreaming) return
+
+    // Capture current state, then clear input and add user turn immediately
+    // so the UI feels responsive (user sees their question appear).
+    const historyBefore = dialogueHistory
+    setDialogueHistory([...historyBefore, { role: 'user', content: q }])
+    setDialogueInput('')
+    setDialogueStreaming(true)
+    setDialogueStreamText('')
+
+    const userMsg = buildApprenticeDialogueUserMessage({
+      weeklyReport: currentApprenticeContent,
+      weekCode: currentApprenticeWeek,
+      history: historyBefore,
+      latestQuestion: q,
+    })
+
+    const streamId = uuid()
+    currentStreamIdRef.current = streamId
+    let fullText = ''
+    const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => {
+      if (sid !== streamId) return
+      fullText += chunk
+      setDialogueStreamText(fullText)
+    })
+    try {
+      const res = await window.electronAPI.aiChatStream(streamId, agentModel, [
+        { role: 'system', content: APPRENTICE_DIALOGUE_SYSTEM_PROMPT },
+        { role: 'user', content: userMsg },
+      ])
+      if (!res.success) {
+        fullText = `（学徒暂时答不上来：${res.error || '未知错误'}）`
+      } else if (res.text) {
+        fullText = res.text
+      }
+    } catch (err: any) {
+      fullText = `（出错了：${err.message || err}）`
+    } finally {
+      cleanup()
+      currentStreamIdRef.current = null
+    }
+
+    setDialogueHistory([...historyBefore, { role: 'user', content: q }, { role: 'assistant', content: fullText.trim() }])
+    setDialogueStreaming(false)
+    setDialogueStreamText('')
+  }, [dialogueInput, currentApprenticeContent, currentApprenticeWeek, dialogueHistory, dialogueStreaming, agentModel])
 
   const deleteApprenticeWeek = useCallback(async (weekCode: string) => {
     if (!confirm(`删除 ${weekCode} 的观察报告？`)) return
@@ -357,27 +433,8 @@ ${memory.slice(-3000)}`
     }
   }, [currentApprenticeWeek, loadApprenticeWeek])
 
-  // ===== Skill CRUD =====
-  const saveSkill = useCallback(async (skill: HermesSkill) => {
-    const updated = skills.find(s => s.id === skill.id)
-      ? skills.map(s => s.id === skill.id ? skill : s)
-      : [...skills, skill]
-    setSkills(updated)
-    await window.electronAPI.agentSaveSkills(updated)
-    setEditingSkill(null)
-  }, [skills])
-
-  const deleteSkill = useCallback(async (id: string) => {
-    const updated = skills.filter(s => s.id !== id)
-    setSkills(updated)
-    await window.electronAPI.agentSaveSkills(updated)
-  }, [skills])
-
-  const toggleSkill = useCallback(async (id: string) => {
-    const updated = skills.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s)
-    setSkills(updated)
-    await window.electronAPI.agentSaveSkills(updated)
-  }, [skills])
+  // Skill CRUD (saveSkill / deleteSkill / toggleSkill) and the Skills tab UI
+  // were removed in batch 28. See the note at the top of this file for why.
 
   // ===== Render helpers =====
   const displayMessages = activeConv?.messages.filter(m => m.role === 'user' || m.role === 'assistant') || []
@@ -412,9 +469,6 @@ ${memory.slice(-3000)}`
         </button>
         <button style={tabStyle('insights')} onClick={() => setTab('insights')}>
           洞察{behaviorCount > 0 && <span style={{ fontSize: 9, marginLeft: 3, opacity: 0.6 }}>({behaviorCount})</span>}
-        </button>
-        <button style={tabStyle('skills')} onClick={() => setTab('skills')}>
-          技能库{skills.length > 0 && <span style={{ fontSize: 9, marginLeft: 3, opacity: 0.6 }}>({BUILTIN_TOOLS.length + skills.length})</span>}
         </button>
       </div>
 
@@ -451,7 +505,7 @@ ${memory.slice(-3000)}`
                     ? { background: 'var(--accent)', color: '#fff', borderBottomRightRadius: 2 }
                     : { background: 'var(--bg-warm)', color: 'var(--text)', border: '1px solid var(--border-light)', borderBottomLeftRadius: 2 }),
                 }}>
-                  {msg.role === 'assistant' ? <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>{msg.content}</ReactMarkdown> : <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>}
+                  {msg.role === 'assistant' ? <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{msg.content}</ReactMarkdown> : <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>}
                 </div>
               </div>
             ))}
@@ -460,7 +514,7 @@ ${memory.slice(-3000)}`
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
                 {toolStatus && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}><span className="loading-spinner" style={{ width: 10, height: 10 }} />{toolStatus}</div>}
                 <div style={{ maxWidth: '90%', padding: '8px 12px', borderRadius: 10, background: 'var(--bg-warm)', border: '1px solid var(--border-light)', borderBottomLeftRadius: 2, fontSize: 13, lineHeight: 1.7 }}>
-                  {streamingText ? <><ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>{cleanResponse(streamingText)}</ReactMarkdown><span className="streaming-cursor" /></> : <span style={{ color: 'var(--text-muted)' }}>{toolStatus ? '处理中...' : '思考中...'}</span>}
+                  {streamingText ? <><ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{cleanResponse(streamingText)}</ReactMarkdown><span className="streaming-cursor" /></> : <span style={{ color: 'var(--text-muted)' }}>{toolStatus ? '处理中...' : '思考中...'}</span>}
                 </div>
               </div>
             )}
@@ -479,9 +533,15 @@ ${memory.slice(-3000)}`
               onBlur={e => e.currentTarget.style.borderColor = 'var(--border)'}
               onInput={e => { const el = e.currentTarget; el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 100) + 'px' }}
             />
-            <button onClick={handleSend} disabled={!input.trim() || streaming} style={{ padding: '6px 10px', borderRadius: 8, border: 'none', cursor: 'pointer', background: input.trim() && !streaming ? 'var(--accent)' : 'var(--border)', color: '#fff', flexShrink: 0 }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-            </button>
+            {streaming ? (
+              <button onClick={handleStopStream} title="停止生成" style={{ padding: '6px 10px', borderRadius: 8, border: 'none', cursor: 'pointer', background: '#d32f2f', color: '#fff', flexShrink: 0 }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+              </button>
+            ) : (
+              <button onClick={handleSend} disabled={!input.trim()} style={{ padding: '6px 10px', borderRadius: 8, border: 'none', cursor: 'pointer', background: input.trim() ? 'var(--accent)' : 'var(--border)', color: '#fff', flexShrink: 0 }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              </button>
+            )}
           </div>
         </>
       )}
@@ -506,7 +566,7 @@ ${memory.slice(-3000)}`
               }}
             >
               {generatingApprentice && <span className="loading-spinner" style={{ width: 10, height: 10 }} />}
-              {generatingApprentice ? '学徒正在观察...' : '生成本周观察'}
+              {generatingApprentice ? '学徒正在翻你这周的痕迹…' : '让学徒写本周观察'}
             </button>
             {apprenticeEntries.length > 0 && (
               <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
@@ -518,25 +578,32 @@ ${memory.slice(-3000)}`
           {/* Intro (shown only when no logs exist) */}
           {apprenticeEntries.length === 0 && !generatingApprentice && (
             <div style={{
-              padding: '24px 18px', fontSize: 12, color: 'var(--text-secondary)',
-              lineHeight: 1.8, textAlign: 'left',
+              padding: '28px 22px', fontSize: 12.5, color: 'var(--text-secondary)',
+              lineHeight: 1.85, textAlign: 'left',
             }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 10 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 12 }}>
                 关于学徒
               </div>
-              <p style={{ marginBottom: 12 }}>
-                Hermes 不是帮你答题的助手,而是跟你并肩读书的同伴。
+              <p style={{ marginBottom: 14 }}>
+                学徒不是帮你答题的助手，是跟你并肩读书的同伴。
               </p>
-              <p style={{ marginBottom: 12 }}>
-                每次点击"生成本周观察",它会读过你这周的全部痕迹——打开了哪些文献、停在哪一页、写下了什么、
-                哪些立场和之前矛盾——然后写一份观察报告交给你。
+              <p style={{ marginBottom: 14 }}>
+                每周一次，它会把你这周的痕迹翻一遍——打开了哪些文献、停在哪一页、哪些立场和之前相反、
+                哪本书连着几天打开却没写东西——然后写一份观察交给你。
               </p>
-              <p style={{ marginBottom: 12 }}>
-                它说的是<strong>你自己没注意到的模式</strong>,不是总结流水账。
+              <p style={{ marginBottom: 14 }}>
+                它说的是<strong style={{ color: 'var(--text)' }}>你自己没注意到的模式</strong>，不是流水账。
+                读完可以追问它为什么这么看。
               </p>
-              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 16, fontStyle: 'italic' }}>
-                建议每周读书结束后生成一次。数据越多,观察越有意思。
-              </p>
+              <div style={{
+                marginTop: 22, padding: '10px 14px',
+                fontSize: 11, color: 'var(--text-muted)',
+                background: 'var(--bg-warm)', borderRadius: 6,
+                borderLeft: '2px solid var(--border)',
+                fontStyle: 'italic', lineHeight: 1.7,
+              }}>
+                一周结束后点一次最合适。数据越多，观察越有意思。
+              </div>
             </div>
           )}
 
@@ -545,7 +612,7 @@ ${memory.slice(-3000)}`
             <div style={{ flex: 1, overflow: 'auto', padding: '14px 18px', background: 'var(--bg-warm)' }}>
               <div className="annotation-markdown" style={{ fontSize: 13, lineHeight: 1.8 }}>
                 <ReactMarkdown
-                  rehypePlugins={[rehypeRaw, rehypeKatex]}
+                  rehypePlugins={[rehypeKatex]}
                   remarkPlugins={[remarkMath]}
                 >
                   {apprenticeStreamText}
@@ -554,16 +621,127 @@ ${memory.slice(-3000)}`
             </div>
           )}
 
-          {/* Current log */}
+          {/* Current log + follow-up dialogue */}
           {!generatingApprentice && currentApprenticeContent && (
             <div style={{ flex: 1, overflow: 'auto', padding: '14px 18px' }}>
               <div className="annotation-markdown" style={{ fontSize: 13, lineHeight: 1.8, color: 'var(--text)' }}>
                 <ReactMarkdown
-                  rehypePlugins={[rehypeRaw, rehypeKatex]}
+                  rehypePlugins={[rehypeKatex]}
                   remarkPlugins={[remarkMath]}
                 >
                   {currentApprenticeContent}
                 </ReactMarkdown>
+              </div>
+
+              {/* Follow-up dialogue — conversation on top of the weekly report. */}
+              <div style={{
+                marginTop: 22,
+                paddingTop: 16,
+                borderTop: '1px dashed var(--border)',
+              }}>
+                <div style={{
+                  fontSize: 10, color: 'var(--text-muted)',
+                  letterSpacing: '0.05em', marginBottom: 10,
+                  textTransform: 'uppercase',
+                }}>
+                  追问学徒
+                </div>
+
+                {/* Dialogue bubbles */}
+                {dialogueHistory.map((m, i) => (
+                  <div key={i} style={{
+                    marginBottom: 12,
+                    display: 'flex',
+                    flexDirection: m.role === 'user' ? 'row-reverse' : 'row',
+                  }}>
+                    <div style={{
+                      maxWidth: '85%',
+                      padding: '8px 12px',
+                      borderRadius: 10,
+                      fontSize: 12.5,
+                      lineHeight: 1.7,
+                      background: m.role === 'user' ? 'var(--accent-soft)' : 'var(--bg-warm)',
+                      color: m.role === 'user' ? 'var(--accent-hover)' : 'var(--text)',
+                      border: '1px solid var(--border-light)',
+                    }}>
+                      {m.role === 'assistant' ? (
+                        <div className="annotation-markdown" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
+                          <ReactMarkdown rehypePlugins={[rehypeKatex]} remarkPlugins={[remarkMath]}>
+                            {m.content}
+                          </ReactMarkdown>
+                        </div>
+                      ) : (
+                        <div style={{ whiteSpace: 'pre-wrap' }}>{m.content}</div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+
+                {/* Streaming preview for the in-flight response */}
+                {dialogueStreaming && dialogueStreamText && (
+                  <div style={{ marginBottom: 12, display: 'flex' }}>
+                    <div style={{
+                      maxWidth: '85%', padding: '8px 12px', borderRadius: 10,
+                      fontSize: 12.5, lineHeight: 1.7,
+                      background: 'var(--bg-warm)', color: 'var(--text)',
+                      border: '1px solid var(--border-light)',
+                    }}>
+                      <div className="annotation-markdown" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
+                        <ReactMarkdown rehypePlugins={[rehypeKatex]} remarkPlugins={[remarkMath]}>
+                          {dialogueStreamText}
+                        </ReactMarkdown>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Input */}
+                <div style={{
+                  display: 'flex', gap: 6, marginTop: 8,
+                  alignItems: 'flex-end',
+                }}>
+                  <textarea
+                    value={dialogueInput}
+                    onChange={e => setDialogueInput(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault()
+                        sendDialogueQuestion()
+                      }
+                    }}
+                    placeholder={dialogueHistory.length === 0
+                      ? '追问：「立场摇摆指哪两条？」/「为什么觉得我卡住了？」'
+                      : '继续追问…'}
+                    disabled={dialogueStreaming}
+                    rows={2}
+                    style={{
+                      flex: 1, padding: '7px 10px',
+                      border: '1px solid var(--border)', borderRadius: 6,
+                      fontSize: 12, outline: 'none', resize: 'none',
+                      background: 'var(--bg)', color: 'var(--text)',
+                      fontFamily: 'inherit', lineHeight: 1.5,
+                    }}
+                  />
+                  <button
+                    onClick={sendDialogueQuestion}
+                    disabled={!dialogueInput.trim() || dialogueStreaming}
+                    style={{
+                      padding: '7px 14px', fontSize: 11, fontWeight: 500,
+                      border: 'none', borderRadius: 6,
+                      cursor: (!dialogueInput.trim() || dialogueStreaming) ? 'not-allowed' : 'pointer',
+                      background: (!dialogueInput.trim() || dialogueStreaming) ? 'var(--border)' : 'var(--accent)',
+                      color: (!dialogueInput.trim() || dialogueStreaming) ? 'var(--text-muted)' : '#fff',
+                    }}
+                  >
+                    {dialogueStreaming ? '…' : '追问'}
+                  </button>
+                </div>
+                <div style={{
+                  fontSize: 10, color: 'var(--text-muted)', marginTop: 6,
+                  lineHeight: 1.5,
+                }}>
+                  对话是临时的，不保存。切换周报会重置。
+                </div>
               </div>
             </div>
           )}
@@ -624,7 +802,7 @@ ${memory.slice(-3000)}`
 
             {generatingInsight && streamingText && (
               <div style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--bg-warm)', border: '1px solid var(--border-light)', fontSize: 12, lineHeight: 1.8 }}>
-                <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>{streamingText}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{streamingText}</ReactMarkdown>
                 <span className="streaming-cursor" />
               </div>
             )}
@@ -632,7 +810,7 @@ ${memory.slice(-3000)}`
             {!generatingInsight && insight && (
               <div style={{ padding: '10px 12px', borderRadius: 8, background: 'linear-gradient(135deg, var(--accent-soft), var(--bg-warm))', border: '1px solid var(--border-light)' }}>
                 <div style={{ fontSize: 12, lineHeight: 1.8, color: 'var(--text)' }}>
-                  <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>{insight.content}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{insight.content}</ReactMarkdown>
                 </div>
                 <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 6 }}>
                   基于 {insight.basedOn} 条行为记录 · {new Date(insight.generatedAt).toLocaleString('zh-CN')}
@@ -663,75 +841,7 @@ ${memory.slice(-3000)}`
         </div>
       )}
 
-      {/* ===== Tab: Skills ===== */}
-      {tab === 'skills' && (
-        <div style={{ flex: 1, overflow: 'auto', padding: '12px' }}>
-          {/* Custom skills */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>自定义技能</span>
-            <button onClick={() => setEditingSkill({
-              id: uuid(), name: '', description: '', type: 'custom',
-              prompt: '', trigger: '', enabled: true,
-              createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-            })} style={{ padding: '3px 10px', fontSize: 10, borderRadius: 4, cursor: 'pointer', background: 'var(--accent-soft)', border: '1px solid var(--accent)', color: 'var(--accent-hover)' }}>
-              + 新技能
-            </button>
-          </div>
-
-          {/* Skill editor */}
-          {editingSkill && (
-            <div style={{ padding: 10, marginBottom: 12, borderRadius: 8, border: '1px solid var(--accent)', background: 'var(--bg-warm)' }}>
-              <input value={editingSkill.name} onChange={e => setEditingSkill({ ...editingSkill, name: e.target.value })}
-                placeholder="技能名称（如：论文摘要提取）" style={{ width: '100%', padding: '4px 8px', marginBottom: 6, border: '1px solid var(--border)', borderRadius: 4, fontSize: 12, outline: 'none', background: 'var(--bg)' }} />
-              <input value={editingSkill.description} onChange={e => setEditingSkill({ ...editingSkill, description: e.target.value })}
-                placeholder="简短描述" style={{ width: '100%', padding: '4px 8px', marginBottom: 6, border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, outline: 'none', background: 'var(--bg)' }} />
-              <textarea value={editingSkill.prompt || ''} onChange={e => setEditingSkill({ ...editingSkill, prompt: e.target.value })}
-                placeholder="Prompt 指令（Hermes 对话时会参考这个指令）" rows={3}
-                style={{ width: '100%', padding: '4px 8px', marginBottom: 6, border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, outline: 'none', resize: 'vertical', background: 'var(--bg)', fontFamily: 'var(--font)' }} />
-              <input value={editingSkill.trigger || ''} onChange={e => setEditingSkill({ ...editingSkill, trigger: e.target.value })}
-                placeholder="触发条件（可选，如：阅读法学文献时）" style={{ width: '100%', padding: '4px 8px', marginBottom: 8, border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, outline: 'none', background: 'var(--bg)' }} />
-              <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-                <button onClick={() => setEditingSkill(null)} style={{ padding: '4px 12px', fontSize: 10, borderRadius: 4, border: '1px solid var(--border)', background: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>取消</button>
-                <button onClick={() => editingSkill.name && saveSkill({ ...editingSkill, updatedAt: new Date().toISOString() })}
-                  disabled={!editingSkill.name.trim()} style={{ padding: '4px 12px', fontSize: 10, borderRadius: 4, border: 'none', background: 'var(--accent)', color: '#fff', cursor: 'pointer' }}>保存</button>
-              </div>
-            </div>
-          )}
-
-          {/* Custom skill list */}
-          {skills.filter(s => s.type !== 'builtin').map(skill => (
-            <div key={skill.id} style={{ padding: '8px 10px', marginBottom: 6, borderRadius: 6, border: '1px solid var(--border)', background: skill.enabled ? 'var(--bg-warm)' : 'var(--bg)', opacity: skill.enabled ? 1 : 0.5 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text)', flex: 1 }}>{skill.name}</span>
-                <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: skill.type === 'learned' ? '#d4edda' : 'var(--accent-soft)', color: skill.type === 'learned' ? '#155724' : 'var(--accent-hover)' }}>
-                  {skill.type === 'learned' ? '已学习' : '自定义'}
-                </span>
-                <button onClick={() => toggleSkill(skill.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: skill.enabled ? 'var(--success)' : 'var(--text-muted)' }}>
-                  {skill.enabled ? '开' : '关'}
-                </button>
-                <button onClick={() => setEditingSkill(skill)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 10, color: 'var(--text-muted)' }}>编辑</button>
-                <button onClick={() => deleteSkill(skill.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 10, color: 'var(--danger)' }}>删除</button>
-              </div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>{skill.description}</div>
-            </div>
-          ))}
-
-          {skills.filter(s => s.type !== 'builtin').length === 0 && !editingSkill && (
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center', padding: '12px 0', marginBottom: 16 }}>
-              点击「+ 新技能」添加自定义 Prompt 指令
-            </div>
-          )}
-
-          {/* Built-in tools */}
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginTop: 16, marginBottom: 8 }}>内置工具</div>
-          {BUILTIN_TOOLS.map(tool => (
-            <div key={tool.name} style={{ padding: '6px 10px', marginBottom: 4, borderRadius: 6, background: 'var(--bg)', display: 'flex', alignItems: 'center', gap: 8 }}>
-              <code style={{ fontSize: 10, color: 'var(--accent)', background: 'var(--accent-soft)', padding: '1px 6px', borderRadius: 4 }}>{tool.name}</code>
-              <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{tool.desc}</span>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Skills tab removed in batch 28 — see note at top of file. */}
     </div>
   )
 }

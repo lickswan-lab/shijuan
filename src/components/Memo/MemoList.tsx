@@ -128,7 +128,14 @@ function MemoFolderItem({
             重命名
           </div>
           <div
-            onClick={() => { onDeleteFolder(folder.id); setFolderMenu(null) }}
+            onClick={() => {
+              const childCount = memos.filter(m => m.folderId === folder.id).length
+              const msg = childCount > 0
+                ? `删除文件夹「${folder.name}」？\n\n文件夹内的 ${childCount} 条笔记会移回根目录（不会被删除）。`
+                : `删除空文件夹「${folder.name}」？`
+              if (!window.confirm(msg)) { setFolderMenu(null); return }
+              onDeleteFolder(folder.id); setFolderMenu(null)
+            }}
             style={{ padding: '7px 14px', fontSize: 12, cursor: 'pointer', color: 'var(--danger)' }}
             onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
@@ -244,6 +251,8 @@ export default function MemoList() {
   }
 
   const handleBatchDelete = () => {
+    if (selectedIds.size === 0) return
+    if (!window.confirm(`删除选中的 ${selectedIds.size} 条笔记？\n\n此操作无法撤销。`)) return
     selectedIds.forEach(id => {
       deleteMemo(id)
       if (activeMemoId === id) setActiveMemo(null)
@@ -282,6 +291,13 @@ export default function MemoList() {
   }
 
   const handleDelete = (id: string) => {
+    const memo = memos.find(m => m.id === id)
+    const title = memo?.title || '无标题'
+    if (!window.confirm(`删除笔记「${title}」？\n\n此操作无法撤销。`)) {
+      setMenuMemoId(null)
+      setMenuPos(null)
+      return
+    }
     deleteMemo(id)
     if (activeMemoId === id) setActiveMemo(null)
     setMenuMemoId(null)
@@ -422,9 +438,10 @@ export default function MemoList() {
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.3, marginBottom: 12 }}>
               <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
             </svg>
-            <div style={{ fontSize: 12, marginBottom: 6 }}>还没有笔记</div>
-            <div style={{ fontSize: 11, lineHeight: 1.6 }}>
-              在阅读文献时，可以将注释和 AI 回复作为「引用块」收集到笔记中，帮助你整合跨文献的思考。
+            <div style={{ fontSize: 12, marginBottom: 6, color: 'var(--text-secondary)' }}>这里会放你的笔记</div>
+            <div style={{ fontSize: 11, lineHeight: 1.7 }}>
+              读文献时把注释拖过来，跨文献的想法可以在这儿沉淀成一段。<br />
+              按 <kbd style={{ background: 'var(--bg-warm)', padding: '0 4px', borderRadius: 3, border: '1px solid var(--border)', fontSize: 10 }}>Ctrl+N</kbd> 或点上方 ＋ 开始写。
             </div>
           </div>
         )}

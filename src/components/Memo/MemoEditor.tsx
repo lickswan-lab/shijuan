@@ -1,10 +1,12 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { v4 as uuid } from 'uuid'
 import Markdown from 'react-markdown'
-import rehypeRaw from 'rehype-raw'
+import remarkMath from 'remark-math'
+import { KATEX_FORGIVING, sanitizeMath } from '../../utils/markdownConfig'
 // Vditor removed - using auto-switch textarea/preview instead
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
+import { openEntryById } from '../../utils/openEntryById'
 import type { BlockRef, HistoryEntry, Annotation, PdfMeta } from '../../types/library'
 
 // ===== Clean OCR text for cite panel =====
@@ -38,18 +40,15 @@ function cleanOcrTextForCite(raw: string): string {
 }
 
 // ===== Preprocess #N block references in memo content =====
-// The rendered span carries `data-block-idx` so a parent event delegate can wire click → jump.
+// Emits a markdown link with the `block:` pseudo-protocol; the Markdown renderer
+// replaces it with a styled span via `components.a`. No raw HTML, no XSS surface.
 function preprocessBlockRefs(content: string, blocks: BlockRef[]): string {
   if (blocks.length === 0) return content
   // Match #N where N is 1-99, NOT preceded by another # (avoids ## headings)
-  return content.replace(/(?<!#)#(\d{1,2})(?!\d)/g, (_match, num) => {
+  return content.replace(/(?<!#)#(\d{1,2})(?!\d)/g, (match, num) => {
     const idx = parseInt(num) - 1
-    if (idx < 0 || idx >= blocks.length) return _match
-    const block = blocks[idx]
-    const preview = block.blockContent.substring(0, 60).replace(/"/g, '&quot;').replace(/\n/g, ' ')
-    const authorLabel = block.blockAuthor === 'ai' ? 'AI' : '我'
-    const color = block.blockAuthor === 'ai' ? '#4caf50' : '#C8956C'
-    return `<span class="block-ref-inline" data-block-idx="${idx}" style="background:${color}15;border:1px solid ${color}40;border-radius:4px;padding:1px 6px;font-size:12px;cursor:pointer;display:inline-block;margin:0 2px" title="点击跳转 · ${block.entryTitle} · ${authorLabel}&#10;${preview}"><span style="color:${color};font-weight:600">#${num}</span> <span style="color:#666;font-size:11px">${preview.substring(0, 20)}${preview.length > 20 ? '…' : ''}</span></span>`
+    if (idx < 0 || idx >= blocks.length) return match
+    return `[#${num}](block:${idx})`
   })
 }
 
@@ -144,7 +143,7 @@ function CitePanel({ memoId, onClose }: { memoId: string; onClose: () => void })
   // Load meta + text content when entry selected
   useEffect(() => {
     if (!selectedEntryId) { setEntryMeta(null); setOcrText(null); return }
-    window.electronAPI.loadPdfMeta(selectedEntryId).then(m => setEntryMeta(m))
+    window.electronAPI.loadPdfMeta(selectedEntryId).then(m => setEntryMeta(m)).catch(() => setEntryMeta(null))
     const entry = entries.find(e => e.id === selectedEntryId)
     if (!entry?.absPath) return
 
@@ -443,26 +442,8 @@ function LiveMemoEditor({ content, onChange, blocks, memoId, onJumpBlock }: {
   const { addBlockToMemo } = useLibraryStore()
   const [dropPickerData, setDropPickerData] = useState<any>(null)
 
-  // Event delegation: click on any .block-ref-inline inside preview → jump to that block.
-  // Using delegation (instead of React props on the HTML spans) because the spans are
-  // rendered from HTML strings via rehype-raw — they don't accept React props.
-  useEffect(() => {
-    const el = previewRef.current
-    if (!el || editing) return
-    const handler = (e: MouseEvent) => {
-      const target = e.target as HTMLElement
-      const span = target.closest('.block-ref-inline') as HTMLElement | null
-      if (!span) return
-      e.stopPropagation()  // don't toggle into edit mode
-      e.preventDefault()
-      const idx = parseInt(span.dataset.blockIdx || '', 10)
-      if (!Number.isFinite(idx)) return
-      const block = blocks[idx]
-      if (block && onJumpBlock) onJumpBlock(block)
-    }
-    el.addEventListener('click', handler, true)  // capture phase → runs before parent click
-    return () => el.removeEventListener('click', handler, true)
-  }, [blocks, editing, content, onJumpBlock])
+  // Block refs now render via the Markdown `components.a` mapping below — no event
+  // delegation needed because React wires onClick directly on the span.
 
   useEffect(() => {
     if (editing && textareaRef.current) {
@@ -597,8 +578,49 @@ function LiveMemoEditor({ content, onChange, blocks, memoId, onJumpBlock }: {
         >
           {content ? (
             <div className="annotation-markdown" style={{ fontSize: 14, lineHeight: 2 }}>
-              <Markdown rehypePlugins={[rehypeRaw]}>
-                {preprocessBlockRefs(content, blocks)}
+              <Markdown
+                remarkPlugins={[remarkMath]}
+                rehypePlugins={[KATEX_FORGIVING]}
+                components={{
+                  a: ({ href, children, ...rest }) => {
+                    if (href && href.startsWith('block:')) {
+                      const idx = parseInt(href.slice(6), 10)
+                      const block = blocks[idx]
+                      if (!block) return <>{children}</>
+                      const color = block.blockAuthor === 'ai' ? '#4caf50' : '#C8956C'
+                      const authorLabel = block.blockAuthor === 'ai' ? 'AI' : '我'
+                      const preview = block.blockContent.substring(0, 60).replace(/\n/g, ' ')
+                      const shortPreview = preview.substring(0, 20) + (preview.length > 20 ? '…' : '')
+                      return (
+                        <span
+                          className="block-ref-inline"
+                          style={{
+                            background: `${color}15`,
+                            border: `1px solid ${color}40`,
+                            borderRadius: 4,
+                            padding: '1px 6px',
+                            fontSize: 12,
+                            cursor: 'pointer',
+                            display: 'inline-block',
+                            margin: '0 2px',
+                          }}
+                          title={`点击跳转 · ${block.entryTitle} · ${authorLabel}\n${preview}`}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            e.preventDefault()
+                            onJumpBlock?.(block)
+                          }}
+                        >
+                          <span style={{ color, fontWeight: 600 }}>#{idx + 1}</span>{' '}
+                          <span style={{ color: '#666', fontSize: 11 }}>{shortPreview}</span>
+                        </span>
+                      )
+                    }
+                    return <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a>
+                  },
+                }}
+              >
+                {sanitizeMath(preprocessBlockRefs(content, blocks))}
               </Markdown>
             </div>
           ) : (
@@ -631,7 +653,7 @@ function BlockCard({ block, index, onRemove, onJump }: {
       onDragStart={handleDragStart}
       style={{
       padding: '8px 10px', marginBottom: 6, borderRadius: 6,
-      background: block.blockAuthor === 'ai' ? '#F5FAF0' : 'var(--bg-warm)',
+      background: block.blockAuthor === 'ai' ? 'rgba(76, 175, 80, 0.08)' : 'var(--bg-warm)',
       border: '1px solid var(--border-light)',
       fontSize: 12, cursor: 'grab',
       borderLeft: `3px solid ${block.blockAuthor === 'ai' ? 'var(--success)' : 'var(--accent)'}`,
@@ -779,6 +801,11 @@ export default function MemoEditor() {
   const [showExportMenu, setShowExportMenu] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The pending write waiting for the 800ms debounce — tracked with its memoId so
+  // that switching to a different memo (or unmounting) flushes it to the *correct*
+  // memo rather than dropping it.
+  const pendingSaveRef = useRef<{ memoId: string; content: string } | null>(null)
+  const prevActiveMemoIdRef = useRef<string | null>(activeMemoId)
 
   const memos = library?.memos || []
   const activeMemo = memos.find(m => m.id === activeMemoId) || null
@@ -790,16 +817,57 @@ export default function MemoEditor() {
     if (activeMemo.content == null) activeMemo.content = ''
   }
 
+  // Flush the pending debounced save immediately. Reads updateMemo from the store
+  // each time so the callback itself has zero deps → safe to use in unmount cleanup.
+  const flushPendingSave = useCallback(() => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current)
+      saveTimerRef.current = null
+    }
+    const pending = pendingSaveRef.current
+    if (pending) {
+      useLibraryStore.getState().updateMemo(pending.memoId, { content: pending.content })
+      pendingSaveRef.current = null
+    }
+  }, [])
+
   // Auto-save with debounce
   const handleContentChange = useCallback((newContent: string) => {
     if (!activeMemo) return
+    // If a save is pending for a DIFFERENT memo, flush it right away — otherwise the
+    // clearTimeout below would silently drop that memo's last typed characters.
+    const pending = pendingSaveRef.current
+    if (pending && pending.memoId !== activeMemo.id) {
+      useLibraryStore.getState().updateMemo(pending.memoId, { content: pending.content })
+      pendingSaveRef.current = null
+    }
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     activeMemo.content = newContent
     useLibraryStore.setState({ library: library ? { ...library } : null })
+    pendingSaveRef.current = { memoId: activeMemo.id, content: newContent }
     saveTimerRef.current = setTimeout(() => {
-      updateMemo(activeMemo.id, { content: newContent })
+      const p = pendingSaveRef.current
+      if (p) {
+        useLibraryStore.getState().updateMemo(p.memoId, { content: p.content })
+        pendingSaveRef.current = null
+      }
+      saveTimerRef.current = null
     }, 800)
-  }, [activeMemo, library, updateMemo])
+  }, [activeMemo, library])
+
+  // Memo switch: flush any pending write for the previous memo *before* we show the
+  // new one, so we don't carry a stale pending save into a different editing session.
+  useEffect(() => {
+    if (prevActiveMemoIdRef.current !== activeMemoId) {
+      flushPendingSave()
+      prevActiveMemoIdRef.current = activeMemoId
+    }
+  }, [activeMemoId, flushPendingSave])
+
+  // Unmount: commit the pending save so unsaved edits aren't lost.
+  useEffect(() => {
+    return () => { flushPendingSave() }
+  }, [flushPendingSave])
 
   const handleTitleSave = useCallback(() => {
     if (!activeMemo || !titleInput.trim()) { setEditingTitle(false); return }
@@ -809,21 +877,19 @@ export default function MemoEditor() {
 
   const handleDelete = useCallback(() => {
     if (!activeMemo) return
+    // Guard against accidental deletion — a note can represent hours of thought
+    // and there's no trash/undo for memos. Include the title so the user can
+    // sanity-check they're deleting the one they think they are.
+    if (!window.confirm(`删除笔记「${activeMemo.title || '无标题'}」？\n\n此操作无法撤销（笔记不进回收站）。`)) return
     deleteMemo(activeMemo.id)
     setActiveMemo(null)
   }, [activeMemo, deleteMemo, setActiveMemo])
 
-  const handleJumpToBlock = useCallback((block: BlockRef) => {
-    const entry = library?.entries.find(e => e.id === block.entryId)
-    if (entry) {
-      setActiveMemo(null)
-      useUiStore.getState().setSidebarTab('library')
-      useLibraryStore.getState().openEntry(entry)
-      setTimeout(() => {
-        useUiStore.getState().setActiveAnnotation(block.annotationId)
-      }, 300)
-    }
-  }, [library, setActiveMemo])
+  const handleJumpToBlock = useCallback(async (block: BlockRef) => {
+    setActiveMemo(null)
+    useUiStore.getState().setSidebarTab('library')
+    await openEntryById(block.entryId, { annotationId: block.annotationId })
+  }, [setActiveMemo])
 
   if (!activeMemo) {
     return (

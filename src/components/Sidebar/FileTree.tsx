@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, memo, DragEvent, MouseEvent } from 'react'
 import type { LibraryEntry, VirtualFolder } from '../../types/library'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
+import { openEntryById } from '../../utils/openEntryById'
 import MemoList from '../Memo/MemoList'
 
 // ===== Context Menu =====
@@ -325,7 +326,13 @@ function FolderItem({ folder }: { folder: VirtualFolder }) {
           onClose={() => setMenuPos(null)}
           items={[
             { label: '重命名', onClick: () => { setEditing(true); setEditName(folder.name) } },
-            { label: '删除分组', danger: true, onClick: () => deleteFolder(folder.id) },
+            { label: '删除分组', danger: true, onClick: () => {
+              const childCount = entries.length
+              const msg = childCount > 0
+                ? `删除分组「${folder.name}」？\n\n分组内的 ${childCount} 篇文献会移回根目录（文件本身不会被删除）。`
+                : `删除空分组「${folder.name}」？`
+              if (window.confirm(msg)) deleteFolder(folder.id)
+            } },
           ]}
         />
       )}
@@ -500,16 +507,11 @@ function LibraryPanel() {
           </div>
           {fullTextResults.map((r, i) => (
             <div key={i}
-              onClick={() => {
-                const entry = library?.entries.find(e => e.id === r.entryId)
-                if (entry) {
-                  // Set highlight BEFORE openEntry so the viewer applies it as soon as content mounts
-                  useUiStore.getState().setSearchHighlight({ query: searchQuery, pageNumber: r.pageNumber, targetEntryId: entry.id })
-                  openEntry(entry)
-                  if (r.annotationId) {
-                    useUiStore.getState().setActiveAnnotation(r.annotationId)
-                  }
-                }
+              onClick={async () => {
+                await openEntryById(r.entryId, {
+                  annotationId: r.annotationId,
+                  searchHighlight: { query: searchQuery, pageNumber: r.pageNumber },
+                })
                 setSearchQuery('')
                 setFullTextResults([])
               }}
@@ -628,8 +630,8 @@ function LibraryPanel() {
         onDrop={handleRootDrop}
       >
         {entries.length === 0 ? (
-          <div className="empty-state" style={{ padding: 24, fontSize: 12 }}>
-            <span>点击上方按钮导入 PDF 文件</span>
+          <div className="empty-state" style={{ padding: '28px 18px', fontSize: 12, lineHeight: 1.75, color: 'var(--text-muted)', textAlign: 'center' }}>
+            <span>点上方＋ 或把文件<br />拖进窗口任意位置</span>
           </div>
         ) : (
           <>

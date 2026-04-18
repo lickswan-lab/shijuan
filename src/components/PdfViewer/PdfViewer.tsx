@@ -3,8 +3,7 @@ import { Document, Page, pdfjs } from 'react-pdf'
 import Markdown from 'react-markdown'
 const ReactMarkdown = Markdown  // alias for compatibility
 import remarkMath from 'remark-math'
-import rehypeKatex from 'rehype-katex'
-import rehypeRaw from 'rehype-raw'
+import { KATEX_FORGIVING as rehypeKatex } from '../../utils/markdownConfig'
 import { v4 as uuid } from 'uuid'
 import 'react-pdf/dist/esm/Page/TextLayer.css'
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css'
@@ -1295,7 +1294,7 @@ function ImmersiveAnnotationBox({ toolbar, textSelection, annotations, onAnnotat
       {/* AI response streaming */}
       {aiResponse && (
         <div style={{ padding: '8px 10px', marginBottom: 8, borderRadius: 8, background: 'var(--bg-warm)', border: '1px solid var(--border-light)', fontSize: 13, lineHeight: 1.7, maxHeight: 240, overflow: 'auto' }}>
-          <ReactMarkdown rehypePlugins={[rehypeRaw]}>{aiResponse}</ReactMarkdown>
+          <ReactMarkdown>{aiResponse}</ReactMarkdown>
           {aiLoading && <span className="streaming-cursor" />}
         </div>
       )}
@@ -1376,7 +1375,11 @@ export default function PdfViewer() {
   // Page jump: input state + refs for the toolbar input
   const [pageJumpInput, setPageJumpInput] = useState('')
   const pageJumpRef = useRef<HTMLInputElement>(null)
-  const [rereadingReminder, setRereadingReminder] = useState<{ annCount: number; lastTime: string } | null>(null)
+  // Re-reading reminder: shown when user re-opens a doc they annotated before.
+  // annCount/lastTime are the fallback static info; aiVoice is the AI-generated
+  // single-sentence greeting that uses the user's own past notes as hooks.
+  // aiVoice is null while fetching or if AI isn't available (no key / failed).
+  const [rereadingReminder, setRereadingReminder] = useState<{ annCount: number; lastTime: string; aiVoice: string | null; aiLoading: boolean } | null>(null)
   const [ocrProgress, setOcrProgress] = useState<{ status: string } | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('pdf')
   const [ocrFullText, setOcrFullText] = useState<string | null>(null)
@@ -1417,23 +1420,23 @@ export default function PdfViewer() {
 
   const library = useLibraryStore(s => s.library)
 
-  // Load other entries' annotations for cross-entry append
+  // Load other entries' annotations for cross-entry append (parallel, not serial)
   const [otherEntryAnns, setOtherEntryAnns] = useState<OtherEntryAnns[]>([])
   useEffect(() => {
     if (!library || !currentEntry) { setOtherEntryAnns([]); return }
     let cancelled = false
     async function load() {
-      const others: OtherEntryAnns[] = []
-      for (const entry of library!.entries) {
-        if (entry.id === currentEntry!.id) continue
+      const targets = library!.entries.filter(e => e.id !== currentEntry!.id)
+      const results = await Promise.all(targets.map(async entry => {
         try {
           const meta = await window.electronAPI.loadPdfMeta(entry.id)
           if (meta?.annotations?.length) {
-            others.push({ entryId: entry.id, entryTitle: entry.title, annotations: meta.annotations })
+            return { entryId: entry.id, entryTitle: entry.title, annotations: meta.annotations }
           }
         } catch {}
-      }
-      if (!cancelled) setOtherEntryAnns(others)
+        return null
+      }))
+      if (!cancelled) setOtherEntryAnns(results.filter((x): x is OtherEntryAnns => x !== null))
     }
     load()
     return () => { cancelled = true }
@@ -1495,14 +1498,107 @@ export default function PdfViewer() {
 
     if (!currentEntry) return
 
-    // Re-reading detection: if this doc was opened before and has annotations, show reminder
+    // Re-reading detection: if this doc was opened before and has annotations,
+    // show the re-reading greeting. Has two layers:
+    //   1. Instant fallback: static "上次 X 日留下 N 条" text (works with no AI)
+    //   2. Async AI layer: a single-sentence "同伴" greeting quoting the
+    //      user's own past notes. Triggers only if AI is configured AND
+    //      the gap is meaningful (≥ 3 days). Replaces the static text when
+    //      it arrives. If AI fails or isn't configured, static stays.
     if (currentEntry.lastOpenedAt) {
-      window.electronAPI.loadPdfMeta(currentEntry.id).then(meta => {
-        if (meta && meta.annotations && meta.annotations.length >= 2) {
-          setRereadingReminder({
-            annCount: meta.annotations.length,
-            lastTime: new Date(currentEntry.lastOpenedAt!).toLocaleDateString('zh-CN'),
+      const capturedEntryId = currentEntry.id
+      window.electronAPI.loadPdfMeta(currentEntry.id).then(async meta => {
+        if (!meta || !meta.annotations || meta.annotations.length < 2) return
+        // Only act if we're still on the same entry (user may have switched)
+        if (useLibraryStore.getState().currentEntry?.id !== capturedEntryId) return
+
+        const lastOpenMs = new Date(currentEntry.lastOpenedAt!).getTime()
+        const daysSince = Math.floor((Date.now() - lastOpenMs) / 86400000)
+
+        // Show the static layer immediately
+        setRereadingReminder({
+          annCount: meta.annotations.length,
+          lastTime: new Date(currentEntry.lastOpenedAt!).toLocaleDateString('zh-CN'),
+          aiVoice: null,
+          aiLoading: daysSince >= 3,   // we'll try AI for gaps ≥ 3 days
+        })
+
+        // Not worth an AI call for quick re-opens within 3 days
+        if (daysSince < 3) return
+
+        try {
+          // Gather user's recent notes on THIS doc for the AI to reference.
+          // Flatten all user-authored historyChain entries, sort newest-first, take top 5.
+          const userNotes: Array<{ selectedText: string; content: string; createdAt: string; pageNumber: number }> = []
+          for (const ann of meta.annotations) {
+            for (const h of ann.historyChain || []) {
+              if (h.author === 'user' && h.content) {
+                userNotes.push({
+                  selectedText: ann.anchor?.selectedText?.slice(0, 50) || '',
+                  content: h.content.slice(0, 80),
+                  createdAt: h.createdAt || ann.createdAt || '',
+                  pageNumber: ann.anchor?.pageNumber || 0,
+                })
+              }
+            }
+          }
+          userNotes.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+
+          // Find latest annotation's page for the "你上次停在第 X 页" hint
+          const mostRecent = userNotes[0]
+          const lastPage = mostRecent?.pageNumber || 0
+
+          // Get an available provider: prefer configured ones, otherwise skip AI
+          const configured = await window.electronAPI.aiGetConfigured()
+          if (!configured || configured.length === 0) {
+            // No AI available → keep static reminder
+            setRereadingReminder(prev => prev ? { ...prev, aiLoading: false } : null)
+            return
+          }
+          // Use the user's selected model if possible, else first configured
+          const preferredModel = useUiStore.getState().selectedAiModel
+          const [preferProvider] = preferredModel.split(':')
+          const use = configured.find(p => p.id === preferProvider) || configured[0]
+          const modelSpec = use.id === 'ollama' || use.id === 'claude_cli'
+            ? `${use.id}:${use.models[0]?.id || ''}`
+            : preferredModel
+
+          // Lazy-import the prompt to avoid impacting startup bundle size
+          const { REREADING_SYSTEM_PROMPT, buildRereadingUserMessage } = await import('./rereadingPrompt')
+          const userMsg = buildRereadingUserMessage({
+            entryTitle: currentEntry.title,
+            daysSinceLastOpen: daysSince,
+            totalAnnotations: meta.annotations.length,
+            lastAnnotationPage: lastPage,
+            recentUserNotes: userNotes.slice(0, 5).map(n => ({
+              selectedText: n.selectedText,
+              content: n.content,
+              daysAgo: Math.max(0, Math.floor((Date.now() - new Date(n.createdAt || Date.now()).getTime()) / 86400000)),
+            })),
           })
+
+          // Use non-streaming aiChat via the generic chat channel. It returns
+          // the full text in one shot — the greeting is <40 chars so streaming
+          // would add complexity for no visible benefit.
+          const streamId = uuid()
+          let fullText = ''
+          const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => {
+            if (sid === streamId) fullText += chunk
+          })
+          try {
+            const res = await window.electronAPI.aiChatStream(streamId, modelSpec, [
+              { role: 'system', content: REREADING_SYSTEM_PROMPT },
+              { role: 'user', content: userMsg },
+            ])
+            if (res.success && res.text) fullText = res.text
+          } finally { cleanup() }
+
+          // Still on same entry?
+          if (useLibraryStore.getState().currentEntry?.id !== capturedEntryId) return
+          setRereadingReminder(prev => prev ? { ...prev, aiVoice: fullText.trim() || null, aiLoading: false } : null)
+        } catch (err) {
+          console.warn('[rereading] AI greeting failed:', err)
+          setRereadingReminder(prev => prev ? { ...prev, aiLoading: false } : null)
         }
       }).catch(() => {})
     }
@@ -1851,10 +1947,11 @@ export default function PdfViewer() {
     }
   }, [immersiveMode])
 
-  // ESC to exit immersive mode
+  // ESC to exit immersive mode. Read state via getState() so the handler stays current
+  // even though we only want to attach the listener once.
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && immersiveMode) {
+      if (e.key === 'Escape' && useUiStore.getState().immersiveMode) {
         useUiStore.getState().setImmersiveMode(false)
       }
     }
@@ -1865,7 +1962,7 @@ export default function PdfViewer() {
   // Also listen for fullscreen exit (browser ESC exits fullscreen before our handler)
   useEffect(() => {
     const handleFsChange = () => {
-      if (!document.fullscreenElement && immersiveMode) {
+      if (!document.fullscreenElement && useUiStore.getState().immersiveMode) {
         useUiStore.getState().setImmersiveMode(false)
       }
     }
@@ -1905,7 +2002,13 @@ export default function PdfViewer() {
     const selectedText = toolbar.text
 
     // Load target entry's meta, add a link HistoryEntry, save
-    const meta = await window.electronAPI.loadPdfMeta(targetEntryId)
+    let meta
+    try {
+      meta = await window.electronAPI.loadPdfMeta(targetEntryId)
+    } catch (e: any) {
+      alert(`目标注释加载失败：${e?.message || e}`)
+      return
+    }
     if (!meta) return
     const ann = meta.annotations.find((a: Annotation) => a.id === targetAnnotationId)
     if (!ann) return
@@ -1976,53 +2079,136 @@ export default function PdfViewer() {
     const libraryEmpty = !library || library.entries.length === 0
     return (
       <div className="pdf-area">
-        <div className="empty-state" style={{ maxWidth: 520, margin: '0 auto', textAlign: 'center', padding: '40px 32px' }}>
+        <div className="empty-state" style={{ maxWidth: 720, margin: '0 auto', textAlign: 'left', padding: '32px 32px 48px' }}>
           {libraryEmpty ? (
             <>
-              <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--text)', marginBottom: 14 }}>
-                欢迎使用拾卷
+              {/* Hero: what shijuan actually is (not "yet another PDF reader") */}
+              <div style={{ textAlign: 'center', marginBottom: 28 }}>
+                <div style={{ fontSize: 24, fontWeight: 600, color: 'var(--text)', marginBottom: 8 }}>
+                  拾卷
+                </div>
+                <div style={{ fontSize: 14, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+                  不是又一个 PDF 阅读器 ——<br />
+                  一个<strong style={{ color: 'var(--accent)' }}>陪你读书的同伴</strong>，看见你自己看不见的阅读模式
+                </div>
               </div>
-              <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.9, marginBottom: 22 }}>
-                本地优先的学术文献管理工具<br />
-                导入、阅读、注释、关联思考 —— 都在一个温暖的界面里
-              </div>
-              <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 26 }}>
+
+              {/* Primary action + quick ways in */}
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 28, flexWrap: 'wrap' }}>
                 <button
                   className="btn btn-primary"
-                  style={{ padding: '8px 18px', fontSize: 13 }}
+                  style={{ padding: '9px 22px', fontSize: 13 }}
                   onClick={() => useLibraryStore.getState().importFiles()}
                 >
                   导入文件
                 </button>
                 <button
                   className="btn"
-                  style={{ padding: '8px 18px', fontSize: 13 }}
+                  style={{ padding: '9px 22px', fontSize: 13 }}
                   onClick={() => useLibraryStore.getState().importFolder()}
                 >
                   导入文件夹
                 </button>
-              </div>
-              <div style={{
-                textAlign: 'left', fontSize: 12, color: 'var(--text-muted)',
-                background: 'var(--bg-warm)', padding: '14px 18px', borderRadius: 10,
-                border: '1px solid var(--border-light)',
-              }}>
-                <div style={{ fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>开始之前：</div>
-                <div style={{ lineHeight: 1.9 }}>
-                  • 支持 PDF · EPUB · DOCX · HTML · TXT · Markdown<br />
-                  • 扫描件 PDF 可通过设置里的 <strong>智谱 GLM API Key</strong> 做 OCR 识别<br />
-                  • 所有数据存在本地 <code style={{ background: 'var(--bg)', padding: '0 5px', borderRadius: 3, fontSize: 11 }}>~/.lit-manager/</code>，不上传云端<br />
-                  • 支持拖拽文件到窗口任意位置导入
+                <div style={{
+                  fontSize: 11, color: 'var(--text-muted)', alignSelf: 'center',
+                  paddingLeft: 6,
+                }}>
+                  或直接<strong>拖拽文件</strong>到窗口
                 </div>
+              </div>
+
+              {/* Differentiation: the three AI voices */}
+              <div style={{
+                background: 'var(--bg-warm)', padding: '20px 22px', borderRadius: 12,
+                border: '1px solid var(--border-light)', marginBottom: 16,
+              }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 14 }}>
+                  拾卷独有的三种陪伴
+                </div>
+
+                {/* Voice 1: instant feedback */}
+                <div style={{ display: 'flex', gap: 12, marginBottom: 14, alignItems: 'flex-start' }}>
+                  <div style={{
+                    fontSize: 18, width: 28, height: 28, flexShrink: 0,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: 'var(--accent-soft)', color: 'var(--accent)',
+                    borderRadius: 6, fontWeight: 600,
+                  }}>1</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
+                      即时同伴 · 写每条注释时
+                    </div>
+                    <div style={{
+                      fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7,
+                      fontStyle: 'italic', paddingLeft: 10, borderLeft: '2px solid var(--border)',
+                    }}>
+                      <em>《区分》里你把"权力"写成资本的效果；这里写"资本即权力"方向反了。</em>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Voice 2: daily log */}
+                <div style={{ display: 'flex', gap: 12, marginBottom: 14, alignItems: 'flex-start' }}>
+                  <div style={{
+                    fontSize: 18, width: 28, height: 28, flexShrink: 0,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: 'var(--accent-soft)', color: 'var(--accent)',
+                    borderRadius: 6, fontWeight: 600,
+                  }}>2</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
+                      每日观察 · 每天自动生成
+                    </div>
+                    <div style={{
+                      fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7,
+                      fontStyle: 'italic', paddingLeft: 10, borderLeft: '2px solid var(--border)',
+                    }}>
+                      <em>你下午连续两次在《福柯》第 12 页停下——第一次写「权力即资本」，第二次划掉改成「资本是权力的表层」。中间间隔了 40 分钟。</em>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Voice 3: apprentice weekly */}
+                <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                  <div style={{
+                    fontSize: 18, width: 28, height: 28, flexShrink: 0,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: 'var(--accent-soft)', color: 'var(--accent)',
+                    borderRadius: 6, fontWeight: 600,
+                  }}>3</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
+                      学徒周报 · 每周一份观察报告
+                    </div>
+                    <div style={{
+                      fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7,
+                      fontStyle: 'italic', paddingLeft: 10, borderLeft: '2px solid var(--border)',
+                    }}>
+                      <em>这周你三次回到了《规训与惩罚》，但都没写下什么——你在等什么吗？《X》里你六月写过「权力是关系」，上周又回到那条注释但没再写。</em>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer: three-step quick start + data location */}
+              <div style={{
+                fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.9,
+                textAlign: 'center', padding: '0 8px',
+              }}>
+                上手三步：<strong>导入一本书</strong> → <strong>选中文字写想法</strong> → <strong>周一看学徒</strong><br />
+                <span style={{ opacity: 0.75 }}>
+                  支持 PDF · EPUB · DOCX · HTML · TXT · Markdown<br />
+                  所有数据在本地 <code style={{ background: 'var(--bg)', padding: '0 5px', borderRadius: 3, fontSize: 10 }}>~/.lit-manager/</code>，不上传云端 · 纯阅读和注释不需要 AI Key
+                </span>
               </div>
             </>
           ) : (
-            <>
+            <div style={{ textAlign: 'center', padding: '60px 20px 40px' }}>
               <span style={{ fontSize: 15, color: 'var(--text-secondary)' }}>从左侧选择文献开始阅读</span>
               <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, display: 'block' }}>
                 提示：按 <kbd style={{ background: 'var(--bg-warm)', padding: '1px 6px', borderRadius: 3, border: '1px solid var(--border)', fontSize: 10 }}>Ctrl+P</kbd> 快速搜索文献
               </span>
-            </>
+            </div>
           )}
         </div>
       </div>
@@ -2308,24 +2494,33 @@ export default function PdfViewer() {
           )
         )}
 
-        {/* 读后反刍: generate structured review memo from annotations */}
+        {/* 合上书 — AI-generated closing reflection memo from this book's annotations.
+            Fifth AI-companion surface alongside instant feedback / daily log /
+            weekly apprentice / reread greeting. Time scale: one book. */}
         {currentPdfMeta && currentPdfMeta.annotations.length >= 2 && (
           <button className="btn btn-sm" style={{ marginLeft: 8, fontSize: 11 }}
-            title="基于本文献的所有注释，AI 生成一份结构化的反刍笔记"
+            title="读完这本之后，让同伴帮你回看这次留下了什么"
             onClick={async () => {
               const annotations = currentPdfMeta.annotations
               if (annotations.length < 2) return
-
               const title = currentEntry?.title || '未知文献'
-              const annSummary = annotations.map((a, i) => {
-                const notes = a.historyChain
-                  .filter(h => h.author === 'user')
-                  .map(h => h.content)
-                  .join('; ')
-                return `${i + 1}. 「${a.anchor.selectedText.slice(0, 60)}」${notes ? ` — 笔记: ${notes.slice(0, 100)}` : ''}`
-              }).join('\n')
 
-              // Create memo with AI-generated review
+              // Map annotations into the shape closingPrompt expects
+              const annData = annotations
+                .slice()
+                .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+                .map(a => ({
+                  selectedText: a.anchor?.selectedText || '',
+                  pageNumber: a.anchor?.pageNumber || 0,
+                  createdAt: a.createdAt || '',
+                  userNotes: (a.historyChain || [])
+                    .filter(h => h.author === 'user')
+                    .map(h => h.content || ''),
+                }))
+
+              const { CLOSING_SYSTEM_PROMPT, buildClosingUserMessage } = await import('./closingPrompt')
+              const userMsg = buildClosingUserMessage({ entryTitle: title, annotations: annData })
+
               const model = useUiStore.getState().selectedAiModel
               const streamId = uuid()
               let fullText = ''
@@ -2333,23 +2528,28 @@ export default function PdfViewer() {
 
               try {
                 await window.electronAPI.aiChatStream(streamId, model, [
-                  { role: 'system', content: `你是学术阅读助手。用户读完了文献「${title}」并留下了一些注释。请基于这些注释生成一份结构化的「读后反刍」笔记。\n\n格式要求：\n1. **核心论点**（1-2句概括文献主旨）\n2. **我的标注与思考**（按注释整理，保留用户原话）\n3. **疑问与待深入**（从注释中提炼出值得继续探索的问题）\n4. **下次阅读时思考**（3个引导性问题）\n\n用「你」称呼用户。` },
-                  { role: 'user', content: `文献：${title}\n\n我的 ${annotations.length} 条注释：\n${annSummary}` },
+                  { role: 'system', content: CLOSING_SYSTEM_PROMPT },
+                  { role: 'user', content: userMsg },
                 ])
               } finally { cleanup() }
 
-              if (fullText) {
-                const memoContent = `# 读后反刍：${title}\n\n${fullText}`
+              if (fullText.trim()) {
+                // Title is plain and editable — no "反刍：" prefix forced upon user.
+                // Content is the AI's prose directly — no "# 读后反刍" shell heading
+                // since the new prompt already produces natural paragraphs.
                 const { createMemo } = useLibraryStore.getState()
                 const memo = await createMemo()
                 if (memo) {
-                  await useLibraryStore.getState().updateMemo(memo.id, { content: memoContent, title: `反刍：${title}` })
+                  await useLibraryStore.getState().updateMemo(memo.id, {
+                    content: fullText.trim(),
+                    title: `合上《${title}》`,
+                  })
                   useUiStore.getState().setActiveMemo(memo.id)
                 }
               }
             }}
           >
-            反刍
+            合上书
           </button>
         )}
 
@@ -2372,22 +2572,86 @@ export default function PdfViewer() {
         </button>}
       </div>
 
-      {/* Re-reading reminder */}
+      {/* Re-reading greeting. Two display modes:
+          - AI voice available: render the sentence in serif italic (quote-like),
+            with a subtle "— 同伴" attribution below. Feels like a whispered
+            note, not a banner.
+          - No AI (fallback / loading / failed): the old statistical text.
+          Either way there's a "查看注释" affordance and a close button. */}
       {rereadingReminder && (
         <div style={{
-          padding: '8px 16px', background: 'var(--accent-soft)', borderBottom: '1px solid var(--border)',
-          fontSize: 12, color: 'var(--accent-hover)', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '10px 18px',
+          background: 'var(--accent-soft)',
+          borderBottom: '1px solid var(--border)',
+          fontSize: 12,
+          color: 'var(--accent-hover)',
+          display: 'flex',
+          alignItems: 'flex-start',
+          justifyContent: 'space-between',
+          gap: 12,
         }}>
-          <span>
-            📖 你上次在 {rereadingReminder.lastTime} 阅读过这篇文献，留下了 {rereadingReminder.annCount} 条注释。
-            <button onClick={() => {
-              useUiStore.getState().toggleAnnotationPanel()
-              setRereadingReminder(null)
-            }} style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline', fontSize: 12, marginLeft: 4 }}>
-              查看注释
-            </button>
-          </span>
-          <button onClick={() => setRereadingReminder(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 14 }}>×</button>
+          <div style={{ flex: 1, lineHeight: 1.65 }}>
+            {rereadingReminder.aiVoice ? (
+              <>
+                <div style={{
+                  fontFamily: 'var(--font-serif)', fontStyle: 'italic',
+                  fontSize: 13, color: 'var(--text)',
+                }}>
+                  "{rereadingReminder.aiVoice}"
+                </div>
+                <div style={{
+                  fontSize: 10, color: 'var(--text-muted)', marginTop: 3,
+                  letterSpacing: '0.04em',
+                }}>
+                  — 同伴 · 距上次 {rereadingReminder.lastTime}
+                  <button
+                    onClick={() => {
+                      useUiStore.getState().toggleAnnotationPanel()
+                      setRereadingReminder(null)
+                    }}
+                    style={{
+                      background: 'none', border: 'none', color: 'var(--accent)',
+                      cursor: 'pointer', fontSize: 10, marginLeft: 8,
+                      padding: 0, textDecoration: 'underline',
+                    }}
+                  >
+                    查看旧注释
+                  </button>
+                </div>
+              </>
+            ) : rereadingReminder.aiLoading ? (
+              <>
+                <span className="loading-spinner" style={{ width: 10, height: 10, marginRight: 6, verticalAlign: 'middle' }} />
+                你上次在 {rereadingReminder.lastTime} 读过这本，留下 {rereadingReminder.annCount} 条注释…
+              </>
+            ) : (
+              <>
+                你上次在 {rereadingReminder.lastTime} 读过这本，留下了 {rereadingReminder.annCount} 条注释。
+                <button
+                  onClick={() => {
+                    useUiStore.getState().toggleAnnotationPanel()
+                    setRereadingReminder(null)
+                  }}
+                  style={{
+                    background: 'none', border: 'none', color: 'var(--accent)',
+                    cursor: 'pointer', textDecoration: 'underline', fontSize: 12,
+                    marginLeft: 6, padding: 0,
+                  }}
+                >
+                  查看注释
+                </button>
+              </>
+            )}
+          </div>
+          <button
+            onClick={() => setRereadingReminder(null)}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer',
+              color: 'var(--text-muted)', fontSize: 16, lineHeight: 1,
+              padding: '2px 4px', flexShrink: 0,
+            }}
+            title="关闭"
+          >×</button>
         </div>
       )}
 

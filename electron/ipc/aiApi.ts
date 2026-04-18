@@ -1,13 +1,19 @@
 import { ipcMain, app, BrowserWindow } from 'electron'
 import fs from 'fs/promises'
 import path from 'path'
+import { spawn } from 'child_process'
 import type { HistoryEntry } from '../../src/types/library'
+import { atomicWriteJson } from './library'
 
 // ===== GLM-OCR service limits (per their docs, 2026-04) =====
 // PDF: ≤ 50 MB, ≤ 100 pages. We stay well under both with a 40MB / 80-page soft cap
 // so that a PDF right at the edge (with large fonts / embedded images) doesn't 400.
 const GLM_OCR_MAX_PAGES = 80
 const GLM_OCR_MAX_BYTES = 40 * 1024 * 1024
+
+// Track in-flight streaming fetches so the UI can cancel them.
+// Key: streamId issued by the renderer (uuid). Cleared in the handler's finally block.
+const activeAbortControllers = new Map<string, AbortController>()
 
 // Split a PDF buffer into page-count-bounded chunks using pdf-lib.
 // Returns array of { chunkBuffer, startPage (1-indexed), endPage (1-indexed) }.
@@ -64,7 +70,23 @@ interface AiProvider {
   chatUrl: string
   models: { id: string; name: string }[]
   authHeader: (key: string) => Record<string, string>
+  // When true, the provider doesn't need an API key (e.g. Ollama running on
+  // localhost). Chat/Stream handlers skip the key-check and callers can
+  // surface it in UI as "available without key".
+  noKey?: boolean
+  // Where users go to grab an API key. Shown as a "获取 Key" link under the
+  // provider's settings card. Free tier hint is a short phrase we show next to
+  // the link to reduce "I don't want to pay" friction.
+  apiKeyUrl?: string
+  freeTierHint?: string
 }
+
+// Ollama runs a local daemon exposing an OpenAI-compatible API at
+// localhost:11434/v1. Zero API key, zero network — perfect for users who
+// want AI features without signing up anywhere. Downside: needs 8GB+ RAM
+// for small models; heavier models want 16GB. We surface this clearly in
+// the Settings UI so people don't install it and hit OOM.
+const OLLAMA_ENDPOINT = 'http://localhost:11434'
 
 const PROVIDERS: AiProvider[] = [
   {
@@ -79,6 +101,8 @@ const PROVIDERS: AiProvider[] = [
       { id: 'glm-4-flash', name: 'GLM-4-Flash' },
     ],
     authHeader: (key) => ({ 'Authorization': `Bearer ${key}` }),
+    apiKeyUrl: 'https://bigmodel.cn/usercenter/proj-mgmt/apikeys',
+    freeTierHint: 'GLM-4-Flash 完全免费；注册送新用户额度',
   },
   {
     id: 'openai',
@@ -91,6 +115,8 @@ const PROVIDERS: AiProvider[] = [
       { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex（编程）' },
     ],
     authHeader: (key) => ({ 'Authorization': `Bearer ${key}` }),
+    apiKeyUrl: 'https://platform.openai.com/api-keys',
+    freeTierHint: '需付费充值；国内访问不畅',
   },
   {
     id: 'claude',
@@ -102,6 +128,8 @@ const PROVIDERS: AiProvider[] = [
       { id: 'claude-haiku-4-5-20241022', name: 'Claude Haiku 4.5（快速）' },
     ],
     authHeader: (key) => ({ 'x-api-key': key, 'anthropic-version': '2023-06-01' }),
+    apiKeyUrl: 'https://console.anthropic.com/settings/keys',
+    freeTierHint: '需付费充值；国内访问不畅',
   },
   {
     id: 'gemini',
@@ -113,6 +141,8 @@ const PROVIDERS: AiProvider[] = [
       { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash-Lite（快速）' },
     ],
     authHeader: (key) => ({ 'Authorization': `Bearer ${key}` }),
+    apiKeyUrl: 'https://aistudio.google.com/app/apikey',
+    freeTierHint: 'AI Studio 有免费额度；国内访问不畅',
   },
   {
     id: 'kimi',
@@ -124,6 +154,8 @@ const PROVIDERS: AiProvider[] = [
       { id: 'moonshot-v1-32k', name: 'Moonshot V1 32K' },
     ],
     authHeader: (key) => ({ 'Authorization': `Bearer ${key}` }),
+    apiKeyUrl: 'https://platform.moonshot.cn/console/api-keys',
+    freeTierHint: '新用户送免费额度；长文本能力强',
   },
   {
     id: 'deepseek',
@@ -134,6 +166,8 @@ const PROVIDERS: AiProvider[] = [
       { id: 'deepseek-reasoner', name: 'DeepSeek R1（推理）' },
     ],
     authHeader: (key) => ({ 'Authorization': `Bearer ${key}` }),
+    apiKeyUrl: 'https://platform.deepseek.com/api_keys',
+    freeTierHint: '按用量付费，单价便宜；大陆可直连',
   },
   {
     id: 'doubao',
@@ -145,8 +179,212 @@ const PROVIDERS: AiProvider[] = [
       { id: 'doubao-seed-2-mini-32k', name: '豆包 2.0 Mini（快速）' },
     ],
     authHeader: (key) => ({ 'Authorization': `Bearer ${key}` }),
+    apiKeyUrl: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
+    freeTierHint: '火山方舟控制台；需实名认证',
+  },
+  {
+    // Claude Code CLI — spawn the user's locally-installed `claude` command
+    // in non-interactive mode (`claude -p "..."`). Zero key from the user's
+    // perspective: authentication was already done when they installed
+    // Claude Code. We don't stream — CLI gives a single response — but we
+    // synthesize a single onChunk call so the streaming code path still
+    // works uniformly. chatUrl is unused (spawn, not fetch).
+    id: 'claude_cli',
+    name: 'Claude Code（CLI·可选）',
+    chatUrl: '',  // unused — handler branches on id
+    models: [
+      { id: 'claude-code', name: 'Claude Code（使用你的已登录凭证）' },
+    ],
+    authHeader: () => ({}),
+    noKey: true,
+  },
+  {
+    // Ollama: optional zero-key local provider. Models list is populated at
+    // runtime from GET /api/tags — the user's locally-installed models.
+    // If Ollama isn't running, the provider simply shows up as "unavailable"
+    // in Settings rather than blocking any of the other providers.
+    //
+    // Not a replacement for hosted APIs: quality depends on model size, and
+    // decent local models need 8GB+ RAM (small 7B) or 16GB+ (13B+). We
+    // surface the hardware caveat in the Settings UI so users don't install
+    // it blindly and hit OOM.
+    id: 'ollama',
+    name: 'Ollama（本地模型·可选）',
+    chatUrl: `${OLLAMA_ENDPOINT}/v1/chat/completions`,
+    models: [],  // populated at runtime
+    authHeader: () => ({}),  // no auth
+    noKey: true,
   },
 ]
+
+// Claude Code CLI integration. Electron's PATH at launch often differs from
+// the user's shell PATH (especially on macOS where GUI-launched apps don't
+// source .zshrc, and on Windows where Electron inherits a reduced env).
+// So "claude" might be installed and working from Terminal but unreachable
+// from inside Shijuan. We work around this by probing a list of likely paths
+// and caching whichever one works.
+
+// Cache the working claude binary path across probes so we don't re-scan
+// every time Settings UI refreshes or a chat message kicks off.
+let cachedClaudeCliPath: string | null = null
+
+// Build candidate paths to try. Order matters — PATH first, then common
+// install locations. Users with exotic setups (Volta, fnm, specific nvm
+// versions) will fail this heuristic; they can add their path manually in
+// a future PR if anyone asks.
+function claudeCliCandidates(): string[] {
+  const home = process.env.HOME || process.env.USERPROFILE || ''
+  const appData = process.env.APPDATA || ''
+  const localAppData = process.env.LOCALAPPDATA || ''
+  const programFiles = process.env.PROGRAMFILES || 'C:\\Program Files'
+
+  if (process.platform === 'win32') {
+    return [
+      'claude',
+      'claude.cmd',
+      'claude.exe',
+      appData && path.join(appData, 'npm', 'claude.cmd'),
+      appData && path.join(appData, 'npm', 'claude'),
+      localAppData && path.join(localAppData, 'Programs', 'claude', 'claude.exe'),
+      localAppData && path.join(localAppData, 'npm', 'claude.cmd'),
+      home && path.join(home, '.local', 'bin', 'claude.exe'),
+      path.join(programFiles, 'Claude Code', 'claude.exe'),
+    ].filter(Boolean) as string[]
+  }
+  // macOS / Linux
+  return [
+    'claude',
+    '/usr/local/bin/claude',
+    '/opt/homebrew/bin/claude',
+    home && path.join(home, '.local', 'bin', 'claude'),
+    home && path.join(home, '.npm-global', 'bin', 'claude'),
+    home && path.join(home, 'bin', 'claude'),
+  ].filter(Boolean) as string[]
+}
+
+// Try a single binary path with --version. Returns the version string if it
+// works, or null. Uses shell: true for bare names (so OS can resolve PATH)
+// and shell: false for absolute paths (to avoid an extra cmd.exe/shell layer).
+function tryClaudeBinary(candidate: string, timeoutMs = 2000): Promise<string | null> {
+  const isAbsolute = candidate.includes(path.sep) || /^[a-zA-Z]:/.test(candidate)
+  return new Promise((resolve) => {
+    try {
+      const proc = spawn(candidate, ['--version'], { shell: !isAbsolute })
+      let out = ''
+      const timer = setTimeout(() => { try { proc.kill() } catch { /* ignore */ } resolve(null) }, timeoutMs)
+      proc.stdout.on('data', (d: Buffer) => { out += d.toString('utf-8') })
+      proc.on('error', () => { clearTimeout(timer); resolve(null) })
+      proc.on('close', (code) => {
+        clearTimeout(timer)
+        if (code === 0 && out.trim()) resolve(out.trim())
+        else resolve(null)
+      })
+    } catch {
+      resolve(null)
+    }
+  })
+}
+
+// Probe Claude Code availability across candidate paths. Caches the working
+// path for subsequent calls. If the cached path stops working (e.g. user
+// uninstalled), we fall through to re-probing.
+async function probeClaudeCli(): Promise<{ available: boolean; version: string | null; path?: string }> {
+  // Try cached path first
+  if (cachedClaudeCliPath) {
+    const v = await tryClaudeBinary(cachedClaudeCliPath)
+    if (v) return { available: true, version: v, path: cachedClaudeCliPath }
+    cachedClaudeCliPath = null   // cache invalidated
+  }
+  // Iterate candidates. Short-circuit on first hit.
+  for (const candidate of claudeCliCandidates()) {
+    const v = await tryClaudeBinary(candidate)
+    if (v) {
+      cachedClaudeCliPath = candidate
+      return { available: true, version: v, path: candidate }
+    }
+  }
+  return { available: false, version: null }
+}
+
+// Spawn the Claude Code CLI in non-interactive mode with the given prompt.
+// Uses the path cached by probeClaudeCli; falls back to bare "claude" via
+// shell if the cache is cold (this covers the happy path where shell: true
+// finds it via PATH).
+async function callClaudeCli(messages: Array<{ role: string; content: string }>, onChunk?: (text: string) => void, signal?: AbortSignal): Promise<string> {
+  // Collapse messages into a single prompt. Claude Code CLI's -p mode doesn't
+  // take multi-turn structured input, so we serialize: [System] + role-labeled
+  // turns. The CLI's own Claude model handles this format gracefully.
+  const system = messages.find(m => m.role === 'system')?.content || ''
+  const turns = messages.filter(m => m.role !== 'system')
+  const turnsText = turns.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n')
+  const prompt = system ? `[System instructions]\n${system}\n\n---\n\n${turnsText}` : turnsText
+
+  // Resolve the binary path: cached, or probe now (lazy probe), or bare fallback
+  if (!cachedClaudeCliPath) {
+    const probe = await probeClaudeCli()
+    if (!probe.available) {
+      throw new Error('未找到 claude CLI。请检查 Claude Code 是否已安装，且能在终端运行 `claude --version`')
+    }
+  }
+  const cliPath = cachedClaudeCliPath || 'claude'
+  const isAbsolute = cliPath.includes(path.sep) || /^[a-zA-Z]:/.test(cliPath)
+
+  return new Promise<string>((resolve, reject) => {
+    const proc = spawn(cliPath, ['-p', prompt], { shell: !isAbsolute })
+    let stdout = ''
+    let stderr = ''
+    let aborted = false
+
+    const onAbort = () => {
+      aborted = true
+      try { proc.kill() } catch { /* ignore */ }
+    }
+    if (signal) {
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort)
+    }
+
+    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString('utf-8') })
+    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString('utf-8') })
+    proc.on('error', (err) => {
+      reject(new Error(`无法启动 claude CLI：${err.message}（路径：${cliPath}）`))
+    })
+    proc.on('close', (code) => {
+      if (signal) signal.removeEventListener('abort', onAbort)
+      if (aborted) { resolve(stdout.trim() || ''); return }  // caller cancelled
+      if (code !== 0) {
+        reject(new Error(`claude CLI 返回错误码 ${code}: ${stderr.trim().slice(0, 400) || 'unknown'}`))
+        return
+      }
+      const result = stdout.trim()
+      if (onChunk) onChunk(result)
+      resolve(result)
+    })
+  })
+}
+
+// Probe the local Ollama daemon. Returns the list of user-installed models if
+// the daemon is up, or `{available:false}` if it's not reachable within the
+// short timeout. Short timeout is deliberate — Settings UI blocks on this and
+// we don't want it hanging for 30s when Ollama isn't installed.
+async function probeOllama(): Promise<{ available: boolean; models: Array<{ id: string; name: string }> }> {
+  try {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 1500)
+    const res = await fetch(`${OLLAMA_ENDPOINT}/api/tags`, { signal: ctrl.signal })
+    clearTimeout(timer)
+    if (!res.ok) return { available: false, models: [] }
+    const data: any = await res.json()
+    const rawModels = Array.isArray(data?.models) ? data.models : []
+    const models = rawModels.map((m: any) => ({
+      id: String(m.name || m.model || ''),
+      name: String(m.name || m.model || ''),
+    })).filter((m: any) => m.id)
+    return { available: true, models }
+  } catch {
+    return { available: false, models: [] }
+  }
+}
 
 // ===== API Key storage =====
 
@@ -166,7 +404,7 @@ async function loadApiKeys() {
 
 async function saveApiKeys() {
   await fs.mkdir(DATA_DIR, { recursive: true })
-  await fs.writeFile(KEYS_FILE, JSON.stringify(apiKeys, null, 2), 'utf-8')
+  await atomicWriteJson(KEYS_FILE, apiKeys)
 }
 
 // ===== Chat API call =====
@@ -175,8 +413,14 @@ export async function callChat(providerId: string, model: string, messages: Arra
   const provider = PROVIDERS.find(p => p.id === providerId)
   if (!provider) throw new Error(`未知的 AI 供应商: ${providerId}`)
 
-  const key = apiKeys[providerId]
-  if (!key) throw new Error(`${provider.name} API Key 未设置。请在设置中配置。`)
+  // noKey providers (Ollama / Claude CLI) skip the key check.
+  const key = provider.noKey ? '' : apiKeys[providerId]
+  if (!provider.noKey && !key) throw new Error(`${provider.name} API Key 未设置。请在设置中配置。`)
+
+  // Claude CLI: spawn `claude -p` instead of HTTP
+  if (providerId === 'claude_cli') {
+    return callClaudeCli(messages)
+  }
 
   // Claude uses a different request/response format
   if (providerId === 'claude') {
@@ -240,15 +484,21 @@ export async function callChatStream(
   model: string,
   messages: Array<{ role: string; content: string }>,
   onChunk: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<string> {
   const provider = PROVIDERS.find(p => p.id === providerId)
   if (!provider) throw new Error(`未知的 AI 供应商: ${providerId}`)
 
-  const key = apiKeys[providerId]
-  if (!key) throw new Error(`${provider.name} API Key 未设置。请在设置中配置。`)
+  const key = provider.noKey ? '' : apiKeys[providerId]
+  if (!provider.noKey && !key) throw new Error(`${provider.name} API Key 未设置。请在设置中配置。`)
+
+  // Claude CLI doesn't stream — synthesize a single chunk with the full output
+  if (providerId === 'claude_cli') {
+    return callClaudeCli(messages, onChunk, signal)
+  }
 
   if (providerId === 'claude') {
-    return callClaudeStream(key, model, messages, onChunk)
+    return callClaudeStream(key, model, messages, onChunk, signal)
   }
 
   // OpenAI-compatible streaming
@@ -259,6 +509,7 @@ export async function callChatStream(
       ...provider.authHeader(key),
     },
     body: JSON.stringify({ model, messages, stream: true }),
+    signal,
   })
 
   if (!response.ok) {
@@ -276,6 +527,7 @@ async function callClaudeStream(
   model: string,
   messages: Array<{ role: string; content: string }>,
   onChunk: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<string> {
   const systemMsg = messages.find(m => m.role === 'system')?.content || ''
   const chatMessages = messages.filter(m => m.role !== 'system').map(m => ({
@@ -297,6 +549,7 @@ async function callClaudeStream(
       system: systemMsg,
       messages: chatMessages,
     }),
+    signal,
   })
 
   if (!response.ok) {
@@ -401,19 +654,44 @@ export function registerAiApiIpc(): void {
   // Load keys on startup
   loadApiKeys()
 
-  // Get all providers info (for settings UI)
+  // Get all providers info (for settings UI). Ollama is special-cased: its
+  // "hasKey" means "local daemon is running with at least one model pulled",
+  // and models come from a live probe rather than a static list.
   ipcMain.handle('ai-get-providers', async () => {
-    const providers = PROVIDERS.map(p => ({
-      id: p.id,
-      name: p.name,
-      models: p.models,
-      hasKey: !!apiKeys[p.id],
-    }))
-    // Include STT provider status
-    providers.push(
-      { id: 'xfyun_stt', name: '讯飞转写', models: [], hasKey: !!apiKeys['xfyun_stt'] },
-      { id: 'aliyun_stt', name: '阿里云转写', models: [], hasKey: !!apiKeys['aliyun_stt'] },
-    )
+    // Probe both local providers in parallel so the Settings UI doesn't wait sequentially
+    const [ollamaProbe, cliProbe] = await Promise.all([probeOllama(), probeClaudeCli()])
+    const providers: Array<{ id: string; name: string; models: Array<{ id: string; name: string }>; hasKey: boolean; noKey?: boolean; apiKeyUrl?: string; freeTierHint?: string }> =
+      PROVIDERS.map(p => {
+        if (p.id === 'ollama') {
+          return {
+            id: p.id,
+            name: p.name,
+            models: ollamaProbe.models,
+            hasKey: ollamaProbe.available && ollamaProbe.models.length > 0,
+            noKey: true,
+          }
+        }
+        if (p.id === 'claude_cli') {
+          return {
+            id: p.id,
+            name: p.name,
+            models: p.models,
+            hasKey: cliProbe.available,
+            noKey: true,
+          }
+        }
+        return {
+          id: p.id,
+          name: p.name,
+          models: p.models,
+          hasKey: !!apiKeys[p.id],
+          apiKeyUrl: p.apiKeyUrl,
+          freeTierHint: p.freeTierHint,
+        }
+      })
+    // STT providers (xfyun/aliyun) were part of the dormant Lecture subsystem
+    // and have been removed from Settings UI. Keys may still exist in
+    // api-keys.json from older versions — they just won't show up here.
     return providers
   })
 
@@ -436,11 +714,35 @@ export function registerAiApiIpc(): void {
     return apiKeys[providerId] || null
   })
 
-  // Get configured providers (which have keys)
+  // Get configured providers. "Configured" means: key is set, OR for Ollama/
+  // CLI the local backend is reachable.
   ipcMain.handle('ai-get-configured', async () => {
-    return PROVIDERS
-      .filter(p => !!apiKeys[p.id])
-      .map(p => ({ id: p.id, name: p.name, models: p.models }))
+    const [ollamaProbe, cliProbe] = await Promise.all([probeOllama(), probeClaudeCli()])
+    const result: Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }> = []
+    for (const p of PROVIDERS) {
+      if (p.id === 'ollama') {
+        if (ollamaProbe.available && ollamaProbe.models.length > 0) {
+          result.push({ id: p.id, name: p.name, models: ollamaProbe.models })
+        }
+      } else if (p.id === 'claude_cli') {
+        if (cliProbe.available) {
+          result.push({ id: p.id, name: p.name, models: p.models })
+        }
+      } else if (apiKeys[p.id]) {
+        result.push({ id: p.id, name: p.name, models: p.models })
+      }
+    }
+    return result
+  })
+
+  // Probe Ollama on demand (used by Settings "refresh" button).
+  ipcMain.handle('ollama-probe', async () => {
+    return await probeOllama()
+  })
+
+  // Probe Claude CLI on demand.
+  ipcMain.handle('claude-cli-probe', async () => {
+    return await probeClaudeCli()
   })
 
   // === Legacy GLM-compatible handlers (keep for backward compat) ===
@@ -487,9 +789,42 @@ export function registerAiApiIpc(): void {
         const items = otherAnnotations.slice(0, 15).map(a => `[${a.entryTitle}]「${a.text}」→ ${a.note}`).join('\n')
         otherNotesContext = `\n\n用户在其他文献中的历史注释：\n${items}`
       }
+      // 即时反馈是拾卷里最高频的 AI 交互——用户每加一条注释都触发一次。
+      // 质量差会变骚扰，质量好会让人觉得"有个同伴在读"。
+      // 核心策略：宁可返回空字符串（默不作声），也不要说废话。返回 null 后前端不显示气泡。
       const result = await callChat('glm', 'glm-4-flash', [
-        { role: 'system', content: `你是学术文献阅读助手。用户正在阅读论文并写下了一条注释。请给出简短的即时反馈（1-3句话）。\n优先级：1.指出矛盾或呼应 2.补充隐含假设 3.延伸思考方向\n要求：没有有价值的反馈就回复空字符串。不要复述。语气简洁克制。中文回复。` },
-        { role: 'user', content: `论文原文片段：「${selectedText}」\n\n${ocrContext ? `页面上下文：${ocrContext.substring(0, 800)}\n\n` : ''}用户写的注释：${userNote}${otherNotesContext}` }
+        { role: 'system', content: `你是坐在读者旁边的同伴。他在文献里标了一段话、写下了一条注释。你只在真有话说时开口——没有就闭嘴。
+
+**只在这四种情况开口**：
+1. 他的注释和**其他文献中的旧注释**形成呼应或矛盾 → 指出具体是哪条
+2. 原文里有他没注意到的**隐含假设**或**概念歧义**，直接影响他的判断
+3. 他的注释其实把原文读反了或读窄了（罕见，但遇到要说）
+4. 他抛了个开放问题，你能给出一个**具体方向**（不是笼统鼓励）
+
+**任何一条都不成立时，返回空字符串。**
+
+**格式约束**：
+- 最多 2 句话。超过 2 句是失败。
+- 直接说内容，不要前置"这是一个..."、"我注意到..."。
+- 引用他旧注释时用文献名：**《X》里你写过「...」，和这条方向相反**。
+- 引用原文用「」。
+
+**严禁**（返回空字符串更好）：
+- "这是一个值得深入思考的问题"
+- "很有见地"/"很有洞察"/"很深刻"
+- "你可以从 X、Y、Z 三个角度..."（三个都说等于没说）
+- 把他的注释换个说法复述回去
+- "建议你..."（他没问你建议）
+- 夸饰词：非常、极其、显著、深入
+
+**示例**：
+- 好: \`《区分》里你把"权力"写成资本的效果；这里写"资本即权力"方向反了。\`
+- 好: \`"规训"这里指空间安排，不是主动惩罚——他在书后半段区分了这两个词。\`
+- 好: \`（返回空字符串——没有能加的）\`
+- 坏: \`这是一个非常重要的问题，涉及 XX 的本质，建议你从 A、B、C 三方面思考。\`
+
+中文回复。宁可沉默，不说废话。` },
+        { role: 'user', content: `原文片段：「${selectedText}」\n\n${ocrContext ? `页面上下文：${ocrContext.substring(0, 800)}\n\n` : ''}他写的注释：${userNote}${otherNotesContext}` }
       ])
       return { success: true, text: result.trim() || null }
     } catch (err: any) {
@@ -536,6 +871,8 @@ export function registerAiApiIpc(): void {
   // === Streaming chat ===
 
   ipcMain.handle('ai-chat-stream', async (event, streamId: string, providerId: string, model: string, messages: Array<{ role: string; content: string }>) => {
+    const controller = new AbortController()
+    activeAbortControllers.set(streamId, controller)
     try {
       // Parse model spec if combined format
       let pId = providerId
@@ -547,13 +884,29 @@ export function registerAiApiIpc(): void {
 
       const result = await callChatStream(pId, mId, messages, (chunk) => {
         try { event.sender.send('ai-stream-chunk', streamId, chunk) } catch {}
-      })
+      }, controller.signal)
       event.sender.send('ai-stream-done', streamId, result)
       return { success: true, text: result }
     } catch (err: any) {
+      if (controller.signal.aborted || err?.name === 'AbortError') {
+        event.sender.send('ai-stream-error', streamId, '已取消')
+        return { success: false, error: '已取消', aborted: true }
+      }
       event.sender.send('ai-stream-error', streamId, err.message)
       return { success: false, error: err.message }
+    } finally {
+      activeAbortControllers.delete(streamId)
     }
+  })
+
+  // Cancel an in-flight streaming request (Stop button, component unmount, etc.).
+  // Returns true if we found and aborted a matching stream.
+  ipcMain.handle('ai-abort-stream', (_event, streamId: string) => {
+    const ctrl = activeAbortControllers.get(streamId)
+    if (!ctrl) return false
+    try { ctrl.abort() } catch {}
+    activeAbortControllers.delete(streamId)
+    return true
   })
 
   // === OCR (GLM only) ===

@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid'
 import Markdown from 'react-markdown'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
+import { openEntryById } from '../../utils/openEntryById'
 import type { Annotation, HistoryEntry, BlockRef } from '../../types/library'
 
 // ===== Hermes background learning =====
@@ -496,36 +497,26 @@ export default function AnnotationPanel() {
     let cancelled = false
 
     async function loadOthers() {
-      const others: OtherEntryAnnotations[] = []
-      for (const entry of library!.entries) {
-        if (entry.id === currentEntry!.id) continue
+      const targets = library!.entries.filter(e => e.id !== currentEntry!.id)
+      const results = await Promise.all(targets.map(async entry => {
         try {
           const meta = await window.electronAPI.loadPdfMeta(entry.id)
-          if (meta && meta.annotations && meta.annotations.length > 0) {
-            others.push({
-              entryId: entry.id,
-              entryTitle: entry.title,
-              annotations: meta.annotations,
-            })
+          if (meta?.annotations?.length) {
+            return { entryId: entry.id, entryTitle: entry.title, annotations: meta.annotations }
           }
         } catch { /* skip */ }
-      }
-      if (!cancelled) setOtherEntryAnnotations(others)
+        return null
+      }))
+      if (!cancelled) setOtherEntryAnnotations(results.filter((x): x is OtherEntryAnnotations => x !== null))
     }
     loadOthers()
     return () => { cancelled = true }
   }, [library?.entries.length, currentEntry?.id])
 
   // Jump to another entry's annotation
-  const handleJumpToOtherAnnotation = useCallback((entryId: string, annotationId: string) => {
-    const entry = library?.entries.find(e => e.id === entryId)
-    if (entry) {
-      useLibraryStore.getState().openEntry(entry)
-      setTimeout(() => {
-        useUiStore.getState().setActiveAnnotation(annotationId)
-      }, 300)
-    }
-  }, [library])
+  const handleJumpToOtherAnnotation = useCallback(async (entryId: string, annotationId: string) => {
+    await openEntryById(entryId, { annotationId })
+  }, [])
 
   // Find the active annotation
   const activeAnnotation = currentPdfMeta?.annotations.find(a => a.id === activeAnnotationId)
@@ -574,32 +565,91 @@ export default function AnnotationPanel() {
     feedbackAnnotationId.current = annotationId
 
     try {
-      // Gather other annotations from current PDF as context
+      // Gather annotation context to feed the AI. Two sources, different weights:
+      //   1. Current document's other annotations (most relevant context)
+      //   2. Other documents' annotations (cross-library — the prompt's #1 "open
+      //      your mouth" condition is "echoes / contradictions with OTHER docs",
+      //      so we MUST feed this; without it the AI can only find in-doc
+      //      connections and cross-lib callouts become impossible).
+      // Budget: ~20 items total (enough for Kimi/GLM 128k to digest, small
+      // enough that the request stays snappy).
       const otherAnnotations: Array<{ text: string; note: string; entryTitle: string }> = []
-      const entryTitle = currentEntry?.title || ''
+      const currentTitle = currentEntry?.title || ''
 
+      // 1) Current doc first — they're the most immediately relevant
       if (currentPdfMeta) {
         for (const ann of currentPdfMeta.annotations) {
           if (ann.id === annotationId) continue
           for (const h of ann.historyChain) {
-            if (h.author === 'user') {
+            if (h.author === 'user' && otherAnnotations.length < 8) {
               otherAnnotations.push({
                 text: ann.anchor.selectedText.substring(0, 100),
                 note: h.content.substring(0, 200),
-                entryTitle
+                entryTitle: currentTitle,
               })
             }
           }
         }
       }
 
-      // Get OCR context
+      // 2) Other documents — recent first (by entry.lastOpenedAt), capped so we
+      //    don't flood the IPC with dozens of meta reads on large libraries.
+      //    Parallel fetch with Promise.all, then sort/dedupe.
+      if (library && currentEntry) {
+        const otherEntries = library.entries
+          .filter(e => e.id !== currentEntry.id)
+          .sort((a, b) => (b.lastOpenedAt || b.addedAt || '').localeCompare(a.lastOpenedAt || a.addedAt || ''))
+          .slice(0, 12)  // only probe the 12 most recently-touched docs
+        const metas = await Promise.all(
+          otherEntries.map(e =>
+            window.electronAPI.loadPdfMeta(e.id).then(m => ({ entry: e, meta: m })).catch(() => ({ entry: e, meta: null }))
+          )
+        )
+        for (const { entry, meta } of metas) {
+          if (!meta?.annotations) continue
+          // Take up to 2 most-recent user annotations per other doc, newest-first
+          const userHistByAnn: Array<{ ann: any; h: any; ts: string }> = []
+          for (const ann of meta.annotations) {
+            for (const h of ann.historyChain || []) {
+              if (h.author === 'user') {
+                userHistByAnn.push({ ann, h, ts: h.createdAt || ann.createdAt || '' })
+              }
+            }
+          }
+          userHistByAnn.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''))
+          for (const x of userHistByAnn.slice(0, 2)) {
+            if (otherAnnotations.length >= 20) break
+            otherAnnotations.push({
+              text: x.ann.anchor?.selectedText?.substring(0, 100) || '',
+              note: x.h.content?.substring(0, 200) || '',
+              entryTitle: entry.title,
+            })
+          }
+          if (otherAnnotations.length >= 20) break
+        }
+      }
+
+      // Get OCR context around the selection. The old behavior fed the first
+      // 1000 chars of the OCR file, which was almost never the right window
+      // — if the reader is on page 50, the AI was looking at page 1's preface.
+      // Now we find the selection and take ±500 chars around it. Falls back
+      // to the first 1000 if we can't find the selection (e.g. OCR text has
+      // different whitespace than the PDF's text layer).
       let ocrContext = ''
       if (currentEntry?.absPath) {
         try {
           const ocr = await window.electronAPI.readOcrText(currentEntry.absPath)
           if (ocr.exists && ocr.text) {
-            ocrContext = ocr.text.substring(0, 1000)
+            const full = ocr.text
+            const needle = selectedText.slice(0, 50).trim()  // short probe — OCR may differ subtly
+            const idx = needle ? full.indexOf(needle) : -1
+            if (idx >= 0) {
+              const s = Math.max(0, idx - 500)
+              const e = Math.min(full.length, idx + needle.length + 500)
+              ocrContext = (s > 0 ? '...' : '') + full.slice(s, e) + (e < full.length ? '...' : '')
+            } else {
+              ocrContext = full.substring(0, 1000)  // fallback
+            }
           }
         } catch { /* ignore */ }
       }
@@ -624,7 +674,7 @@ export default function AnnotationPanel() {
       console.error('[instant-feedback] Exception:', err)
       setFeedbackLoading(false)
     }
-  }, [currentEntry, currentPdfMeta])
+  }, [currentEntry, currentPdfMeta, library])
 
   // ===== Keep feedback as history entry =====
   const handleKeepFeedback = useCallback(async () => {
