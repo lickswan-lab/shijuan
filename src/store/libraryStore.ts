@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid'
 import type { Library, LibraryEntry, PdfMeta, VirtualFolder, Memo, BlockRef, MemoSnapshot, MemoFolder, ReadingLog, LectureSession } from '../types/library'
 import { createDefaultLibrary, createDefaultPdfMeta } from '../types/library'
 import { extractPdfMetadata } from '../utils/pdfMetadata'
+import { parseBibTeX, splitAuthors, splitKeywords, parseYear, extractFilePath } from '../utils/bibtexParser'
 
 // Background PDF metadata enrichment. Called after import finishes — reads each
 // newly-imported PDF's Info dict and updates its title / authors / year when
@@ -62,6 +63,8 @@ interface LibraryState {
   importFiles: (folderId?: string) => Promise<number>
   importFolder: (folderId?: string) => Promise<number>
   importByPaths: (paths: string[], folderId?: string) => Promise<number>
+  importFromBibTeX: (bibContent: string, folderId?: string) => Promise<{ added: number; skipped: number; missingFile: number; parseErrors: number }>
+
   removeEntry: (id: string) => Promise<void>
   deleteEntry: (id: string) => Promise<{ success: boolean; error?: string }>
   openEntry: (entry: LibraryEntry) => Promise<void>
@@ -77,7 +80,7 @@ interface LibraryState {
   reorderEntry: (entryId: string, targetId: string, position: 'before' | 'after') => Promise<void>
 
   // Memo actions
-  createMemo: (title: string, folderId?: string) => Promise<Memo>
+  createMemo: (title?: string, folderId?: string) => Promise<Memo>
   updateMemo: (id: string, updates: Partial<Pick<Memo, 'title' | 'content'>>) => Promise<void>
   deleteMemo: (id: string) => Promise<void>
   addBlockToMemo: (memoId: string, block: BlockRef) => Promise<void>
@@ -92,6 +95,10 @@ interface LibraryState {
 
   // Reading log actions
   saveReadingLog: (log: ReadingLog) => void
+  /** Refresh only the `readingLogs` slice from disk — used when the main process
+   * (midnight scheduler) wrote a log we didn't know about. Merges into current
+   * in-memory library so in-flight edits elsewhere aren't discarded. */
+  reloadReadingLogsFromDisk: () => Promise<void>
 
   // Lecture actions
   saveLectureSession: (session: LectureSession) => void
@@ -106,7 +113,17 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   initLibrary: async () => {
     set({ isLoading: true })
-    let library = await window.electronAPI.loadLibrary()
+    let library: Library | null
+    try {
+      library = await window.electronAPI.loadLibrary()
+    } catch (e: any) {
+      // Backend throws only when library.json was found but couldn't be parsed
+      // (it backs up the corrupt file as .corrupt-*.bak before throwing).
+      // Tell the user so they can restore from backup if they want, then start
+      // with an empty library so the app is usable.
+      alert(`文献库加载失败：\n${e?.message || e}\n\n将以空文献库启动。如需恢复，请查看数据目录下的 .bak 文件。`)
+      library = null
+    }
     if (!library) {
       library = createDefaultLibrary()
       await window.electronAPI.saveLibrary(library)
@@ -231,6 +248,100 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     return added
   },
 
+  // Import from BibTeX content. For each valid entry:
+  //   - if the bib has a `file` field pointing to an existing PDF → create a
+  //     real entry with absPath set (so the user can open+annotate right away)
+  //   - if the bib has no file / file missing → still create a "metadata-only"
+  //     entry (absPath empty) as a placeholder — user can "relink" later
+  // Deduplication: skip if an entry with the same absPath already exists, or
+  // (for metadata-only) if title+first-author already matches an existing entry.
+  importFromBibTeX: async (bibContent: string, folderId?: string) => {
+    const { entries: parsed, errors } = parseBibTeX(bibContent)
+    const { library } = get()
+    if (!library) return { added: 0, skipped: 0, missingFile: 0, parseErrors: errors.length }
+
+    const newIds: string[] = []
+    let added = 0
+    let skipped = 0
+    let missingFile = 0
+
+    for (const p of parsed) {
+      const f = p.fields
+      const title = f.title || f.booktitle || p.citeKey
+      const authors = splitAuthors(f.author || f.editor || '')
+      const year = parseYear(f.year || f.date || '')
+      const tags = splitKeywords(f.keywords || f.tags || '')
+      const notes = f.abstract || f.note || ''
+      const bibFilePath = extractFilePath(f.file || '')
+
+      let absPath = ''
+      if (bibFilePath) {
+        // Check existence via main process; if file is gone, fall through to
+        // metadata-only. Async check is cheap compared to the whole import.
+        try {
+          const exists = await window.electronAPI.checkFileExists(bibFilePath)
+          if (exists) {
+            absPath = bibFilePath
+          } else {
+            missingFile++
+          }
+        } catch {
+          missingFile++
+        }
+      }
+
+      // Dedup check
+      if (absPath) {
+        if (library.entries.some(e => e.absPath === absPath)) { skipped++; continue }
+      } else {
+        // For metadata-only: dedup by (title + firstAuthor)
+        const firstAuthor = authors[0] || ''
+        const dup = library.entries.find(e =>
+          (e.title || '').trim() === title.trim() &&
+          (e.authors[0] || '') === firstAuthor,
+        )
+        if (dup) { skipped++; continue }
+      }
+
+      const entry: LibraryEntry = {
+        id: uuid(),
+        absPath,
+        title,
+        authors,
+        year,
+        tags,
+        notes,
+        folderId,
+        ocrStatus: 'none',
+        addedAt: new Date().toISOString(),
+      }
+      library.entries.push(entry)
+      newIds.push(entry.id)
+      added++
+    }
+
+    if (added > 0) {
+      await window.electronAPI.saveLibrary(library)
+      set({ library: { ...library } })
+
+      // Only enrich entries with real files — metadata-only ones have nothing to read from disk
+      const withFiles = newIds.filter(id => {
+        const e = library.entries.find(x => x.id === id)
+        return !!e?.absPath
+      })
+      if (withFiles.length > 0) {
+        enrichPdfMetadataInBackground(
+          withFiles,
+          () => get().library,
+          (lib) => set({ library: lib }),
+          (lib) => window.electronAPI.saveLibrary(lib),
+        )
+      }
+    }
+
+    return { added, skipped, missingFile, parseErrors: errors.length }
+  },
+
   // Import by absolute paths (for drag-drop — no file dialog)
   importByPaths: async (paths: string[], folderId?: string) => {
     if (!paths.length) return 0
@@ -294,6 +405,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     // Remove from library
     library.entries = library.entries.filter(e => e.id !== id)
     await window.electronAPI.saveLibrary(library)
+    // Drop the now-orphaned meta file so meta/ doesn't accumulate junk over time.
+    // Idempotent: missing file is not an error.
+    window.electronAPI.deletePdfMeta?.(id).catch(() => {})
     set({
       library: { ...library },
       currentEntry: currentEntry?.id === id ? null : currentEntry,
@@ -310,8 +424,15 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       return
     }
 
-    // Load or create meta
-    let meta = await window.electronAPI.loadPdfMeta(entry.id)
+    // Load or create meta. A corrupt meta file throws (backend backs it up as .corrupt-*.bak)
+    // so we don't silently overwrite annotations with an empty default.
+    let meta: PdfMeta | null
+    try {
+      meta = await window.electronAPI.loadPdfMeta(entry.id)
+    } catch (e: any) {
+      alert(`注释数据加载失败：\n${e?.message || e}\n\n原文件已备份，将以空注释打开。`)
+      meta = null
+    }
     if (!meta) {
       meta = createDefaultPdfMeta(entry.id)
       await window.electronAPI.savePdfMeta(entry.id, meta)
@@ -350,8 +471,15 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   savePdfMeta: async (meta: PdfMeta) => {
     const { currentEntry } = get()
     if (!currentEntry) return
-    await window.electronAPI.savePdfMeta(currentEntry.id, meta)
+    // Update in-memory FIRST so any re-entrant updatePdfMeta (e.g. second
+    // annotation saved before the first IPC returns) reads the latest value
+    // from `get()`. Otherwise the second updater rebases onto the stale
+    // pre-update meta and silently overwrites the first change.
+    // The main-process save-pdf-meta handler uses atomicWriteJson under the
+    // shared writeLock, so the two concurrent disk writes are still serialized
+    // in the right order (earlier call issues its write first).
     set({ currentPdfMeta: meta })
+    await window.electronAPI.savePdfMeta(currentEntry.id, meta)
   },
 
   updatePdfMeta: async (updater: (meta: PdfMeta) => PdfMeta) => {
@@ -435,12 +563,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   // ===== Memo actions =====
 
-  createMemo: async (title: string, folderId?: string) => {
+  createMemo: async (title?: string, folderId?: string) => {
     const { library } = get()
     if (!library) throw new Error('Library not loaded')
     if (!library.memos) library.memos = []
     const memo: Memo = {
-      id: uuid(), title, content: '', blocks: [], aiHistory: [],
+      id: uuid(), title: title && title.trim() ? title : '新笔记', content: '', blocks: [], aiHistory: [],
       folderId,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       snapshots: []
@@ -583,5 +711,15 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     }
     set({ library: { ...library } })
     window.electronAPI.saveLibrary(library).catch(() => {})
-  }
+  },
+
+  reloadReadingLogsFromDisk: async () => {
+    try {
+      const fresh = await window.electronAPI.loadLibrary()
+      if (!fresh) return
+      const current = get().library
+      if (!current) return
+      set({ library: { ...current, readingLogs: fresh.readingLogs || [] } })
+    } catch { /* best effort */ }
+  },
 }))

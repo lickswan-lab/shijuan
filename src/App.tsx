@@ -26,6 +26,10 @@ function DraggableToggle({ onClick }: { onClick: () => void }) {
   const dragging = useRef(false)
   const moved = useRef(false)
   const startPos = useRef({ x: 0, y: 0, bx: 0, by: 0 })
+  // Hold the currently-registered drag listeners so an unmount (e.g. user
+  // toggles the panel open mid-drag, which re-renders App and drops this
+  // button) doesn't leave them stuck on `document`.
+  const activeListenersRef = useRef<{ move: (ev: MouseEvent) => void; up: () => void } | null>(null)
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     dragging.current = true
@@ -48,10 +52,26 @@ function DraggableToggle({ onClick }: { onClick: () => void }) {
       if (!moved.current) onClick()
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
+      activeListenersRef.current = null
     }
+    activeListenersRef.current = { move: onMove, up: onUp }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
   }, [onClick])
+
+  // Unmount safety-net: if the toggle is pulled from the DOM while the user is
+  // still holding the mouse button, the mouseup listener would otherwise never
+  // fire and stay attached to `document` forever, quietly breaking future drags.
+  useEffect(() => {
+    return () => {
+      const listeners = activeListenersRef.current
+      if (listeners) {
+        document.removeEventListener('mousemove', listeners.move)
+        document.removeEventListener('mouseup', listeners.up)
+        activeListenersRef.current = null
+      }
+    }
+  }, [])
 
   const style: React.CSSProperties = pos.x >= 0
     ? { position: 'fixed', left: pos.x, top: pos.y, right: 'auto', zIndex: 50, width: 36, height: 36, borderRadius: '50%', border: '1px solid var(--border)', background: 'var(--bg)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'grab', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }
@@ -242,6 +262,16 @@ export default function App() {
     const dark = useUiStore.getState().darkMode
     document.documentElement.classList.toggle('dark-mode', dark)
     window.electronAPI?.setTitleBarTheme?.(dark)
+  }, [])
+
+  // Main-process nudge: midnight scheduler wrote a reading log to library.json
+  // directly. Reload just the readingLogs slice so our next saveLibrary() doesn't
+  // overwrite what it wrote.
+  useEffect(() => {
+    const off = window.electronAPI.onLibraryChangedOnDisk?.(() => {
+      useLibraryStore.getState().reloadReadingLogsFromDisk()
+    })
+    return () => { if (off) off() }
   }, [])
 
   // Init library on mount

@@ -2,6 +2,7 @@ import { ipcMain, app } from 'electron'
 import fs from 'fs/promises'
 import path from 'path'
 import type { AgentConversation, HermesSkill, HermesInsight } from '../../src/types/library'
+import { atomicWriteFile, atomicWriteJson, safeLoadJsonOrBackup } from './library'
 
 const DATA_DIR = path.join(app.getPath('home'), '.lit-manager')
 const AGENT_DIR = path.join(DATA_DIR, 'agent')
@@ -254,7 +255,7 @@ export function registerAgentIpc(): void {
   ipcMain.handle('agent-save-memory', async (_event, content: string) => {
     try {
       await ensureAgentDir()
-      await fs.writeFile(MEMORY_FILE, content, 'utf-8')
+      await atomicWriteFile(MEMORY_FILE, content)
       return { success: true }
     } catch (err: any) {
       return { success: false, error: err.message }
@@ -265,22 +266,20 @@ export function registerAgentIpc(): void {
   ipcMain.handle('agent-load-conversations', async () => {
     try {
       await ensureAgentDir()
-      const content = await fs.readFile(CONVERSATIONS_FILE, 'utf-8').catch(() => '[]')
-      return { success: true, conversations: JSON.parse(content) }
+      const conversations = await safeLoadJsonOrBackup<AgentConversation[]>(CONVERSATIONS_FILE, [])
+      return { success: true, conversations }
     } catch (err: any) {
       return { success: false, error: err.message, conversations: [] }
     }
   })
 
-  // Save conversation
+  // Save conversation. Read-modify-write the list via safeLoadJsonOrBackup so
+  // a corrupt conversations.json gets backed up (not silently overwritten,
+  // which would wipe prior history on the next save).
   ipcMain.handle('agent-save-conversation', async (_event, conversation: AgentConversation) => {
     try {
       await ensureAgentDir()
-      let conversations: AgentConversation[] = []
-      try {
-        const content = await fs.readFile(CONVERSATIONS_FILE, 'utf-8')
-        conversations = JSON.parse(content)
-      } catch {}
+      let conversations = await safeLoadJsonOrBackup<AgentConversation[]>(CONVERSATIONS_FILE, [])
 
       const idx = conversations.findIndex(c => c.id === conversation.id)
       if (idx >= 0) {
@@ -292,7 +291,7 @@ export function registerAgentIpc(): void {
       // Keep last 50 conversations
       if (conversations.length > 50) conversations = conversations.slice(0, 50)
 
-      await fs.writeFile(CONVERSATIONS_FILE, JSON.stringify(conversations, null, 2), 'utf-8')
+      await atomicWriteJson(CONVERSATIONS_FILE, conversations)
       return { success: true }
     } catch (err: any) {
       return { success: false, error: err.message }
@@ -315,8 +314,8 @@ export function registerAgentIpc(): void {
   ipcMain.handle('agent-load-insight', async () => {
     try {
       await ensureAgentDir()
-      const content = await fs.readFile(INSIGHTS_FILE, 'utf-8').catch(() => '{}')
-      return { success: true, insight: JSON.parse(content) as HermesInsight | null }
+      const insight = await safeLoadJsonOrBackup<HermesInsight | null>(INSIGHTS_FILE, null)
+      return { success: true, insight }
     } catch {
       return { success: true, insight: null }
     }
@@ -326,7 +325,7 @@ export function registerAgentIpc(): void {
   ipcMain.handle('agent-save-insight', async (_event, insight: HermesInsight) => {
     try {
       await ensureAgentDir()
-      await fs.writeFile(INSIGHTS_FILE, JSON.stringify(insight, null, 2), 'utf-8')
+      await atomicWriteJson(INSIGHTS_FILE, insight)
       return { success: true }
     } catch (err: any) {
       return { success: false, error: err.message }
@@ -339,8 +338,8 @@ export function registerAgentIpc(): void {
   ipcMain.handle('agent-load-skills', async () => {
     try {
       await ensureAgentDir()
-      const content = await fs.readFile(SKILLS_FILE, 'utf-8').catch(() => '[]')
-      return { success: true, skills: JSON.parse(content) as HermesSkill[] }
+      const skills = await safeLoadJsonOrBackup<HermesSkill[]>(SKILLS_FILE, [])
+      return { success: true, skills }
     } catch {
       return { success: true, skills: [] }
     }
@@ -350,7 +349,7 @@ export function registerAgentIpc(): void {
   ipcMain.handle('agent-save-skills', async (_event, skills: HermesSkill[]) => {
     try {
       await ensureAgentDir()
-      await fs.writeFile(SKILLS_FILE, JSON.stringify(skills, null, 2), 'utf-8')
+      await atomicWriteJson(SKILLS_FILE, skills)
       return { success: true }
     } catch (err: any) {
       return { success: false, error: err.message }

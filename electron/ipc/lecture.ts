@@ -3,9 +3,9 @@ import fs from 'fs/promises'
 import path from 'path'
 import crypto from 'crypto'
 import type { LectureSession } from '../../src/types/library'
+import { mutateLibraryOnDisk } from './library'
 
 const DATA_DIR = path.join(app.getPath('home'), '.lit-manager')
-const LIBRARY_FILE = path.join(DATA_DIR, 'library.json')
 const AUDIO_DIR = path.join(DATA_DIR, 'audio')
 
 async function ensureAudioDir() {
@@ -96,23 +96,22 @@ export function registerLectureIpc(): void {
       return { success: false, error: err.message }
     }
   })
-  // Save/update lecture session in library.json
+  // Save/update lecture session in library.json — goes through shared writeLock
+  // so it cannot interleave with save-library or the midnight scheduler.
   ipcMain.handle('lecture-save', async (_event, session: LectureSession) => {
     try {
-      const content = await fs.readFile(LIBRARY_FILE, 'utf-8')
-      const library = JSON.parse(content)
-      if (!library.lectureSessions) library.lectureSessions = []
-
-      const idx = library.lectureSessions.findIndex((s: any) => s.id === session.id)
-      if (idx >= 0) {
-        library.lectureSessions[idx] = session
-      } else {
-        library.lectureSessions.unshift(session)
-      }
-
-      const tmpPath = LIBRARY_FILE + '.tmp'
-      await fs.writeFile(tmpPath, JSON.stringify(library, null, 2), 'utf-8')
-      await fs.rename(tmpPath, LIBRARY_FILE)
+      const result = await mutateLibraryOnDisk((library) => {
+        const lib = library as any
+        if (!lib.lectureSessions) lib.lectureSessions = []
+        const idx = lib.lectureSessions.findIndex((s: any) => s.id === session.id)
+        if (idx >= 0) {
+          lib.lectureSessions[idx] = session
+        } else {
+          lib.lectureSessions.unshift(session)
+        }
+        return lib
+      })
+      if (!result) return { success: false, error: 'library.json 不存在' }
       return { success: true }
     } catch (err: any) {
       return { success: false, error: err.message }

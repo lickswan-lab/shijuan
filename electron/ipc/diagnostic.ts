@@ -60,21 +60,46 @@ async function collectErrorLogs(): Promise<Array<{ name: string; mtime: string; 
 }
 
 const CRASH_LOG = path.join(DATA_DIR, 'crash.log')
+const CRASH_LOG_MAX_BYTES = 64 * 1024
+
+// Serializes crash-log writes so two simultaneous crash reports (main-process
+// throw + renderer ErrorBoundary, or two renderers in quick succession) can't
+// do interleaved read-modify-write and lose one of the entries. Module-scoped
+// promise chain, same pattern as library.ts's writeLock.
+let crashLogLock: Promise<unknown> = Promise.resolve()
 
 // Append an entry to ~/.lit-manager/crash.log. Keeps last ~64KB (trim from head when bigger).
+// Prefers fs.appendFile when the file is still small enough that we don't need
+// to trim — that's a single syscall and avoids the lost-write race entirely.
+// Only falls back to read-modify-write when we actually need to trim.
 async function appendCrashLog(text: string): Promise<void> {
-  try {
-    await fs.mkdir(DATA_DIR, { recursive: true })
-    const now = new Date().toISOString()
-    const entry = `\n====== ${now} ======\n${text}\n`
-    let existing = ''
-    try { existing = await fs.readFile(CRASH_LOG, 'utf-8') } catch { /* new file */ }
-    const combined = existing + entry
-    const trimmed = combined.length > 64 * 1024
-      ? combined.slice(combined.length - 64 * 1024)
-      : combined
-    await fs.writeFile(CRASH_LOG, trimmed, 'utf-8')
-  } catch { /* swallow — don't crash the crash logger */ }
+  const run = crashLogLock.catch(() => {}).then(async () => {
+    try {
+      await fs.mkdir(DATA_DIR, { recursive: true })
+      const now = new Date().toISOString()
+      const entry = `\n====== ${now} ======\n${text}\n`
+
+      // Fast path: file small, just append atomically (single syscall).
+      let size = 0
+      try { size = (await fs.stat(CRASH_LOG)).size } catch { /* missing — appendFile will create it */ }
+      if (size + entry.length <= CRASH_LOG_MAX_BYTES) {
+        await fs.appendFile(CRASH_LOG, entry, 'utf-8')
+        return
+      }
+
+      // Slow path: need to trim. Read + trim + rewrite. Still safe under this
+      // lock because no other crash write can interleave.
+      let existing = ''
+      try { existing = await fs.readFile(CRASH_LOG, 'utf-8') } catch { /* fine */ }
+      const combined = existing + entry
+      const trimmed = combined.length > CRASH_LOG_MAX_BYTES
+        ? combined.slice(combined.length - CRASH_LOG_MAX_BYTES)
+        : combined
+      await fs.writeFile(CRASH_LOG, trimmed, 'utf-8')
+    } catch { /* swallow — don't crash the crash logger */ }
+  })
+  crashLogLock = run.catch(() => {})
+  return run
 }
 
 export function registerDiagnosticIpc(): void {

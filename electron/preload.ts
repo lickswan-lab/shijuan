@@ -29,6 +29,8 @@ const electronAPI = {
     ipcRenderer.invoke('load-pdf-meta', entryId),
   savePdfMeta: (entryId: string, data: PdfMeta): Promise<boolean> =>
     ipcRenderer.invoke('save-pdf-meta', entryId, data),
+  deletePdfMeta: (entryId: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('delete-pdf-meta', entryId),
 
   // File operations
   readFileBuffer: (filePath: string): Promise<Buffer> =>
@@ -41,6 +43,10 @@ const electronAPI = {
   // Export
   exportFile: (defaultName: string, filters: Array<{ name: string; extensions: string[] }>, content: string | Buffer): Promise<{ success: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('export-file', defaultName, filters, content),
+  exportFullBackup: (): Promise<{ success: boolean; path?: string; error?: string; stats?: { entryCount: number; memoCount: number; metaCount: number; apprenticeCount: number } }> =>
+    ipcRenderer.invoke('export-full-backup'),
+  pickAndReadBibFile: (): Promise<{ success: boolean; content?: string; path?: string; canceled?: boolean; error?: string }> =>
+    ipcRenderer.invoke('pick-and-read-bib-file'),
 
   // OCR files
   saveOcrText: (pdfAbsPath: string, text: string): Promise<string> =>
@@ -49,7 +55,7 @@ const electronAPI = {
     ipcRenderer.invoke('read-ocr-text', pdfAbsPath),
 
   // === AI API (multi-provider) ===
-  aiGetProviders: (): Promise<Array<{ id: string; name: string; models: Array<{ id: string; name: string }>; hasKey: boolean }>> =>
+  aiGetProviders: (): Promise<Array<{ id: string; name: string; models: Array<{ id: string; name: string }>; hasKey: boolean; noKey?: boolean; apiKeyUrl?: string; freeTierHint?: string }>> =>
     ipcRenderer.invoke('ai-get-providers'),
   aiSetKey: (providerId: string, key: string): Promise<boolean> =>
     ipcRenderer.invoke('ai-set-key', providerId, key),
@@ -59,6 +65,10 @@ const electronAPI = {
     ipcRenderer.invoke('ai-get-key', providerId),
   aiGetConfigured: (): Promise<Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>> =>
     ipcRenderer.invoke('ai-get-configured'),
+  ollamaProbe: (): Promise<{ available: boolean; models: Array<{ id: string; name: string }> }> =>
+    ipcRenderer.invoke('ollama-probe'),
+  claudeCliProbe: (): Promise<{ available: boolean; version: string | null }> =>
+    ipcRenderer.invoke('claude-cli-probe'),
 
   // === Legacy GLM compat (OCR, instant feedback) ===
   setGlmApiKey: (key: string): Promise<boolean> =>
@@ -85,8 +95,19 @@ const electronAPI = {
     ipcRenderer.invoke('glm-ask', question, selectedText, history, model),
 
   // === Streaming AI ===
-  aiChatStream: (streamId: string, modelSpec: string, messages: Array<{ role: string; content: string }>): Promise<{ success: boolean; text?: string; error?: string }> =>
+  aiChatStream: (streamId: string, modelSpec: string, messages: Array<{ role: string; content: string }>): Promise<{ success: boolean; text?: string; error?: string; aborted?: boolean }> =>
     ipcRenderer.invoke('ai-chat-stream', streamId, modelSpec, '', messages),
+  aiAbortStream: (streamId: string): Promise<boolean> =>
+    ipcRenderer.invoke('ai-abort-stream', streamId),
+
+  // Main process tells the renderer it just updated library.json (e.g. midnight
+  // scheduler wrote a reading log). The renderer should reload its in-memory
+  // library so the next save doesn't stomp the backend-added fields.
+  onLibraryChangedOnDisk: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('library-changed-on-disk', handler)
+    return () => { ipcRenderer.removeListener('library-changed-on-disk', handler) }
+  },
   onAiStreamChunk: (callback: (streamId: string, chunk: string) => void) => {
     const handler = (_event: any, streamId: string, chunk: string) => callback(streamId, chunk)
     ipcRenderer.on('ai-stream-chunk', handler)

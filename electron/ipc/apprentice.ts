@@ -2,6 +2,7 @@ import { ipcMain, app } from 'electron'
 import fs from 'fs/promises'
 import path from 'path'
 import type { Library, PdfMeta, HistoryEntry } from '../../src/types/library'
+import { atomicWriteFile } from './library'
 
 // ===== Paths =====
 const DATA_DIR = path.join(app.getPath('home'), '.lit-manager')
@@ -141,15 +142,15 @@ export async function collectApprenticeContext(targetDate: Date): Promise<Appren
     }
   }
 
-  // === 2. Scan meta files for annotations / history ===
+  // === 2. Scan meta files for annotations / history (parallel load) ===
   const thinking: ApprenticeContext['thinking'] = []
   const annotationsThisWeek = new Set<string>()  // entryId
   let historyEntriesCreatedCount = 0
   let annotationsCreatedCount = 0
   const recentStances: ApprenticeContext['wider']['recentStances'] = []
 
-  for (const e of entries) {
-    const meta = await loadMeta(e.id)
+  const metas = await Promise.all(entries.map(async e => ({ entry: e, meta: await loadMeta(e.id) })))
+  for (const { entry: e, meta } of metas) {
     if (!meta) continue
 
     for (const ann of meta.annotations || []) {
@@ -334,7 +335,7 @@ export function registerApprenticeIpc(): void {
   ipcMain.handle('apprentice-save', async (_event, weekCode: string, content: string) => {
     try {
       await ensureDir()
-      await fs.writeFile(path.join(APPRENTICE_DIR, `${weekCode}.md`), content, 'utf-8')
+      await atomicWriteFile(path.join(APPRENTICE_DIR, `${weekCode}.md`), content)
       return { success: true }
     } catch (err: any) {
       return { success: false, error: err.message }

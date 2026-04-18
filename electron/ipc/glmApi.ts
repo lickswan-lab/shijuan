@@ -83,7 +83,24 @@ async function callGlmOcr(imageBase64: string): Promise<string> {
   return text
 }
 
+/**
+ * @deprecated Superseded by `registerAiApiIpc` in `./aiApi.ts` since v1.1. All
+ * channels below (`set-glm-api-key`, `get-glm-api-key-status`, `glm-ocr`,
+ * `glm-ocr-pdf`, `glm-interpret`, `glm-instant-feedback`, `glm-ask`) are also
+ * registered there. Calling this function AFTER `registerAiApiIpc()` would
+ * attempt to double-register the same channels and Electron would throw
+ * "Attempted to register a second handler for ...". This file is kept only
+ * for git history / reference and is not imported by `main.ts`.
+ *
+ * If you're reading this because you're about to re-enable it: don't. Delete
+ * this file, or merge any missing pieces into aiApi.ts first.
+ */
 export function registerGlmApiIpc(): void {
+  throw new Error(
+    'registerGlmApiIpc is deprecated — the channels it registers are already ' +
+    'registered by registerAiApiIpc (electron/ipc/aiApi.ts). Do not call this. ' +
+    'See the @deprecated comment on this function.'
+  )
   // Set API key
   ipcMain.handle('set-glm-api-key', async (_event, key: string) => {
     apiKey = key
