@@ -34,6 +34,19 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
+      # Rename to ASCII-only so GitHub artifact upload (which munges unicode in
+      # filenames) produces clean shijuan-win-x64-*.exe assets on the release.
+      # Without this step we get junk like "Setup.1.3.0-beta.exe" and
+      # "-1.3.0-beta-.exe" because the Chinese chars get stripped mid-glob.
+      - name: Normalize Windows artifact names
+        run: |
+          $setup = Get-ChildItem dist -Filter "*Setup*.exe" | Select-Object -First 1
+          $portable = Get-ChildItem dist -Filter "*便携版*.exe" | Select-Object -First 1
+          if ($setup) { Rename-Item $setup.FullName "shijuan-win-x64-setup.exe" }
+          if ($portable) { Rename-Item $portable.FullName "shijuan-win-x64-portable.exe" }
+          Get-ChildItem dist -Filter "*.exe" | Format-Table Name, Length
+        shell: pwsh
+
       - uses: actions/upload-artifact@v4
         with:
           name: shijuan-win-x64
@@ -46,13 +59,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: shijuan-win-setup
-          # electron-builder default installer name: "拾卷 Setup X.Y.Z.exe" — glob to handle encoding
-          path: dist/*Setup*.exe
+          path: dist/shijuan-win-x64-setup.exe
       - name: Upload portable exe
         uses: actions/upload-artifact@v4
         with:
           name: shijuan-win-portable
-          path: dist/*便携版*.exe
+          path: dist/shijuan-win-x64-portable.exe
 
   build-macos-intel:
     runs-on: macos-latest
