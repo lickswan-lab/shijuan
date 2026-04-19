@@ -216,7 +216,7 @@ function MemoItem({
         <div style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', gap: 8 }}>
           <span>{memo.updatedAt ? new Date(memo.updatedAt).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}</span>
           {blockCount > 0 && <span>{blockCount} 引用块</span>}
-          {(memo.snapshots?.length || 0) > 0 && <span>{memo.snapshots.length} 快照</span>}
+          {/* 快照计数也一并隐藏 — 入口去掉了，badge 也没意义了 */}
         </div>
       </div>
     </div>

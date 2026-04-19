@@ -10,6 +10,8 @@ const AgentPanel = lazy(() => import('./components/Agent/AgentPanel'))
 const QuickOpenModal = lazy(() => import('./components/QuickOpen/QuickOpenModal'))
 const BatchOcrRunner = lazy(() => import('./components/BatchOcr/BatchOcrRunner'))
 const BatchOcrProgress = lazy(() => import('./components/BatchOcr/BatchOcrProgress'))
+const OnboardingModal = lazy(() => import('./components/Onboarding/OnboardingModal'))
+const FeatureTourModal = lazy(() => import('./components/Onboarding/FeatureTourModal'))
 import TopBar from './components/TopBar/TopBar'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useLibraryStore } from './store/libraryStore'
@@ -435,6 +437,18 @@ export default function App() {
       <Suspense fallback={null}>
         <BatchOcrRunner />
         <BatchOcrProgress />
+      </Suspense>
+
+      {/* First-launch nudge: shown once when no AI provider is configured. */}
+      <Suspense fallback={null}>
+        <OnboardingModal />
+      </Suspense>
+
+      {/* Feature tour: 5-step walkthrough that fires the first boot after the
+          user has any AI key configured (导入文件 / OCR / 划线 / 删除 / 学徒周报).
+          Re-triggerable from Settings via setForceFeatureTour(true). */}
+      <Suspense fallback={null}>
+        <FeatureTourModal />
       </Suspense>
     </div>
   )

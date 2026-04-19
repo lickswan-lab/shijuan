@@ -442,7 +442,11 @@ export default function AnnotationPanel() {
     const onMove = (ev: MouseEvent) => {
       if (!resizingRef.current) return
       const delta = startX - ev.clientX
-      setPanelWidth(Math.max(300, Math.min(600, startWidth + delta)))
+      // Range expanded in v1.3.0: was 300-600. Lower bound 200 lets users
+      // shrink the right panel hard so the reading column (OCR/TXT/MD/DOCX)
+      // can stretch wide; upper bound 800 lets users park reference notes
+      // in a roomy column when they have screen real estate.
+      setPanelWidth(Math.max(200, Math.min(800, startWidth + delta)))
     }
     const onUp = () => {
       resizingRef.current = false
@@ -1580,33 +1584,26 @@ export default function AnnotationPanel() {
             >
               {aiLoading ? '...' : '发送 AI'}
             </button>
+            {/* 召唤功能跟随 Hermes 面板的「召唤」tab 一起锁住——下个版本一起开放。
+                视觉上保留按钮但置灰 + 加锁标，避免功能"消失"造成困惑。 */}
             <button
               className="btn btn-sm"
-              disabled={aiLoading}
-              onClick={() => {
-                if (personaListAnno.length === 0) {
-                  alert('还没有蒸馏好的 skill。\n先去 Hermes 面板的「召唤」tab 蒸馏一位名家。')
-                  return
-                }
-                const options = personaListAnno.map((p, i) =>
-                  `${i + 1}. ${p.canonicalName || p.name}${typeof p.currentFitnessTotal === 'number' ? ` · ${p.currentFitnessTotal}%` : ''}`
-                ).join('\n')
-                const pick = window.prompt(
-                  `召唤哪位名家批注这段文字？\n（会以该人物视角评论、挑剔、追问）\n\n${options}\n\n输入序号：`,
-                )
-                if (!pick) return
-                const idx = parseInt(pick, 10) - 1
-                if (isNaN(idx) || idx < 0 || idx >= personaListAnno.length) {
-                  alert('序号无效')
-                  return
-                }
-                const p = personaListAnno[idx]
-                handleSummonAnnotate(p.id, p.canonicalName || p.name)
+              disabled
+              title="召唤功能正在打磨中，敬请期待"
+              style={{
+                fontSize: 12, padding: '6px 12px',
+                opacity: 0.45, cursor: 'not-allowed',
+                display: 'inline-flex', alignItems: 'center', gap: 4,
               }}
-              title="召唤一位蒸馏好的名家，以其视角批注这段文字"
-              style={{ fontSize: 12, padding: '6px 12px' }}
             >
               🧙 召唤
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="2.5"
+                strokeLinecap="round" strokeLinejoin="round"
+                style={{ marginLeft: 1 }}>
+                <rect x="3" y="11" width="18" height="11" rx="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
             </button>
           </div>
           <button className="btn btn-sm btn-primary" onClick={handleAddNote} disabled={!noteInput.trim() || (!displayAnnotation && !textSelection)}

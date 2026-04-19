@@ -3,7 +3,29 @@ import type { LibraryEntry, VirtualFolder } from '../../types/library'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
 import { openEntryById } from '../../utils/openEntryById'
+import { generateBibTeX } from '../../utils/citations'
 import MemoList from '../Memo/MemoList'
+
+// Format a single library entry as a plain-text citation suitable for pasting
+// into a footnote, email, or chat. Chicago-ish humanities convention:
+//   "作者. 《标题》. 年份." (Chinese names, no parens)
+//   "Author. Title. Year." (Western, no italics since it's plain text)
+// We don't try to detect language — just join authors with "、" if Chinese-ish
+// (any CJK character) else " and ".
+function plainTextCitation(entry: LibraryEntry): string {
+  const hasCjk = (s: string) => /[\u4e00-\u9fff]/.test(s)
+  const parts: string[] = []
+  if (entry.authors.length > 0) {
+    const sep = entry.authors.some(hasCjk) ? '、' : ' and '
+    parts.push(entry.authors.join(sep) + '.')
+  }
+  if (entry.title) {
+    const isChinese = hasCjk(entry.title)
+    parts.push(isChinese ? `《${entry.title}》.` : `${entry.title}.`)
+  }
+  if (entry.year) parts.push(`${entry.year}.`)
+  return parts.join(' ').trim()
+}
 
 // ===== Context Menu =====
 interface MenuPos { x: number; y: number }
@@ -161,6 +183,21 @@ const EntryItem = memo(function EntryItem({ entry, multiSelect, selected, onTogg
           onDeleteStep={() => setConfirmDelete(true)}
           onDeleteConfirm={() => { deleteEntry(entry.id); setMenuPos(null) }}
           onShowInFolder={() => { window.electronAPI.showItemInFolder?.(entry.absPath) }}
+          onCopyCitation={() => {
+            // Plain-text — works in Word, email, Notion, anything.
+            const text = plainTextCitation(entry) || entry.title || ''
+            navigator.clipboard?.writeText(text).catch(() => {})
+            setMenuPos(null)
+          }}
+          onCopyBibTeX={() => {
+            // generateBibTeX prepends a "% 拾卷导出..." header line — for a
+            // single-entry copy that's noisy. Strip the comment header so the
+            // clipboard contains just the @misc{...} block.
+            const full = generateBibTeX([entry])
+            const cleaned = full.split('\n').filter(l => !l.startsWith('%')).join('\n').trim()
+            navigator.clipboard?.writeText(cleaned).catch(() => {})
+            setMenuPos(null)
+          }}
         />
       )}
     </>
@@ -168,7 +205,7 @@ const EntryItem = memo(function EntryItem({ entry, multiSelect, selected, onTogg
 })
 
 // Two-step context menu for entry
-function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep, onDeleteConfirm, onShowInFolder }: {
+function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep, onDeleteConfirm, onShowInFolder, onCopyCitation, onCopyBibTeX }: {
   pos: MenuPos
   confirmDelete: boolean
   onClose: () => void
@@ -176,6 +213,8 @@ function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep,
   onDeleteStep: () => void
   onDeleteConfirm: () => void
   onShowInFolder: () => void
+  onCopyCitation: () => void
+  onCopyBibTeX: () => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -205,6 +244,25 @@ function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep,
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
           >
             查看文件位置
+          </div>
+          <div style={{ height: 1, background: 'var(--border-light)', margin: '2px 0' }} />
+          <div
+            onClick={onCopyCitation}
+            style={{ padding: '7px 14px', fontSize: 12, cursor: 'pointer', color: 'var(--text)' }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            title="复制可粘贴到论文 / 邮件的纯文本引用"
+          >
+            复制引用（纯文本）
+          </div>
+          <div
+            onClick={onCopyBibTeX}
+            style={{ padding: '7px 14px', fontSize: 12, cursor: 'pointer', color: 'var(--text)' }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            title="复制 @misc{...} 格式，可粘贴到 Zotero / JabRef / LaTeX"
+          >
+            复制 BibTeX
           </div>
           <div style={{ height: 1, background: 'var(--border-light)', margin: '2px 0' }} />
           <div

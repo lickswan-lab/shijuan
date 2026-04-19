@@ -4,6 +4,84 @@
 
 ---
 
+## 2026-04-19 · Batch 38 · 文社科用户视角痛点修复（5 个）
+
+### 出发点
+
+用户问："以一个文社科的本科生/研究生的视角审视目前的应用现状"。我做了一份 6 痛点清单，用户拍板"解决 6 个痛点"，后改为"痛点 6 不着急"——保留 P1~P5 实现：
+
+| P  | 痛点 | 解决方式 |
+|----|------|---------|
+| P1 | README 太"开发者"，新人看完直接劝退 | 整段重写顶部，去掉 Electron / Vite / IPC / Zustand / chokepoint 等术语 |
+| P2 | 7 家 Provider 平铺，新用户不知道选哪个 | GLM 加「推荐起步」红色 badge + 首启 Onboarding 弹窗 |
+| P3 | 文献库导出只有"全库导出"，单条无快捷动作 | 文件树右键菜单加「复制引用（纯文本）」+「复制 BibTeX」 |
+| ~~P4~~ | "召唤""学徒"用奇幻 / 师徒比喻，文社科用户隔阂 | 一度改成「作者问答」/「阅读小结」，**用户复审后撤回**——名字保留 |
+| P5 | 沉浸阅读 + 听课模式都在代码里写好了，但被 `{false &&}` 锁着 | 翻开 guard，两个完整功能立刻可用 |
+| ~~P6~~ | 隐私 / 数据存储不可见 | 用户判断"不着急"，跳过 |
+
+### 做了什么
+
+#### P5 · 解锁两个已实现功能（最高 ROI）
+
+- `src/components/PdfViewer/PdfViewer.tsx:2557`：把 `{false && <button>` 改为 `<button>`，沉浸阅读切换按钮直接出现在阅读栏，点击隐藏侧栏 + TopBar
+- `src/components/TopBar/TopBar.tsx:547`：同样翻开听课模式入口，点击进入 LectureMode（webspeech / 讯飞 / 阿里云 三种 STT 可选）
+
+两个功能后端 + UI + 状态管理 + 快捷键全是齐的（`useUiStore.immersiveMode` / `setImmersiveMode` / `activeLectureId` / `setActiveLecture` 早就 wired），只是 hide guard 没翻。两行改动，两个功能上线。
+
+#### P4 · UI 名词改名 → 用户拍板撤回
+
+第一遍按"去奇幻化"思路，把 UI 文案的「召唤 / 学徒 / Hermes」全改成了「作者问答 / 阅读小结 / 研究助手」（涉及 AgentPanel / PersonasTab / AnnotationPanel / PdfViewer / TopBar / personaDistillPrompts 共 6 文件、约 30 处字符串）。
+
+跑完 tsc + build 后给用户看，用户回："**召唤 → 作者问答，学徒 → 阅读小结，Hermes → 研究助手（仅 UI 字符串）这个名字不要改**"。
+
+→ 全量回滚，所有改动恢复。决策原因（猜测）：这三个名字是产品的<strong>身份标识</strong>而不是描述符——「召唤」一个名家比「作者问答」更有仪式感，「学徒」每周翻你的痕迹比「阅读小结」更有人格感，「Hermes」是研究助手的代号也是品牌锚点。换成中性词等于把产品的灵魂磨平。
+
+教训：用户提的"文社科用户隔阂"是对<strong>解释成本</strong>的担忧，不是对<strong>名字本身</strong>的不满——下一轮如果还要做这件事，应该是<strong>给名字加一行小字注释</strong>（例如 `召唤 ⓘ 召唤一位人物的思想方式对话`），而不是改名字本身。
+
+### P1 · README 顶部重写
+
+把 100 行开发者口吻的"主进程级 chokepoint"/「五步验证管道」/「Persona Distillation」全部撤下，换成：
+
+- 一句话定位："一个安静的桌面读书工具：导入文献、做注释、和书里的作者聊聊"
+- 「这是什么」段：本地、文社科、不上传云端
+- 「适合谁 / 不适合谁」对照
+- 「主要能做什么」4 个真实使用场景：安静读书 / 学徒周报 / 召唤 / 跨文献关联
+- 「上手三步」：导入 → 选中文字写想法 → 周一看学徒
+
+API key 指南、Dev 章节、版本历史保留不动（那些是给已经上路的人看的）。
+
+#### P2 · GLM 推荐 + 首启 Onboarding
+
+- `TopBar.tsx`：GLM 卡片名旁加红底白字「推荐起步」徽章，比原本「OCR 必需」绿字更醒目
+- 新建 `src/components/Onboarding/OnboardingModal.tsx`：
+  - boot 后 1.2s 检查 `aiGetProviders()`，**任何 provider 已配置 → 不显示**
+  - localStorage 标志位 `sj-onboarding-shown` —— 关一次就再不弹（无论是否真去配置）
+  - 内容三段：定位（拾卷不接 AI 也能用）→ 推荐（GLM：国内、免费、5 分钟）→ 备选（OpenAI / Claude / Kimi 等）
+  - CTA 一个："去配置 GLM →" 按钮，点击关弹窗 + 打开 Settings
+  - 退出按钮「稍后再说」，没有压力推销
+- `App.tsx` 用 `lazy()` + `<Suspense>` 挂在最底部，不影响首屏
+
+#### P3 · 单条文献 BibTeX / 引用复制
+
+`src/components/Sidebar/FileTree.tsx`：
+- `EntryItem` 右键菜单分两组：[查看文件位置] / [复制引用、复制 BibTeX] / [移除、删除原文件]
+- 「复制引用（纯文本）」：自动判 CJK 用「、」分隔多作者（中文），否则 " and "（英文），格式 `作者. 《标题》. 年份.` —— 直接粘到论文/邮件/微信
+- 「复制 BibTeX」：复用 `utils/citations.ts:generateBibTeX()` 单条调用，剥掉 `% 拾卷导出 ...` 注释头，clipboard 里只剩 `@misc{...}` 块
+- 全部走 `navigator.clipboard.writeText()`，零 IPC，零网络
+
+### 测试通过
+
+- `tsc --noEmit`：EXIT=0，0 错
+- `electron-vite build`：4.30s 构建成功，`OnboardingModal-D0BhHV6a.js` 5.81 kB 已 split
+
+### 已知问题 / 下一步
+
+- 听课模式 + 沉浸阅读重新放出来后还没做端到端跑通；上次端到端测试是 Batch 36 在两个功能 hide 状态下做的。下个 batch 要补一次 LectureMode 实测（讯飞 key 注入流程 / webspeech 兜底）
+- Onboarding 弹窗没做 i18n（中文硬编码）—— 拾卷整体只支持中文，先不展开
+- P4 撤回后，"给名字加一行小字注释"的方案还没做——下个 batch 可考虑在 TopBar 这三个 tab 上 hover 显示一句解释，让陌生用户知道点进去会发生什么
+
+---
+
 ## 2026-04-19 · Batch 37 · 启动黑洞修复（隐窗 + 静默失败兜底）
 
 ### 现象（Batch 36 端到端测试发现）

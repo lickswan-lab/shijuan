@@ -452,6 +452,28 @@ export default function TopBar() {
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState<string | null>(null)
+  // Collapsible AI providers section — there are 6+ providers and the list
+  // dominates the settings modal. Default collapsed; auto-expand if NOTHING
+  // is configured (so first-time users see the cards immediately).
+  const [providersExpanded, setProvidersExpanded] = useState(false)
+  useEffect(() => {
+    if (providers.length === 0) return
+    // Auto-expand on first load if user hasn't configured anything yet —
+    // they almost certainly opened settings to set a key.
+    const noneConfigured = providers.every(p => !p.hasKey)
+    if (noneConfigured) setProvidersExpanded(true)
+  }, [providers.length])
+
+  // In-app "敬请期待" toast — replaces native alert() so the message inherits
+  // the app's design tokens (font/colors/border) instead of the OS-default
+  // window-chrome dialog. Auto-dismisses after 2.5s; consecutive clicks reset
+  // the timer so spam-clicks don't pile up multiple toasts.
+  const [lockedHint, setLockedHint] = useState<string | null>(null)
+  useEffect(() => {
+    if (!lockedHint) return
+    const t = setTimeout(() => setLockedHint(null), 2500)
+    return () => clearTimeout(t)
+  }, [lockedHint])
 
   // Load providers when settings opens
   useEffect(() => {
@@ -544,28 +566,42 @@ export default function TopBar() {
             }} />
           )}
         </button>
-        {/* Lecture mode button (hidden for now, feature in development) */}
-        {false && <button
+        {/* Lecture mode button — TEMPORARILY LOCKED.
+            Speech-to-text + provider selection is on hold until we finish the STT
+            provider rotation & error-recovery pass. Click triggers a "敬请期待"
+            hint rather than opening the panel; visual state is clearly disabled
+            (low opacity + small lock badge). To re-enable: restore the onClick
+            body to setActiveLecture(...) and remove the locked styling block. */}
+        <button
           className="btn btn-sm btn-icon"
-          onClick={() => {
-            const { activeLectureId, setActiveLecture } = useUiStore.getState()
-            if (activeLectureId) {
-              setActiveLecture(null)
-            } else {
-              setActiveLecture('__list__')  // show list
-            }
-          }}
-          title="听课模式"
+          onClick={() => setLockedHint('听课模式正在打磨中，敬请期待')}
+          title="听课模式 · 敬请期待（打磨中）"
           style={{
             padding: '5px 7px', marginRight: 4,
-            color: useUiStore.getState().activeLectureId ? 'var(--accent)' : 'var(--text-muted)',
+            color: 'var(--text-muted)',
+            opacity: 0.45,
+            cursor: 'not-allowed',
+            position: 'relative',
           }}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
             <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
           </svg>
-        </button>}
+          {/* Small lock badge in the corner so users see at a glance the feature is gated */}
+          <span style={{
+            position: 'absolute', right: 2, bottom: 2,
+            width: 8, height: 8, borderRadius: '50%',
+            background: 'var(--bg)', border: '1px solid var(--border)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            lineHeight: 0,
+          }}>
+            <svg width="5" height="6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)' }}>
+              <rect x="3" y="11" width="18" height="11" rx="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+          </span>
+        </button>
         {/* Reading log button */}
         <button
           className="btn btn-sm btn-icon"
@@ -618,18 +654,112 @@ export default function TopBar() {
             <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14, lineHeight: 1.7 }}>
               配置各 AI 供应商的 API Key。OCR 功能需要智谱 GLM，问答对话支持所有已配置的模型。
             </div>
-            <div style={{
-              fontSize: 11, color: 'var(--text-secondary)',
-              background: 'var(--bg-warm)', border: '1px solid var(--border-light)',
-              borderRadius: 6, padding: '8px 12px', marginBottom: 14, lineHeight: 1.7,
-            }}>
-              <strong style={{ color: 'var(--text)' }}>💡 第一次使用？</strong>
-              任选一家配置即可。推荐 <strong>智谱 GLM</strong>（GLM-4-Flash 免费，注册即送额度）或
-              <strong>DeepSeek</strong>（按量付费便宜，大陆直连）。各卡片下方有"获取 Key"链接直接跳转。
-              不想配 Key？看最下方的 <strong>Ollama</strong>（本地跑）或 <strong>Claude Code CLI</strong>（复用本机登录）。
-            </div>
 
-            {providers.map(provider => (
+            {/* Collapsible AI providers section — header is always visible and
+                summarizes "X 已配置 / Y 个供应商"; click to expand the full
+                cards list. Auto-expands on first load when nothing is configured.
+
+                Animation: uses the modern CSS-grid trick (grid-template-rows
+                0fr ↔ 1fr) instead of max-height — this animates the *real*
+                content height even though it varies with provider count, so
+                the panel doesn't get a clipped tail or arrive late. Easing is
+                a slight overshoot-free cubic-bezier that feels paper-soft. */}
+            <div style={{
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              marginBottom: 14,
+              background: providersExpanded ? 'transparent' : 'var(--bg-warm)',
+              overflow: 'hidden',
+              transition: 'background 0.28s ease',
+            }}>
+              <button
+                onClick={() => setProvidersExpanded(v => !v)}
+                style={{
+                  width: '100%', padding: '10px 14px',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  background: 'transparent', border: 'none', cursor: 'pointer',
+                  fontFamily: 'inherit', textAlign: 'left',
+                  transition: 'background 0.18s ease',
+                }}
+                onMouseEnter={e => { if (!providersExpanded) e.currentTarget.style.background = 'var(--border-light)' }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
+                title={providersExpanded ? '收起 AI 供应商列表' : '展开 AI 供应商列表'}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
+                    AI 供应商 · API Key
+                  </span>
+                  <span style={{
+                    fontSize: 10.5, padding: '1.5px 8px', borderRadius: 10,
+                    background: providers.some(p => p.hasKey) ? 'var(--accent-soft, rgba(193,140,87,0.15))' : 'var(--bg-warm)',
+                    color: providers.some(p => p.hasKey) ? 'var(--accent)' : 'var(--text-muted)',
+                    border: providers.some(p => p.hasKey) ? '1px solid var(--accent)' : '1px solid var(--border)',
+                    fontWeight: 500, whiteSpace: 'nowrap',
+                    transition: 'background 0.28s ease, color 0.28s ease, border-color 0.28s ease',
+                  }}>
+                    {providers.filter(p => p.hasKey).length} / {providers.length} 已配置
+                  </span>
+                  {/* Configured-list summary — fades smoothly when transitioning,
+                      kept rendered the whole time so we can opacity-tween it. */}
+                  {providers.filter(p => p.hasKey).length > 0 && (
+                    <span style={{
+                      fontSize: 11, color: 'var(--text-muted)',
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      minWidth: 0,
+                      opacity: providersExpanded ? 0 : 1,
+                      transform: providersExpanded ? 'translateX(-4px)' : 'translateX(0)',
+                      maxWidth: providersExpanded ? 0 : 360,
+                      transition: 'opacity 0.22s ease, transform 0.28s ease, max-width 0.32s ease',
+                      pointerEvents: providersExpanded ? 'none' : 'auto',
+                    }}>
+                      · {providers.filter(p => p.hasKey).map(p => p.name).join('、')}
+                    </span>
+                  )}
+                </div>
+                {/* Chevron — rotates smoothly with paper-soft easing */}
+                <svg
+                  width="14" height="14" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+                  style={{
+                    color: 'var(--text-muted)', flexShrink: 0,
+                    transition: 'transform 0.32s cubic-bezier(.4, 0, .2, 1)',
+                    transform: providersExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
+                  }}
+                >
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+
+              {/* Animated container: grid-rows trick for height, plus opacity +
+                  Y-fade on the inner content. Always rendered (no conditional)
+                  so the height tween has both endpoints to interpolate. */}
+              <div style={{
+                display: 'grid',
+                gridTemplateRows: providersExpanded ? '1fr' : '0fr',
+                transition: 'grid-template-rows 0.34s cubic-bezier(.4, 0, .2, 1)',
+              }}>
+                <div style={{ minHeight: 0, overflow: 'hidden' }}>
+                  <div style={{
+                    padding: '0 14px 14px',
+                    opacity: providersExpanded ? 1 : 0,
+                    transform: providersExpanded ? 'translateY(0)' : 'translateY(-6px)',
+                    transition: providersExpanded
+                      ? 'opacity 0.28s ease 0.06s, transform 0.32s ease 0.04s'
+                      : 'opacity 0.18s ease, transform 0.22s ease',
+                    pointerEvents: providersExpanded ? 'auto' : 'none',
+                  }}>
+                  <div style={{
+                    fontSize: 11, color: 'var(--text-secondary)',
+                    background: 'var(--bg-warm)', border: '1px solid var(--border-light)',
+                    borderRadius: 6, padding: '8px 12px', marginBottom: 12, lineHeight: 1.7,
+                  }}>
+                    <strong style={{ color: 'var(--text)' }}>💡 第一次使用？</strong>
+                    任选一家配置即可。推荐 <strong>智谱 GLM</strong>（GLM-4-Flash 免费，注册即送额度）或
+                    <strong>DeepSeek</strong>（按量付费便宜，大陆直连）。各卡片下方有"获取 Key"链接直接跳转。
+                    不想配 Key？看最下方的 <strong>Ollama</strong>（本地跑）或 <strong>Claude Code CLI</strong>（复用本机登录）。
+                  </div>
+
+                  {providers.map(provider => (
               <div
                 key={provider.id}
                 style={{
@@ -641,7 +771,15 @@ export default function TopBar() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                   <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>
                     {provider.name}
-                    {provider.id === 'glm' && <span style={{ fontSize: 10, color: 'var(--accent)', marginLeft: 6 }}>OCR 必需</span>}
+                    {provider.id === 'glm' && (
+                      <>
+                        <span style={{
+                          fontSize: 10, color: '#fff', background: 'var(--accent)',
+                          marginLeft: 6, padding: '1px 6px', borderRadius: 8, fontWeight: 600,
+                        }}>推荐起步</span>
+                        <span style={{ fontSize: 10, color: 'var(--accent)', marginLeft: 6 }}>OCR 必需</span>
+                      </>
+                    )}
                     {provider.noKey && <span style={{ fontSize: 10, color: 'var(--success)', marginLeft: 6 }}>零 Key · 本地运行</span>}
                   </div>
                   {provider.noKey ? (
@@ -688,7 +826,12 @@ export default function TopBar() {
                         </div>
                       ) : (
                         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.7 }}>
-                          可选：已登录 <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>Claude Code</a> 的话，拾卷可以直接复用，无需再配 API Key。未检测到 <code style={{ background: 'var(--bg)', padding: '0 4px', borderRadius: 3, fontSize: 10 }}>claude</code> 命令——请检查安装并确保其在系统 PATH 中，装好后点"刷新"。
+                          <strong style={{ color: 'var(--warning)' }}>⚠️ 注意：这里指的是命令行工具 Claude Code，不是 Claude Desktop（GUI 聊天 App）。</strong> 两个是不同产品，桌面 GUI 没有对外接口、复用不了。<br />
+                          要复用 CLI，需要：<br />
+                          1. 终端跑 <code style={{ background: 'var(--bg)', padding: '0 4px', borderRadius: 3, fontSize: 10 }}>npm install -g @anthropic-ai/claude-code</code> 装好 CLI<br />
+                          2. 跑一次 <code style={{ background: 'var(--bg)', padding: '0 4px', borderRadius: 3, fontSize: 10 }}>claude</code> 完成 OAuth 登录<br />
+                          3. 验证 <code style={{ background: 'var(--bg)', padding: '0 4px', borderRadius: 3, fontSize: 10 }}>claude --version</code> 能出版本号<br />
+                          完成后点下方"刷新检测"。详见 <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>Claude Code 官网</a>。
                         </div>
                       )
                     ) : null}
@@ -760,7 +903,12 @@ export default function TopBar() {
                   </>
                 )}
               </div>
-            ))}
+                  ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+            {/* End collapsible AI providers section */}
 
             {/* Speech-to-Text API Keys — hidden, feature in development */}
 
@@ -814,12 +962,83 @@ export default function TopBar() {
             {/* Diagnostics (collapsible) */}
             <DiagnosticPanel />
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              marginTop: 14, gap: 10, flexWrap: 'wrap',
+            }}>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <button
+                  className="btn btn-sm"
+                  style={{ fontSize: 11, color: 'var(--text-muted)', padding: '5px 12px' }}
+                  onClick={() => {
+                    setShowSettings(false)
+                    // Slight delay so the close-animation doesn't fight the modal mount.
+                    setTimeout(() => useUiStore.getState().setForceOnboarding(true), 60)
+                  }}
+                  title="再看一遍首启的欢迎引导（不会清空你已配置的 Key）"
+                >
+                  查看欢迎引导
+                </button>
+                <button
+                  className="btn btn-sm"
+                  style={{ fontSize: 11, color: 'var(--text-muted)', padding: '5px 12px' }}
+                  onClick={() => {
+                    setShowSettings(false)
+                    setTimeout(() => useUiStore.getState().setForceFeatureTour(true), 60)
+                  }}
+                  title="再看一遍 5 步功能教程（导入 / OCR / 划线 / 删除 / 学徒周报）"
+                >
+                  查看功能教程
+                </button>
+              </div>
               <button className="btn" onClick={() => setShowSettings(false)}>关闭</button>
             </div>
           </div>
         </div>
       )}
+      {/* Locked-feature toast — fixed position, top-center, mirrors app aesthetic
+          (warm background, accent left-stripe, serif-friendly text). Replaces
+          window.alert() so the message stays inside the app shell. */}
+      {lockedHint && (
+        <div
+          onClick={() => setLockedHint(null)}
+          style={{
+            position: 'fixed',
+            top: 56,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 9999,
+            background: 'var(--bg)',
+            border: '1px solid var(--border)',
+            borderLeft: '3px solid var(--accent)',
+            borderRadius: 6,
+            boxShadow: '0 6px 20px rgba(0, 0, 0, 0.12)',
+            padding: '10px 18px 10px 14px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            fontSize: 12,
+            color: 'var(--text)',
+            cursor: 'pointer',
+            maxWidth: 360,
+            animation: 'lockedHintIn 0.18s ease-out',
+            userSelect: 'none',
+          }}
+          title="点击关闭"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--accent)', flexShrink: 0 }}>
+            <rect x="3" y="11" width="18" height="11" rx="2" />
+            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+          </svg>
+          <span style={{ lineHeight: 1.5 }}>{lockedHint}</span>
+        </div>
+      )}
+      <style>{`
+        @keyframes lockedHintIn {
+          from { opacity: 0; transform: translate(-50%, -8px); }
+          to   { opacity: 1; transform: translate(-50%, 0); }
+        }
+      `}</style>
     </>
   )
 }

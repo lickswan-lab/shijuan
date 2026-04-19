@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { v4 as uuid } from 'uuid'
 import Markdown from 'react-markdown'
+import { renderToStaticMarkup } from 'react-dom/server'
 import remarkMath from 'remark-math'
 import { KATEX_FORGIVING, sanitizeMath } from '../../utils/markdownConfig'
 // Vditor removed - using auto-switch textarea/preview instead
@@ -792,7 +793,7 @@ function MemoAiSection({ memoId, blocks, aiHistory }: {
 
 // ===== Main Memo Editor =====
 export default function MemoEditor() {
-  const { library, updateMemo, deleteMemo, removeBlockFromMemo, snapshotMemo } = useLibraryStore()
+  const { library, updateMemo, deleteMemo, removeBlockFromMemo } = useLibraryStore()
   const { activeMemoId, setActiveMemo } = useUiStore()
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState('')
@@ -970,25 +971,108 @@ export default function MemoEditor() {
               <div style={{
                 position: 'absolute', top: '100%', right: 0, zIndex: 100, marginTop: 4,
                 background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6,
-                boxShadow: '0 4px 12px rgba(0,0,0,0.1)', padding: '2px 0', minWidth: 120,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.1)', padding: '2px 0', minWidth: 130,
               }}>
                 {[
                   { label: '导出 .md', ext: 'md' },
                   { label: '导出 .txt', ext: 'txt' },
                   { label: '导出 .html', ext: 'html' },
+                  // PDF goes through the system print dialog (user picks "Save as PDF")
+                  // — no extra deps, every OS has a built-in PDF printer.
+                  { label: '导出 .pdf', ext: 'pdf' },
+                  // DOCX uses the well-known "HTML-with-Word-namespace" trick — Word and
+                  // LibreOffice both open it as a real document. No new deps needed.
+                  { label: '导出 .docx', ext: 'docx' },
                 ].map(opt => (
                   <div key={opt.ext}
                     onClick={async () => {
                       setShowExportMenu(false)
-                      let content = activeMemo.content
-                      if (opt.ext === 'html') {
-                        content = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${activeMemo.title}</title><style>body{font-family:serif;max-width:800px;margin:40px auto;padding:0 20px;line-height:2}blockquote{border-left:3px solid #C8956C;padding-left:16px;margin:16px 0;color:#666}</style></head><body><h1>${activeMemo.title}</h1>${content.replace(/\n/g, '<br>')}</body></html>`
+
+                      // Render the memo's markdown to HTML once — used by html/pdf/docx
+                      // exports. Plain .md/.txt skip this and write raw markdown.
+                      const renderMarkdownToHtml = () => {
+                        try {
+                          return renderToStaticMarkup(
+                            <Markdown remarkPlugins={[remarkMath]}>
+                              {sanitizeMath(activeMemo.content || '')}
+                            </Markdown>
+                          )
+                        } catch {
+                          // Fallback: simple line-break replacement for malformed content
+                          return (activeMemo.content || '').replace(/\n/g, '<br>')
+                        }
                       }
-                      await window.electronAPI.exportFile(
-                        `${activeMemo.title}.${opt.ext}`,
-                        [{ name: opt.ext.toUpperCase(), extensions: [opt.ext] }],
-                        content
-                      )
+
+                      // Shared print/export styles — keeps PDF & DOCX visually consistent
+                      // with on-screen serif look. Blockquote color matches the app accent.
+                      const sharedCss = `
+                        body { font-family: 'Songti SC', 'STSong', 'SimSun', serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.9; color: #222; }
+                        h1, h2, h3, h4 { font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+                        h1 { font-size: 22px; border-bottom: 1px solid #ccc; padding-bottom: 8px; }
+                        h2 { font-size: 18px; margin-top: 24px; }
+                        h3 { font-size: 16px; }
+                        blockquote { border-left: 3px solid #C8956C; padding-left: 16px; margin: 16px 0; color: #666; }
+                        code { background: #f5f0e6; padding: 1px 4px; border-radius: 3px; font-family: Consolas, Menlo, monospace; }
+                        pre { background: #f5f0e6; padding: 12px; border-radius: 4px; overflow-x: auto; }
+                        img { max-width: 100%; }
+                        ul, ol { padding-left: 24px; }
+                        a { color: #C8956C; }
+                      `
+
+                      if (opt.ext === 'md' || opt.ext === 'txt') {
+                        await window.electronAPI.exportFile(
+                          `${activeMemo.title}.${opt.ext}`,
+                          [{ name: opt.ext.toUpperCase(), extensions: [opt.ext] }],
+                          activeMemo.content
+                        )
+                        return
+                      }
+
+                      if (opt.ext === 'html') {
+                        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${activeMemo.title}</title><style>${sharedCss}</style></head><body><h1>${activeMemo.title}</h1>${renderMarkdownToHtml()}</body></html>`
+                        await window.electronAPI.exportFile(
+                          `${activeMemo.title}.html`,
+                          [{ name: 'HTML', extensions: ['html'] }],
+                          html
+                        )
+                        return
+                      }
+
+                      if (opt.ext === 'pdf') {
+                        // Open system print dialog with a print-styled iframe — user selects
+                        // "Microsoft Print to PDF" / "Save as PDF" / etc. Works on every OS
+                        // without extra dependencies. Iframe is removed after print to avoid
+                        // a dangling DOM node.
+                        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${activeMemo.title}</title><style>${sharedCss} @media print { body { margin: 0; } }</style></head><body><h1>${activeMemo.title}</h1>${renderMarkdownToHtml()}</body></html>`
+                        const iframe = document.createElement('iframe')
+                        iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;'
+                        document.body.appendChild(iframe)
+                        const doc = iframe.contentDocument || iframe.contentWindow?.document
+                        if (!doc) { iframe.remove(); return }
+                        doc.open(); doc.write(html); doc.close()
+                        // Wait one frame for layout, then trigger print
+                        setTimeout(() => {
+                          try { iframe.contentWindow?.focus(); iframe.contentWindow?.print() }
+                          catch { /* user cancelled or print failed */ }
+                          // Give the print dialog time to capture content before removing
+                          setTimeout(() => iframe.remove(), 1000)
+                        }, 100)
+                        return
+                      }
+
+                      if (opt.ext === 'docx') {
+                        // Microsoft Word + LibreOffice both open HTML files saved with
+                        // .docx (via the special namespace headers below) as proper Word
+                        // documents. This is the canonical "HTML-to-Word" workaround that
+                        // avoids pulling in a 200KB docx library.
+                        const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><title>${activeMemo.title}</title><!--[if gte mso 9]><xml><w:WordDocument><w:View>Print</w:View><w:Zoom>100</w:Zoom></w:WordDocument></xml><![endif]--><style>${sharedCss}</style></head><body><h1>${activeMemo.title}</h1>${renderMarkdownToHtml()}</body></html>`
+                        await window.electronAPI.exportFile(
+                          `${activeMemo.title}.docx`,
+                          [{ name: 'Word', extensions: ['docx'] }],
+                          html
+                        )
+                        return
+                      }
                     }}
                     style={{ padding: '6px 14px', fontSize: 12, cursor: 'pointer' }}
                     onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
@@ -1000,9 +1084,9 @@ export default function MemoEditor() {
               </div>
             )}
           </div>
-          <button className="btn btn-sm" onClick={() => snapshotMemo(activeMemo.id)} title="保存版本快照">
-            快照{activeMemo.snapshots.length > 0 ? ` (${activeMemo.snapshots.length})` : ''}
-          </button>
+          {/* 快照按钮已移除 — 功能没有被使用，去掉以减少 UI 噪音。
+              snapshotMemo 这个 store 动作 + Memo.snapshots 数据字段保留以兼容
+              旧数据，不会丢失之前手动保存的版本（看不到入口但数据还在）。 */}
           <button className="btn btn-sm" onClick={handleDelete} style={{ color: 'var(--danger)' }}>
             删除
           </button>

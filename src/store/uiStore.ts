@@ -84,6 +84,15 @@ interface UiState {
   // Update check (populated by App.tsx's daily background check)
   updateAvailable: { version: string; downloadUrl: string | null; asarSize: number } | null
 
+  // Onboarding modal — set true to force-show even after dismissal / provider configured.
+  // Used by Settings "查看欢迎引导" button so users can re-trigger the wizard on demand.
+  forceOnboarding: boolean
+
+  // Feature tour modal — multi-step walkthrough that teaches import / OCR /
+  // highlight / annotation / 学徒周报. Same force-trigger pattern as
+  // forceOnboarding so users can re-watch the tour from Settings.
+  forceFeatureTour: boolean
+
   // Actions
   toggleSidebar: () => void
   toggleAnnotationPanel: () => void
@@ -116,6 +125,8 @@ interface UiState {
   cancelOcrQueue: () => void
   dismissOcrQueue: () => void
   setUpdateAvailable: (u: { version: string; downloadUrl: string | null; asarSize: number } | null) => void
+  setForceOnboarding: (on: boolean) => void
+  setForceFeatureTour: (on: boolean) => void
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -152,6 +163,8 @@ export const useUiStore = create<UiState>((set) => ({
     currentChunk: null,
   },
   updateAvailable: null,
+  forceOnboarding: false,
+  forceFeatureTour: false,
 
   toggleSidebar: () => set(s => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   toggleAnnotationPanel: () => set(s => ({ annotationPanelCollapsed: !s.annotationPanelCollapsed, rightPanel: 'annotation' as const })),
@@ -234,4 +247,6 @@ export const useUiStore = create<UiState>((set) => ({
   setUpdateAvailable: (u) => set({ updateAvailable: u }),
   setRightPanel: (panel) => set({ rightPanel: panel, annotationPanelCollapsed: false, ...(panel === 'agent' ? { hermesHasInsight: false } : {}) }),
   setHermesHasInsight: (has) => set({ hermesHasInsight: has }),
+  setForceOnboarding: (on) => set({ forceOnboarding: on }),
+  setForceFeatureTour: (on) => set({ forceFeatureTour: on }),
 }))

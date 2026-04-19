@@ -240,10 +240,20 @@ export default function AgentPanel() {
   }, [memory, currentEntry, textSelection, currentPdfMeta])
 
   // ===== Chat logic =====
-  // Delete a conversation from disk + in-memory list. If user deletes the
-  // active one, fall back to the next newest conversation (or a fresh blank one).
-  const handleDeleteConversation = useCallback(async (convId: string) => {
-    if (!window.confirm('删除这个对话？')) return
+  // Delete a conversation: opens an in-app confirm modal (replaces native
+  // window.confirm which looked foreign against the warm 拾卷 palette).
+  // executeDeleteConversation does the actual disk + in-memory removal.
+  const [confirmingDelete, setConfirmingDelete] = useState<{ id: string; title: string } | null>(null)
+
+  const handleDeleteConversation = useCallback((convId: string) => {
+    const c = conversations.find(x => x.id === convId)
+    setConfirmingDelete({ id: convId, title: c?.title || '未命名对话' })
+  }, [conversations])
+
+  const executeDeleteConversation = useCallback(async () => {
+    const convId = confirmingDelete?.id
+    if (!convId) return
+    setConfirmingDelete(null)
     try {
       await window.electronAPI.agentDeleteConversation?.(convId)
     } catch { /* ignore — UI will re-sync from disk next load */ }
@@ -252,7 +262,18 @@ export default function AgentPanel() {
     if (activeConv?.id === convId) {
       setActiveConv(remaining[0] || null)
     }
-  }, [conversations, activeConv])
+  }, [confirmingDelete, conversations, activeConv])
+
+  // ESC closes the confirm modal
+  useEffect(() => {
+    if (!confirmingDelete) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setConfirmingDelete(null)
+      else if (e.key === 'Enter') executeDeleteConversation()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [confirmingDelete, executeDeleteConversation])
 
   const handleNewConversation = useCallback(() => {
     const conv: AgentConversation = {
@@ -603,8 +624,28 @@ export default function AgentPanel() {
         <button style={tabStyle('apprentice')} onClick={() => setTab('apprentice')}>
           学徒{apprenticeEntries.length > 0 && <span style={{ fontSize: 9, marginLeft: 3, opacity: 0.6 }}>({apprenticeEntries.length})</span>}
         </button>
-        <button style={tabStyle('personas')} onClick={() => setTab('personas')}>
-          召唤
+        {/* 召唤 tab is LOCKED — feature gating, not yet ready for users.
+            The button is rendered as disabled (low opacity + lock badge), and clicking
+            it routes to the locked placeholder view instead of the full PersonasTab.
+            To re-enable: remove the disabled+opacity styling and the personas-locked
+            branch below; restore onClick to setTab('personas'). */}
+        <button
+          style={{
+            ...tabStyle('personas'),
+            opacity: 0.5,
+            cursor: 'not-allowed',
+            position: 'relative',
+          }}
+          onClick={() => setTab('personas')}
+          title="召唤功能正在打磨中，敬请期待"
+        >
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+            召唤
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7 }}>
+              <rect x="3" y="11" width="18" height="11" rx="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+          </span>
         </button>
       </div>
 
@@ -1139,10 +1180,133 @@ export default function AgentPanel() {
           initial archive → user can refine / feed material / rename.
           Each revision carries a rigorous 5-dimension fitness score. */}
       {tab === 'personas' && (
-        <PersonasTab />
+        // Locked placeholder for the 召唤 tab — replaces full PersonasTab while the
+        // feature is in 打磨 mode. Keeps the import (PersonasTab) so re-enabling is
+        // a one-line revert: drop this block, re-add <PersonasTab />.
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          padding: '40px 24px', gap: 14, color: 'var(--text-muted)',
+          background: 'var(--bg)',
+        }}>
+          <div style={{
+            width: 56, height: 56, borderRadius: '50%',
+            background: 'var(--bg-warm)', border: '1px solid var(--border)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: 'var(--accent)',
+          }}>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+          </div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-secondary)' }}>召唤 · 敬请期待</div>
+          <div style={{ fontSize: 11, lineHeight: 1.7, textAlign: 'center', maxWidth: 280 }}>
+            召唤功能正在打磨中：资料检索覆盖率、速率限制、人物档案蒸馏流程<br />
+            还需要再迭代一轮，先锁着避免体验落差。<br />
+            <span style={{ opacity: 0.7 }}>下个版本上线，旧档案数据保留不丢。</span>
+          </div>
+          <button
+            onClick={() => setTab('chat')}
+            style={{
+              marginTop: 6, padding: '5px 14px', fontSize: 11,
+              border: '1px solid var(--border)', borderRadius: 4,
+              background: 'transparent', color: 'var(--text-secondary)',
+              cursor: 'pointer',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          >
+            返回对话
+          </button>
+        </div>
       )}
 
       {/* Skills tab removed in batch 28 — see note at top of file. */}
+
+      {/* Custom delete-confirm modal — replaces native window.confirm so the
+          dialog matches the warm 拾卷 palette instead of showing a stark
+          system-style "shijuan / 删除这个对话?" popup. */}
+      {confirmingDelete && (
+        <div
+          onClick={() => setConfirmingDelete(null)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 9999,
+            background: 'rgba(40, 30, 20, 0.32)',
+            backdropFilter: 'blur(2px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            animation: 'sj-fade-in 0.14s ease-out',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              minWidth: 320, maxWidth: 380,
+              background: 'var(--bg-paper, #faf6ef)',
+              border: '1px solid var(--border)',
+              borderLeft: '3px solid var(--accent)',
+              borderRadius: 6,
+              padding: '18px 20px 16px',
+              boxShadow: '0 12px 36px rgba(60, 40, 20, 0.18)',
+              fontFamily: 'inherit',
+              animation: 'sj-pop-in 0.18s cubic-bezier(.2,.9,.3,1.2)',
+            }}
+          >
+            <div style={{
+              fontSize: 14, fontWeight: 600, color: 'var(--text-primary)',
+              marginBottom: 8, letterSpacing: 0.3,
+            }}>
+              删除对话
+            </div>
+            <div style={{
+              fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-secondary)',
+              marginBottom: 18,
+            }}>
+              确定删除「<span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>
+                {confirmingDelete.title.length > 24
+                  ? confirmingDelete.title.slice(0, 24) + '…'
+                  : confirmingDelete.title}
+              </span>」？<br />
+              <span style={{ fontSize: 11, opacity: 0.7 }}>此操作无法撤销。</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                onClick={() => setConfirmingDelete(null)}
+                style={{
+                  padding: '6px 14px', fontSize: 12,
+                  border: '1px solid var(--border)', borderRadius: 4,
+                  background: 'transparent', color: 'var(--text-secondary)',
+                  cursor: 'pointer', transition: 'background 0.12s',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                取消
+              </button>
+              <button
+                onClick={executeDeleteConversation}
+                autoFocus
+                style={{
+                  padding: '6px 16px', fontSize: 12, fontWeight: 500,
+                  border: '1px solid #c45a3a', borderRadius: 4,
+                  background: '#c45a3a', color: '#fff',
+                  cursor: 'pointer', transition: 'background 0.12s',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = '#a84826')}
+                onMouseLeave={e => (e.currentTarget.style.background = '#c45a3a')}
+              >
+                删除
+              </button>
+            </div>
+          </div>
+          <style>{`
+            @keyframes sj-fade-in { from { opacity: 0 } to { opacity: 1 } }
+            @keyframes sj-pop-in {
+              from { opacity: 0; transform: translateY(-6px) scale(0.97) }
+              to { opacity: 1; transform: translateY(0) scale(1) }
+            }
+          `}</style>
+        </div>
+      )}
     </div>
   )
 }

@@ -2076,7 +2076,7 @@ export default function PersonasTab() {
               lineHeight: 1.75, textAlign: 'center',
               maxWidth: 440, marginBottom: 32,
             }}>
-              输入名字，拾卷用 6 维度蒸馏出一个可以召唤他的 skill——既能在这里对话，也能导出给 Claude Code。
+              输入名字，拾卷用 6 维度蒸馏召唤他的 skill——既能在这里和他对话，也能导出给 Claude Code 使用。
             </div>
 
             {/* Search — pill-shaped input with embedded button */}
@@ -3130,7 +3130,7 @@ export default function PersonasTab() {
                       ⚠️ <b>RAG 无可用原文</b>：此档案没有 hydrated 的 fullContent（可能是 imported skill 或 legacy 档案），对话只基于 skill 心智模型——AI 无法引原文，深度有限。
                     </div>
                   ) : null}
-                  这是本档案的独立召唤对话——以该人物的 skill 作为 system prompt。对话<b>不会</b>保存到历史（下次关闭后丢失）；如果想长期对话，用 Hermes 对话面板里的"召唤"入口。<br />
+                  这是本档案的独立召唤对话——以该作者的思维方式回应。对话<b>不会</b>保存到历史（下次关闭后丢失）；如果想长期对话，用 Hermes 面板里的"召唤"入口。<br />
                   提问示例："你怎么看 X？""你当年为什么做 Y 的决定？""这段文字你会怎么批注？"
                 </div>
               )}

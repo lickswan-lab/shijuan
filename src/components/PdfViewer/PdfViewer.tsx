@@ -561,8 +561,11 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
         <div key={i} data-page-number={i + 1} style={{ marginBottom: 28 }}>
           {sections.length > 1 && (
             <div style={{
-              fontSize: 12, color: '#bbb', marginBottom: 10,
-              paddingBottom: 6, borderBottom: '1px solid #eee',
+              // Was #bbb / #eee hardcoded — fine in light mode, too bright in
+              // dark mode (#eee border becomes a glaring white bar). Theme vars
+              // keep the "page break marker" subtle in both themes.
+              fontSize: 12, color: 'var(--text-muted)', marginBottom: 10,
+              paddingBottom: 6, borderBottom: '1px solid var(--border-light)',
               fontFamily: '-apple-system, "Microsoft YaHei", sans-serif',
               userSelect: 'none', opacity: 0.6,
             }}>
@@ -836,7 +839,12 @@ function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationCli
   return (
     <>
       <div ref={containerRef}
-        style={{ maxWidth: 800, margin: '0 auto', padding: '32px 40px 80px', fontSize: 'inherit', fontWeight: 'inherit', color: 'inherit', lineHeight: 2, fontFamily: 'var(--font-serif)', position: 'relative' }}
+        style={{
+          maxWidth: 'min(95%, 1400px)', margin: '0 auto',
+          padding: '32px clamp(28px, 4vw, 72px) 80px',
+          fontSize: 'inherit', fontWeight: 'inherit', color: 'inherit',
+          lineHeight: 2, fontFamily: 'var(--font-serif)', position: 'relative',
+        }}
         dangerouslySetInnerHTML={{ __html: html }}
       />
       {markMenu && (
@@ -1759,13 +1767,35 @@ export default function PdfViewer() {
     setLoadError('PDF 解析失败: ' + err.message)
   }, [])
 
-  // Page-jump submission handler (for toolbar input)
+  // Compute total pages — for PDF use numPages; for OCR count "=== 第 N 页 ===" markers
+  // (OcrContent splits on that pattern; section count = page count).
+  const totalPages = useMemo(() => {
+    if (numPages > 0) return numPages
+    if (viewMode === 'ocr' && ocrFullText) {
+      const matches = ocrFullText.match(/=== 第 \d+ 页 ===/g)
+      if (matches && matches.length > 0) return matches.length
+    }
+    return 0
+  }, [numPages, viewMode, ocrFullText])
+
+  // Page-jump submission handler (for toolbar input).
+  // Clamps user input to [1, totalPages] — entering a number larger than the max
+  // snaps to the last page (and updates the visible input so the user sees the clamp).
   const handlePageJump = useCallback(() => {
-    const n = parseInt(pageJumpInput, 10)
-    if (!Number.isFinite(n) || n < 1) return
+    const raw = parseInt(pageJumpInput, 10)
+    if (!Number.isFinite(raw) || raw < 1) return
+    const max = totalPages > 0 ? totalPages : raw
+    const n = Math.min(raw, max)
+    // If we clamped, reflect that in the input briefly so the user sees what happened
+    if (n !== raw) setPageJumpInput(String(n))
     const ok = scrollToPage(n)
-    if (ok) setPageJumpInput('')
-  }, [pageJumpInput, scrollToPage])
+    // Clear input only on a clean (non-clamped) successful jump; keep clamped value
+    // visible for a moment so the user understands max-snap behavior
+    if (ok && n === raw) setPageJumpInput('')
+    else if (ok && n !== raw) {
+      setTimeout(() => setPageJumpInput(''), 800)
+    }
+  }, [pageJumpInput, scrollToPage, totalPages])
 
   // Keyboard shortcuts for PDF viewing
   useEffect(() => {
@@ -2253,31 +2283,84 @@ export default function PdfViewer() {
         {numPages > 0 && (
           <span style={{ color: 'var(--text-muted)', marginLeft: 8, flexShrink: 0 }}>{numPages} 页</span>
         )}
-        {/* Page jump (PDF view only — for OCR we could support it too but the user
-            generally navigates by scroll in OCR. Uses the same input for both modes.) */}
-        {(numPages > 0 || (viewMode === 'ocr' && /=== 第 \d+ 页 ===/.test(ocrFullText || ''))) && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginLeft: 6, flexShrink: 0 }}>
-            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>跳转</span>
+        {/* Page jump (PDF view + OCR view with page markers).
+            totalPages handles both: PDF→numPages, OCR→count of "=== 第 N 页 ===" markers. */}
+        {totalPages > 0 && (
+          <span style={{
+            fontSize: 10, color: 'var(--text-muted)',
+            marginLeft: 10, flexShrink: 0, whiteSpace: 'nowrap',
+            letterSpacing: 0.5,
+          }}>跳转</span>
+        )}
+        {totalPages > 0 && (
+          // Pill-shaped page jump: input + arrow button in one container, preceded
+          // by a "跳转" text label (rendered as a sibling span above so it sits to
+          // the left of the pill with its own spacing). Both clickable button and
+          // Enter key trigger the jump (Ctrl+G focuses input via shortcut elsewhere).
+          <div
+            // Proportions tuned so the pill isn't too elongated — slightly taller
+            // vertical padding + narrower input width gives a ~2.8:1 W:H ratio instead
+            // of the previous ~4:1 that looked skinny/stretched.
+            style={{
+              display: 'flex', alignItems: 'center',
+              marginLeft: 8, flexShrink: 0,
+              border: '1px solid var(--border)', borderRadius: 12,
+              background: 'var(--bg-warm)', overflow: 'hidden',
+              transition: 'border-color 0.15s, box-shadow 0.15s',
+            }}
+            onFocus={e => (e.currentTarget.style.borderColor = 'var(--accent)')}
+            onBlur={e => (e.currentTarget.style.borderColor = 'var(--border)')}
+          >
             <input
               ref={pageJumpRef}
-              type="number"
-              min={1}
-              max={numPages || undefined}
+              // Use type="text" + inputMode="numeric" instead of type="number" — the
+              // browser's up/down spinner arrows on number inputs are tiny, easy to
+              // mis-click, and feel cramped at this size. Digit filtering is done in
+              // onChange so the user can still only enter numbers.
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
               value={pageJumpInput}
-              onChange={e => setPageJumpInput(e.target.value)}
+              onChange={e => {
+                // Allow only digits; strip everything else
+                const digits = e.target.value.replace(/\D/g, '')
+                setPageJumpInput(digits)
+              }}
               onKeyDown={e => {
                 if (e.key === 'Enter') { e.preventDefault(); handlePageJump() }
                 else if (e.key === 'Escape') { e.currentTarget.blur(); setPageJumpInput('') }
               }}
-              placeholder="页"
-              title="输入页码后回车跳转 (Ctrl+G)"
+              placeholder={totalPages > 0 ? `1-${totalPages}` : '跳转到'}
+              title={totalPages > 0
+                ? `输入页码后按回车或点 → 跳转，范围 1-${totalPages} (Ctrl+G 聚焦)`
+                : '输入页码后按回车或点 → 跳转 (Ctrl+G 聚焦)'}
               style={{
-                width: 44, padding: '2px 5px', fontSize: 11,
-                border: '1px solid var(--border)', borderRadius: 4,
-                background: 'var(--bg-warm)', color: 'var(--text)',
-                outline: 'none',
+                width: 48, padding: '4px 7px', fontSize: 11,
+                border: 'none', background: 'transparent',
+                color: 'var(--text)', outline: 'none',
+                textAlign: 'right',
               }}
             />
+            <button
+              onClick={handlePageJump}
+              disabled={!pageJumpInput.trim()}
+              title="跳转到该页"
+              style={{
+                padding: '4px 8px',
+                background: pageJumpInput.trim() ? 'var(--accent)' : 'transparent',
+                color: pageJumpInput.trim() ? '#fff' : 'var(--text-muted)',
+                border: 'none', borderLeft: '1px solid var(--border)',
+                cursor: pageJumpInput.trim() ? 'pointer' : 'default',
+                fontSize: 11, lineHeight: 1,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                transition: 'background 0.15s',
+              }}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
+                <line x1="5" y1="12" x2="19" y2="12"/>
+                <polyline points="12 5 19 12 12 19"/>
+              </svg>
+            </button>
           </div>
         )}
         {/* PDF outline toggle — only shown when a PDF is loaded AND it has a real TOC */}
@@ -2300,19 +2383,25 @@ export default function PdfViewer() {
         )}
         <div style={{ flex: 1 }} />
 
-        {/* View mode toggle — only for PDF files */}
+        {/* View mode toggle — only for PDF files.
+            flexShrink: 0 + whiteSpace: nowrap prevent the buttons from squishing in
+            narrow windows (previously "OCR 文本" would wrap vertically into an ugly
+            tall sliver resembling a book spine). */}
         {isPdf && (
-          <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', marginRight: 8 }}>
+          <div style={{
+            display: 'flex', flexShrink: 0,
+            border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', marginRight: 8,
+          }}>
             <button
               className={viewMode === 'pdf' ? 'btn btn-sm btn-primary' : 'btn btn-sm'}
-              style={{ borderRadius: 0, border: 'none' }}
+              style={{ borderRadius: 0, border: 'none', whiteSpace: 'nowrap', flexShrink: 0 }}
               onClick={() => setViewMode('pdf')}
             >
               PDF
             </button>
             <button
               className={viewMode === 'ocr' ? 'btn btn-sm btn-primary' : 'btn btn-sm'}
-              style={{ borderRadius: 0, border: 'none', borderLeft: '1px solid var(--border)' }}
+              style={{ borderRadius: 0, border: 'none', borderLeft: '1px solid var(--border)', whiteSpace: 'nowrap', flexShrink: 0 }}
               onClick={() => { if (ocrFullText) setViewMode('ocr'); else alert('请先进行 OCR') }}
               disabled={!ocrFullText}
             >
@@ -2340,22 +2429,24 @@ export default function PdfViewer() {
             <button className="btn btn-sm" onClick={() => setScale(s => Math.min(3, s + 0.2))}>+</button>
           </>
         ) : (viewMode === 'ocr' || ['docx', 'doc'].includes(fileExt) || isText) ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>字号</span>
+          // flexShrink: 0 on the container + whiteSpace: nowrap on labels prevent
+          // "字号/粗细/深浅" from wrapping vertically in narrow windows.
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap', flexShrink: 0 }}>字号</span>
             <input type="range" min="12" max="24" value={ocrFontSize}
               onChange={e => setOcrFontSize(Number(e.target.value))}
-              style={{ width: 50, height: 3, accentColor: 'var(--accent)' }} />
-            <span style={{ fontSize: 10, color: 'var(--text-muted)', minWidth: 20 }}>{ocrFontSize}</span>
+              style={{ width: 50, height: 3, accentColor: 'var(--accent)', flexShrink: 0 }} />
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', minWidth: 20, whiteSpace: 'nowrap', flexShrink: 0 }}>{ocrFontSize}</span>
 
-            <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 }}>粗细</span>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4, whiteSpace: 'nowrap', flexShrink: 0 }}>粗细</span>
             <input type="range" min="200" max="800" step="50" value={ocrFontWeight}
               onChange={e => setOcrFontWeight(Number(e.target.value))}
-              style={{ width: 50, height: 3, accentColor: 'var(--accent)' }} />
+              style={{ width: 50, height: 3, accentColor: 'var(--accent)', flexShrink: 0 }} />
 
-            <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 }}>深浅</span>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4, whiteSpace: 'nowrap', flexShrink: 0 }}>深浅</span>
             <input type="range" min="10" max="100" value={ocrColorDepth}
               onChange={e => setOcrColorDepth(Number(e.target.value))}
-              style={{ width: 40, height: 3, accentColor: 'var(--accent)' }} />
+              style={{ width: 40, height: 3, accentColor: 'var(--accent)', flexShrink: 0 }} />
 
             <span style={{ width: 1, height: 14, background: 'var(--border)', marginLeft: 4 }} />
 
@@ -2554,23 +2645,12 @@ export default function PdfViewer() {
           </button>
         )}
 
-        {/* Immersive mode toggle — hidden for now, feature in development */}
-        {false && <button
-          className="btn btn-sm"
-          style={{ marginLeft: 8 }}
-          onClick={() => {
-            useUiStore.getState().setImmersiveMode(!immersiveMode)
-          }}
-          title={immersiveMode ? '退出沉浸阅读（ESC）' : '沉浸式阅读'}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            {immersiveMode ? (
-              <><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></>
-            ) : (
-              <><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></>
-            )}
-          </svg>
-        </button>}
+        {/* Immersive mode toggle removed — per user feedback it wasn't useful.
+            The ImmersiveOcrReader / ImmersiveAnnotationBox code is kept for now as
+            dormant (unreachable) code; a follow-up cleanup can strip those components
+            + the dualPageMode state entirely. uiStore.immersiveMode defaults to false,
+            so existing users who had it on will auto-exit on next load via the effect
+            that re-evaluates it. */}
       </div>
 
       {/* Re-reading greeting. Two display modes:
@@ -2867,7 +2947,10 @@ export default function PdfViewer() {
             alignItems: 'stretch', padding: 0,
             background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
           }} onMouseUp={handleMouseUp}>
-            <div style={{ maxWidth: 800, margin: '0 auto', padding: '40px 48px', minHeight: '100%' }} data-page-number="1">
+            <div style={{
+              maxWidth: 'min(95%, 1400px)', margin: '0 auto',
+              padding: '40px clamp(32px, 4vw, 80px)', minHeight: '100%',
+            }} data-page-number="1">
               <TextFileContent
                 key={currentEntry?.id}
                 absPath={absPath}
@@ -2915,6 +2998,10 @@ export default function PdfViewer() {
       {/* ===== OCR Text View ===== */}
       {viewMode === 'ocr' && !editMode && (
         <div
+          // Reuse scrollRef here so the page-jump's scrollToPage() can find OcrContent's
+          // [data-page-number] elements. PDF/Edit/OCR scroll areas are mutually exclusive
+          // — only one mounts at a time, so sharing the ref is safe.
+          ref={scrollRef}
           className="pdf-scroll-area"
           style={{
             background: immersiveMode ? `hsl(${ocrBgHue}, ${Math.max(ocrBgSat - 10, 0)}%, ${Math.max(ocrBgLight - 8, 10)}%)` : `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
@@ -2937,21 +3024,30 @@ export default function PdfViewer() {
               onTextSelect={handleImmersiveTextSelect}
             />
           ) : (
-            /* Normal single-column OCR layout */
+            /* Normal single-column OCR layout — uses min(95%, 1400px) so the
+               column fills wide-screen / fullscreen panels (used to leave huge
+               empty bands on both sides at 800px) while still capping line
+               length on very wide displays for readability. Horizontal padding
+               uses clamp() so it scales with viewport — narrow windows get a
+               tighter 32px gutter, wide windows breathe with up to 80px. */
             <div style={{
-              maxWidth: 800, margin: '0 auto', padding: '40px 48px 80px',
+              maxWidth: 'min(95%, 1400px)', margin: '0 auto',
+              padding: '40px clamp(32px, 4vw, 80px) 80px',
               background: 'transparent', minHeight: '100%',
               fontSize: ocrFontSize, fontWeight: ocrFontWeight,
               color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
             }}>
               <div style={{
                 textAlign: 'center', marginBottom: 32, paddingBottom: 20,
-                borderBottom: '2px solid #333'
+                // Was hardcoded #333 — invisible in dark mode and too harsh in
+                // light mode. var(--border) adapts; opacity tones it down so it
+                // still reads as "subtle divider" not "rule line."
+                borderBottom: '2px solid var(--border)',
               }}>
                 <h2 style={{ fontSize: ocrFontSize + 4, lineHeight: 1.4, marginBottom: 6 }}>
                   {currentEntry?.title || ''}
                 </h2>
-                <div style={{ fontSize: 12, color: '#999', fontWeight: 400 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 400 }}>
                   OCR 识别文本
                   {ocrFilePath && <span> · {ocrFilePath.split(/[/\\]/).pop()}</span>}
                 </div>
