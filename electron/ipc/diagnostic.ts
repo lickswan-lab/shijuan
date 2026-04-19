@@ -72,7 +72,8 @@ let crashLogLock: Promise<unknown> = Promise.resolve()
 // Prefers fs.appendFile when the file is still small enough that we don't need
 // to trim — that's a single syscall and avoids the lost-write race entirely.
 // Only falls back to read-modify-write when we actually need to trim.
-async function appendCrashLog(text: string): Promise<void> {
+// Exported so main.ts can log startup-window failures (when no IPC channel exists yet).
+export async function appendCrashLog(text: string): Promise<void> {
   const run = crashLogLock.catch(() => {}).then(async () => {
     try {
       await fs.mkdir(DATA_DIR, { recursive: true })
