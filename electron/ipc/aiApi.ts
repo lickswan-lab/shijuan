@@ -4,6 +4,7 @@ import path from 'path'
 import { spawn } from 'child_process'
 import type { HistoryEntry } from '../../src/types/library'
 import { atomicWriteJson } from './library'
+import { throttleProvider, bumpProviderInterval, isRateLimitError } from './aiThrottle'
 
 // ===== GLM-OCR service limits (per their docs, 2026-04) =====
 // PDF: ≤ 50 MB, ≤ 100 pages. We stay well under both with a 40MB / 80-page soft cap
@@ -407,6 +408,12 @@ async function saveApiKeys() {
   await atomicWriteJson(KEYS_FILE, apiKeys)
 }
 
+/** Read-only getter for other main-process modules that need a provider's
+ *  key (e.g. embedding API in Phase A RAG). Returns undefined if not set. */
+export function getApiKeyFor(providerId: string): string | undefined {
+  return apiKeys[providerId] || undefined
+}
+
 // ===== Chat API call =====
 
 export async function callChat(providerId: string, model: string, messages: Array<{ role: string; content: string }>): Promise<string> {
@@ -421,6 +428,10 @@ export async function callChat(providerId: string, model: string, messages: Arra
   if (providerId === 'claude_cli') {
     return callClaudeCli(messages)
   }
+
+  // 主进程节流：所有 GLM 入口（chat / embed / web-search-pro）共用同一个
+  // chokepoint。撞 429 自动调宽 → 后续所有调用变保守。
+  await throttleProvider(providerId)
 
   // Claude uses a different request/response format
   if (providerId === 'claude') {
@@ -438,6 +449,7 @@ export async function callChat(providerId: string, model: string, messages: Arra
 
   if (!response.ok) {
     const text = await response.text()
+    if (isRateLimitError(`${response.status} ${text}`)) bumpProviderInterval(providerId)
     throw new Error(`${provider.name} API error ${response.status}: ${text.substring(0, 200)}`)
   }
 
@@ -478,13 +490,31 @@ async function callClaude(key: string, model: string, messages: Array<{ role: st
 }
 
 // ===== Streaming Chat =====
-
+//
+// Options:
+//   webSearch — lets the AI search the live web during generation. Per-provider
+//   protocol:
+//     Claude: tools: [{type:'web_search_20250305', name:'web_search'}] — Claude
+//       handles the search loop autonomously, tool_use + tool_result are
+//       interleaved into the stream but the final assistant text is what we emit.
+//     Kimi: tools: [{type:'builtin_function', function:{name:'$web_search'}}] —
+//       Moonshot runs the search server-side; same deal, final text emitted.
+//     GLM (智谱): tools: [{type:'web_search', web_search:{enable:true}}] — Zhipu
+//       runs search server-side.
+//     Gemini: tools: [{google_search: {}}] via their OpenAI-compat endpoint.
+//     OpenAI / DeepSeek / Doubao: no native web_search tool. We run a manual
+//       function-calling loop — expose a `web_search` function that we execute
+//       (via nuwa-search) when the AI asks, then feed results back and stream
+//       the final answer. Capped at 2 iterations to avoid runaway.
+//     Ollama / Claude CLI: ignore webSearch flag (not supported); caller's
+//       prompt-embedded sources are the only grounding.
 export async function callChatStream(
   providerId: string,
   model: string,
   messages: Array<{ role: string; content: string }>,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
+  opts?: { webSearch?: boolean },
 ): Promise<string> {
   const provider = PROVIDERS.find(p => p.id === providerId)
   if (!provider) throw new Error(`未知的 AI 供应商: ${providerId}`)
@@ -497,23 +527,42 @@ export async function callChatStream(
     return callClaudeCli(messages, onChunk, signal)
   }
 
+  // 主进程节流（chokepoint）：所有 GLM 入口共用同一份队列状态
+  await throttleProvider(providerId)
+
+  const webSearch = !!opts?.webSearch
+
   if (providerId === 'claude') {
-    return callClaudeStream(key, model, messages, onChunk, signal)
+    return callClaudeStream(key, model, messages, onChunk, signal, webSearch)
   }
 
-  // OpenAI-compatible streaming
+  // Build provider-specific tools array if webSearch requested
+  const tools: any[] | undefined = webSearch ? buildWebSearchTools(providerId) : undefined
+
+  // Providers with native web_search baked in (server-side loop): Kimi/GLM/Gemini.
+  // For these, we just pass tools and read the normal content stream.
+  // Providers WITHOUT native web_search: OpenAI/DeepSeek/Doubao — run a manual
+  // function-calling loop if user requested webSearch.
+  if (webSearch && isManualFunctionCallingProvider(providerId)) {
+    return callWithManualSearchLoop(provider, key, model, messages, onChunk, signal)
+  }
+
+  const body: any = { model, messages, stream: true }
+  if (tools) body.tools = tools
+
   const response = await fetch(provider.chatUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...provider.authHeader(key),
     },
-    body: JSON.stringify({ model, messages, stream: true }),
+    body: JSON.stringify(body),
     signal,
   })
 
   if (!response.ok) {
     const text = await response.text()
+    if (isRateLimitError(`${response.status} ${text}`)) bumpProviderInterval(providerId)
     throw new Error(`${provider.name} API error ${response.status}: ${text.substring(0, 200)}`)
   }
 
@@ -522,18 +571,174 @@ export async function callChatStream(
   })
 }
 
-async function callClaudeStream(
+// Which providers have a server-side "AI searches by itself" web_search
+// capability that we just need to pass a `tools` hint to.
+function isManualFunctionCallingProvider(providerId: string): boolean {
+  // These need us to run the function-calling loop ourselves.
+  return ['openai', 'deepseek', 'doubao'].includes(providerId)
+}
+
+// Build the appropriate tools payload per provider for server-side web search.
+function buildWebSearchTools(providerId: string): any[] {
+  switch (providerId) {
+    case 'kimi':
+      // Moonshot builtin function
+      return [{ type: 'builtin_function', function: { name: '$web_search' } }]
+    case 'glm':
+      // Zhipu native web_search tool — upgraded from minimal { enable: true }
+      // to the full search-pro config: jina engine + 30 results + recent +
+      // search_result returned alongside the AI's summary. The richer config
+      // gives the distillation prompt much more raw material to work with.
+      return [{
+        type: 'web_search',
+        web_search: {
+          enable: true,
+          search_engine: 'search_pro_jina',
+          search_recency_filter: 'noLimit',
+          count: 30,
+          search_result: true,
+          require_search: true,
+        },
+      }]
+    case 'gemini':
+      // Via OpenAI-compat endpoint; Google grounding schema
+      return [{ google_search: {} }]
+    default:
+      // Manual-loop providers pass tools via different path; not used here
+      return []
+  }
+}
+
+// Manual function-calling loop for providers that don't have a native web_search tool.
+// Flow:
+//   1. First call (non-streaming) with tools=[web_search]. Check response.
+//      - If assistant calls web_search: execute, append tool_result, loop.
+//      - If assistant responds with plain text: skip straight to streaming call.
+//   2. Second call (streaming) with the tool results injected into messages,
+//      so the AI's final answer streams to the user normally.
+// Cap at 2 search iterations to prevent runaway loops on weird queries.
+async function callWithManualSearchLoop(
+  provider: AiProvider,
   key: string,
   model: string,
   messages: Array<{ role: string; content: string }>,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
 ): Promise<string> {
+  // Lazy-import search from personas module to avoid a dependency cycle.
+  // We call the same HTTP sources the `nuwa-search` IPC uses but inline.
+  const { multiSourceSearchInline } = await import('./personas-search-helper')
+
+  const webSearchTool = {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: '通过互联网搜索真实资料。当需要查询人物、事件、定义、时间、著作等实时或具体信息时调用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '搜索关键词（中文或英文）' },
+        },
+        required: ['query'],
+      },
+    },
+  }
+
+  const conversation: any[] = messages.map(m => ({ ...m }))
+  const MAX_ITER = 2
+  let iter = 0
+
+  while (iter < MAX_ITER) {
+    // Non-streaming call to detect tool_calls
+    const res = await fetch(provider.chatUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...provider.authHeader(key) },
+      body: JSON.stringify({ model, messages: conversation, tools: [webSearchTool], stream: false }),
+      signal,
+    })
+    if (!res.ok) {
+      const t = await res.text()
+      throw new Error(`${provider.name} API error ${res.status}: ${t.substring(0, 200)}`)
+    }
+    const data: any = await res.json()
+    const msg = data.choices?.[0]?.message
+    const toolCalls = msg?.tool_calls
+    if (!toolCalls || toolCalls.length === 0) {
+      // No search requested — just emit what we got as if streaming
+      const text = msg?.content || ''
+      if (text) onChunk(text)
+      return text
+    }
+
+    // Run each search in parallel, feed results back
+    conversation.push(msg)  // append assistant's tool_call message
+    await Promise.all(toolCalls.map(async (tc: any) => {
+      let query = ''
+      try { query = JSON.parse(tc.function?.arguments || '{}').query || '' } catch { /* ignore */ }
+      let resultText = ''
+      if (query) {
+        try {
+          const sources = await multiSourceSearchInline(query)
+          resultText = sources.slice(0, 5).map(s =>
+            `[${s.source}] ${s.title}\n${s.snippet || ''}\n链接: ${s.url}`
+          ).join('\n\n')
+          if (!resultText) resultText = '(未找到相关资料)'
+        } catch (err: any) {
+          resultText = `(搜索失败: ${err.message})`
+        }
+      } else {
+        resultText = '(未提供搜索关键词)'
+      }
+      conversation.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content: resultText,
+      })
+    }))
+    iter++
+  }
+
+  // After loop: stream the final answer (no more tools)
+  const finalRes = await fetch(provider.chatUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...provider.authHeader(key) },
+    body: JSON.stringify({ model, messages: conversation, stream: true }),
+    signal,
+  })
+  if (!finalRes.ok) {
+    const t = await finalRes.text()
+    throw new Error(`${provider.name} API error ${finalRes.status}: ${t.substring(0, 200)}`)
+  }
+  return parseSSEStream(finalRes, onChunk, (data) => data.choices?.[0]?.delta?.content || '')
+}
+
+async function callClaudeStream(
+  key: string,
+  model: string,
+  messages: Array<{ role: string; content: string }>,
+  onChunk: (text: string) => void,
+  signal?: AbortSignal,
+  webSearch?: boolean,
+): Promise<string> {
   const systemMsg = messages.find(m => m.role === 'system')?.content || ''
   const chatMessages = messages.filter(m => m.role !== 'system').map(m => ({
     role: m.role as 'user' | 'assistant',
     content: m.content,
   }))
+
+  const body: any = {
+    model,
+    max_tokens: 4096,
+    stream: true,
+    system: systemMsg,
+    messages: chatMessages,
+  }
+  // Claude's native web search tool (automatic agentic loop handled by Claude
+  // itself — we just declare the tool and Claude calls it as needed, with
+  // tool_use / tool_result events interleaved in the SSE stream).
+  if (webSearch) {
+    body.tools = [{ type: 'web_search_20250305', name: 'web_search' }]
+  }
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -542,13 +747,7 @@ async function callClaudeStream(
       'x-api-key': key,
       'anthropic-version': '2023-06-01',
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: 4096,
-      stream: true,
-      system: systemMsg,
-      messages: chatMessages,
-    }),
+    body: JSON.stringify(body),
     signal,
   })
 
@@ -558,7 +757,9 @@ async function callClaudeStream(
   }
 
   return parseSSEStream(response, onChunk, (data) => {
-    // Claude SSE: content_block_delta events have delta.text
+    // Claude SSE: content_block_delta events have delta.text for text, or
+    // delta.partial_json for tool_use arguments (ignored — we only stream text
+    // to the user; tool calls happen server-side).
     if (data.type === 'content_block_delta') {
       return data.delta?.text || ''
     }
@@ -870,7 +1071,7 @@ export function registerAiApiIpc(): void {
 
   // === Streaming chat ===
 
-  ipcMain.handle('ai-chat-stream', async (event, streamId: string, providerId: string, model: string, messages: Array<{ role: string; content: string }>) => {
+  ipcMain.handle('ai-chat-stream', async (event, streamId: string, providerId: string, model: string, messages: Array<{ role: string; content: string }>, opts?: { webSearch?: boolean }) => {
     const controller = new AbortController()
     activeAbortControllers.set(streamId, controller)
     try {
@@ -884,7 +1085,7 @@ export function registerAiApiIpc(): void {
 
       const result = await callChatStream(pId, mId, messages, (chunk) => {
         try { event.sender.send('ai-stream-chunk', streamId, chunk) } catch {}
-      }, controller.signal)
+      }, controller.signal, opts)
       event.sender.send('ai-stream-done', streamId, result)
       return { success: true, text: result }
     } catch (err: any) {

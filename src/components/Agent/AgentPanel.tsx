@@ -5,11 +5,12 @@ import remarkMath from 'remark-math'
 import { KATEX_FORGIVING as rehypeKatex } from '../../utils/markdownConfig'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
-import type { AgentMessage, AgentConversation, HermesInsight } from '../../types/library'
+import type { AgentMessage, AgentConversation } from '../../types/library'
 import { buildAgentSystemPrompt, type AgentContext } from './agentPrompt'
 import { parseToolCalls, hasToolCalls, extractMemoryUpdate, cleanResponse, executeTool } from './agentTools'
 import { buildApprenticePrompt } from './apprenticePrompt'
 import { APPRENTICE_DIALOGUE_SYSTEM_PROMPT, buildApprenticeDialogueUserMessage } from './apprenticeDialoguePrompt'
+import PersonasTab from './PersonasTab'
 
 // NOTE: The 'Skills' panel tab was removed in batch 28. Reason:
 //   - The 13 built-in tools shown there were display-only (users couldn't
@@ -31,7 +32,16 @@ interface ConfiguredProvider {
   models: Array<{ id: string; name: string }>
 }
 
-type PanelTab = 'chat' | 'insights' | 'apprentice'
+// Tab "personas" (UI 名"名家") replaced the old "insights" tab in batch 29.
+// Reasons insights was removed:
+//   - Prompt was old "AI 助手" voice (gave "个性化建议") — conflicted with
+//     拾卷's observer-companion philosophy that严禁 command-form advice
+//   - Data source was memory.md (abstract Hermes-authored notes), requiring
+//     users to already-have-used-Hermes-a-lot → near-zero adoption
+//   - Functional overlap with apprentice weekly (which does this better)
+// IPC agent-load-insight / agent-save-insight kept for back-compat with
+// existing insights.json files on users' disks.
+type PanelTab = 'chat' | 'personas' | 'apprentice'
 
 // Format "X 天前" / "上周" / "N 周前"
 function formatTimeAgo(iso: string): string {
@@ -44,6 +54,13 @@ function formatTimeAgo(iso: string): string {
   if (weeks === 1) return '上周'
   return `${weeks} 周前`
 }
+
+// ===== Resize config =====
+// Persist user's preferred panel width so it survives session reloads.
+const AGENT_WIDTH_KEY = 'sj-agent-panel-width'
+const AGENT_WIDTH_MIN = 320
+const AGENT_WIDTH_MAX = 800
+const AGENT_WIDTH_DEFAULT = 380
 
 // ===== Main Component =====
 export default function AgentPanel() {
@@ -67,9 +84,7 @@ export default function AgentPanel() {
   })
   const [configuredProviders, setConfiguredProviders] = useState<ConfiguredProvider[]>([])
 
-  // Insights
-  const [insight, setInsight] = useState<HermesInsight | null>(null)
-  const [generatingInsight, setGeneratingInsight] = useState(false)
+  // Insights tab removed — see PanelTab comment above.
 
   // Apprentice — weekly observation logs written by Hermes-as-companion
   const [apprenticeEntries, setApprenticeEntries] = useState<Array<{ weekCode: string; size: number; mtime: string }>>([])
@@ -77,6 +92,19 @@ export default function AgentPanel() {
   const [currentApprenticeContent, setCurrentApprenticeContent] = useState<string>('')
   const [generatingApprentice, setGeneratingApprentice] = useState(false)
   const [apprenticeStreamText, setApprenticeStreamText] = useState('')
+
+  // History list collapsed by default when there are ≥ 3 reports. Keeps the
+  // bottom strip compact so the report body above gets more screen.
+  const [historyExpanded, setHistoryExpanded] = useState(false)
+
+  // Custom-range picker visibility. Default flow is 1-click "last 7 days",
+  // but power users can expand this and pick any [start, end] span up to 56 days.
+  const [showCustomRange, setShowCustomRange] = useState(false)
+  const todayIso = new Date().toISOString().slice(0, 10)
+  const sevenDaysAgoIso = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10)
+  const [customStart, setCustomStart] = useState(sevenDaysAgoIso)
+  const [customEnd, setCustomEnd] = useState(todayIso)
+  const [customRangeError, setCustomRangeError] = useState<string | null>(null)
 
   // Apprentice dialogue — follow-up questions on the currently-viewed weekly report.
   // History is ephemeral (not persisted) — it's about "this reading session's
@@ -91,6 +119,40 @@ export default function AgentPanel() {
   // Track the streamId of the current in-flight AI request so the user can abort it.
   // Only one stream runs at a time in this panel (chat, insight, or apprentice).
   const currentStreamIdRef = useRef<string | null>(null)
+
+  // Resizable panel width. Left edge is a drag handle — user pulls left to make
+  // the panel wider (because the panel sits on the right side of the app).
+  const [panelWidth, setPanelWidth] = useState<number>(() => {
+    try {
+      const v = Number(localStorage.getItem(AGENT_WIDTH_KEY))
+      return v >= AGENT_WIDTH_MIN && v <= AGENT_WIDTH_MAX ? v : AGENT_WIDTH_DEFAULT
+    } catch { return AGENT_WIDTH_DEFAULT }
+  })
+  const panelWidthRef = useRef(panelWidth)
+  panelWidthRef.current = panelWidth
+
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = panelWidthRef.current
+    const onMove = (ev: MouseEvent) => {
+      // Pulling mouse LEFT (decreasing clientX) widens the panel
+      const dx = startX - ev.clientX
+      const next = Math.max(AGENT_WIDTH_MIN, Math.min(AGENT_WIDTH_MAX, startW + dx))
+      setPanelWidth(next)
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      try { localStorage.setItem(AGENT_WIDTH_KEY, String(panelWidthRef.current)) } catch { /* ignore */ }
+    }
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [])
 
   const handleStopStream = useCallback(() => {
     const sid = currentStreamIdRef.current
@@ -115,6 +177,17 @@ export default function AgentPanel() {
     window.electronAPI.agentLoadMemory().then(r => { if (r.success) setMemory(r.content || '') })
   }, [])
 
+  // Persona list — used by the summon dropdown in chat tab so the user can
+  // switch the conversation to "speak as <person>" mode. Loaded once on mount;
+  // refreshed whenever the user creates a new persona via the 召唤 tab.
+  const [personaList, setPersonaList] = useState<Array<{ id: string; name: string; canonicalName?: string; identity?: string; skillMode?: 'legacy' | 'distilled' | 'imported'; updatedAt: string; currentFitnessTotal?: number }>>([])
+  const [showSummonMenu, setShowSummonMenu] = useState(false)
+
+  const refreshPersonaList = useCallback(async () => {
+    const r = await window.electronAPI.personaList?.()
+    if (r?.success) setPersonaList(r.entries)
+  }, [])
+
   useEffect(() => {
     loadMemory()
     window.electronAPI.aiGetConfigured?.().then(setConfiguredProviders).catch(() => {})
@@ -124,7 +197,7 @@ export default function AgentPanel() {
         if (r.conversations.length > 0) setActiveConv(r.conversations[0])
       }
     })
-    window.electronAPI.agentLoadInsight().then(r => { if (r.success && r.insight?.content) setInsight(r.insight) })
+    refreshPersonaList()
     // Load apprentice logs list — pick the most recent one to display first
     window.electronAPI.apprenticeList?.().then(r => {
       if (!r.success) return
@@ -167,6 +240,20 @@ export default function AgentPanel() {
   }, [memory, currentEntry, textSelection, currentPdfMeta])
 
   // ===== Chat logic =====
+  // Delete a conversation from disk + in-memory list. If user deletes the
+  // active one, fall back to the next newest conversation (or a fresh blank one).
+  const handleDeleteConversation = useCallback(async (convId: string) => {
+    if (!window.confirm('删除这个对话？')) return
+    try {
+      await window.electronAPI.agentDeleteConversation?.(convId)
+    } catch { /* ignore — UI will re-sync from disk next load */ }
+    const remaining = conversations.filter(c => c.id !== convId)
+    setConversations(remaining)
+    if (activeConv?.id === convId) {
+      setActiveConv(remaining[0] || null)
+    }
+  }, [conversations, activeConv])
+
   const handleNewConversation = useCallback(() => {
     const conv: AgentConversation = {
       id: uuid(), title: '新对话', messages: [],
@@ -195,6 +282,52 @@ export default function AgentPanel() {
     setInput('')
     setStreaming(true)
     setStreamingText('')
+
+    // ===== Summon mode branch =====
+    // If this conversation is in summon mode (user picked a persona), skip
+    // Hermes's ReAct loop + tool calls entirely — the user wants to speak
+    // with the persona, not the agent. Use the persona's distilled skill as
+    // system prompt and do a plain streaming completion.
+    if (conv.summonedPersonaId) {
+      try {
+        // Pass the current user query so the backend can BM25-retrieve relevant
+        // original-text snippets from sourcesUsed and inject them as [资料 N]
+        // citations — this is what makes the persona cite real passages instead
+        // of reciting pretrained impressions (Phase B RAG).
+        const sysRes = await window.electronAPI.personaGetSystemPrompt?.(conv.summonedPersonaId, text)
+        if (!sysRes?.success || !sysRes.systemPrompt) {
+          throw new Error(sysRes?.error || '无法加载人物 skill（档案可能被删除）')
+        }
+        const llmMessages: Array<{ role: string; content: string }> = [
+          { role: 'system', content: sysRes.systemPrompt },
+        ]
+        for (const msg of updatedMessages) {
+          if (msg.role === 'user') llmMessages.push({ role: 'user', content: msg.content })
+          else if (msg.role === 'assistant') llmMessages.push({ role: 'assistant', content: msg.content })
+        }
+        const streamId = uuid()
+        currentStreamIdRef.current = streamId
+        let fullText = ''
+        const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => {
+          if (sid === streamId) { fullText += chunk; setStreamingText(fullText) }
+        })
+        try {
+          const res = await window.electronAPI.aiChatStream(streamId, agentModel, llmMessages)
+          if (!res.success) throw new Error(res.error || 'AI 调用失败')
+          if (res.text) fullText = res.text
+        } finally { cleanup(); currentStreamIdRef.current = null }
+        setStreamingText('')
+        const finalMessages = [...updatedMessages, { id: uuid(), role: 'assistant' as const, content: fullText, timestamp: new Date().toISOString() }]
+        const finalConv: AgentConversation = { ...conv, messages: finalMessages, updatedAt: new Date().toISOString() }
+        setActiveConv(finalConv)
+        setConversations(prev => prev.map(c => c.id === finalConv.id ? finalConv : c))
+        await window.electronAPI.agentSaveConversation(finalConv)
+      } catch (err: any) {
+        setActiveConv({ ...conv, messages: [...updatedMessages, { id: uuid(), role: 'assistant', content: `召唤对话出错：${err.message}`, timestamp: new Date().toISOString() }] })
+      }
+      setStreaming(false)
+      return
+    }
 
     try {
       const systemPrompt = buildAgentSystemPrompt(buildContext())
@@ -255,64 +388,19 @@ export default function AgentPanel() {
     setStreaming(false)
   }, [input, streaming, activeConv, agentModel, memory, buildContext, storeHelpers])
 
-  // ===== Insight generation =====
-  const generateInsight = useCallback(async () => {
-    if (generatingInsight || !memory.trim()) return
-    setGeneratingInsight(true)
-
-    const streamId = uuid()
-    currentStreamIdRef.current = streamId
-    let fullText = ''
-
-    const prompt = `你是 Hermes 研究助手的分析模块。基于以下用户行为记录，生成一份简短的研究洞察报告（3-5 个要点）。
-
-分析方向：
-1. 用户近期的研究主题和关注方向
-2. 阅读习惯模式（时间、频率、深度）
-3. 跨文献的潜在关联
-4. 值得深入的研究线索
-5. 对用户的个性化建议
-
-用中文，每个要点一句话，用 emoji 开头。
-
-===== 用户行为记录 =====
-${memory.slice(-3000)}`
-
-    const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => {
-      if (sid === streamId) { fullText += chunk; setStreamingText(fullText) }
-    })
-
-    try {
-      await window.electronAPI.aiChatStream(streamId, agentModel, [
-        { role: 'system', content: '你是一个专注于学术研究行为分析的AI助手。' },
-        { role: 'user', content: prompt },
-      ])
-    } finally { cleanup(); currentStreamIdRef.current = null }
-
-    setStreamingText('')
-    if (fullText) {
-      const newInsight: HermesInsight = {
-        id: uuid(), content: fullText,
-        basedOn: (memory.match(/^- \[/gm) || []).length,
-        generatedAt: new Date().toISOString(), model: agentModel,
-      }
-      setInsight(newInsight)
-      await window.electronAPI.agentSaveInsight(newInsight)
-      // Only now show the red dot — real insight generated
-      useUiStore.getState().setHermesHasInsight(true)
-    }
-    setGeneratingInsight(false)
-  }, [memory, agentModel, generatingInsight])
-
+  // generateInsight removed with the insights tab in batch 29.
   // ===== Apprentice: generate this week's observation =====
-  const generateApprentice = useCallback(async (targetDateIso?: string) => {
+  // generateApprentice(range?) — range is optional {startIso, endIso}.
+  // Omit to use the default "last 7 days ending now" sliding window.
+  // Hard cap enforced backend-side: ≤ 56 days.
+  const generateApprentice = useCallback(async (range?: { startIso: string; endIso: string }) => {
     if (generatingApprentice) return
     setGeneratingApprentice(true)
     setApprenticeStreamText('')
 
     try {
       // 1. Collect context from the backend
-      const ctxResult = await window.electronAPI.apprenticeCollectContext(targetDateIso)
+      const ctxResult = await window.electronAPI.apprenticeCollectContext(range)
       if (!ctxResult.success || !ctxResult.context) {
         throw new Error(ctxResult.error || '收集本周痕迹失败')
       }
@@ -357,11 +445,24 @@ ${memory.slice(-3000)}`
     if (r.success && r.content) {
       setCurrentApprenticeWeek(weekCode)
       setCurrentApprenticeContent(r.content)
-      // Switching weeks resets the follow-up dialogue — questions are tied
-      // to a specific report, not portable across weeks.
-      setDialogueHistory([])
       setDialogueInput('')
       setDialogueStreamText('')
+      // Load the follow-up dialogue sidecar for this week, if any.
+      // Keeps "追问学徒" conversation persistent across sessions — each
+      // week's dialogue lives in apprentice/{weekCode}.dialogue.json.
+      try {
+        const d = await window.electronAPI.apprenticeLoadDialogue?.(weekCode)
+        if (d?.success && Array.isArray(d.history)) {
+          setDialogueHistory(d.history.map(m => ({
+            role: m.role === 'user' ? 'user' : 'assistant',
+            content: m.content,
+          })) as Array<{ role: 'user' | 'assistant'; content: string }>)
+        } else {
+          setDialogueHistory([])
+        }
+      } catch {
+        setDialogueHistory([])
+      }
     }
   }, [])
 
@@ -410,9 +511,25 @@ ${memory.slice(-3000)}`
       currentStreamIdRef.current = null
     }
 
-    setDialogueHistory([...historyBefore, { role: 'user', content: q }, { role: 'assistant', content: fullText.trim() }])
+    const now = new Date().toISOString()
+    const finalHistory = [
+      ...historyBefore,
+      { role: 'user' as const, content: q, createdAt: now },
+      { role: 'assistant' as const, content: fullText.trim(), createdAt: new Date().toISOString() },
+    ]
+    setDialogueHistory(finalHistory)
     setDialogueStreaming(false)
     setDialogueStreamText('')
+
+    // Persist to disk so the conversation survives app restart. Sidecar file
+    // is apprentice/{weekCode}.dialogue.json — separate from the report md.
+    if (window.electronAPI.apprenticeSaveDialogue && currentApprenticeWeek) {
+      try {
+        await window.electronAPI.apprenticeSaveDialogue(currentApprenticeWeek, finalHistory)
+      } catch (err) {
+        console.warn('[apprentice-dialogue] save failed:', err)
+      }
+    }
   }, [dialogueInput, currentApprenticeContent, currentApprenticeWeek, dialogueHistory, dialogueStreaming, agentModel])
 
   const deleteApprenticeWeek = useCallback(async (weekCode: string) => {
@@ -438,7 +555,7 @@ ${memory.slice(-3000)}`
 
   // ===== Render helpers =====
   const displayMessages = activeConv?.messages.filter(m => m.role === 'user' || m.role === 'assistant') || []
-  const behaviorCount = (memory.match(/^- \[/gm) || []).length
+  // behaviorCount was only used by the removed Insights tab (batch 29)
 
   const tabStyle = (t: PanelTab) => ({
     flex: 1, padding: '6px 0', fontSize: 11, fontWeight: tab === t ? 600 : 400,
@@ -448,7 +565,26 @@ ${memory.slice(-3000)}`
   })
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg)' }}>
+    <div style={{
+      display: 'flex', flexDirection: 'column', height: '100%',
+      background: 'var(--bg)',
+      width: panelWidth, flexShrink: 0,
+      position: 'relative',
+      borderLeft: '1px solid var(--border-light)',
+    }}>
+      {/* Resize handle — 4px invisible strip on the left edge; 1px visible
+          border above gives the visual separation. Hover shows the col-resize
+          cursor. Active drag is handled via document-level mouse events in
+          handleResizeMouseDown so the cursor stays even if you drag off the strip. */}
+      <div
+        onMouseDown={handleResizeMouseDown}
+        title="拖动调整面板宽度"
+        style={{
+          position: 'absolute', top: 0, bottom: 0, left: -3,
+          width: 7, cursor: 'col-resize',
+          zIndex: 10,
+        }}
+      />
       {/* Header */}
       <div style={{ padding: '6px 12px', borderBottom: '1px solid var(--border-light)', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2">
@@ -467,8 +603,8 @@ ${memory.slice(-3000)}`
         <button style={tabStyle('apprentice')} onClick={() => setTab('apprentice')}>
           学徒{apprenticeEntries.length > 0 && <span style={{ fontSize: 9, marginLeft: 3, opacity: 0.6 }}>({apprenticeEntries.length})</span>}
         </button>
-        <button style={tabStyle('insights')} onClick={() => setTab('insights')}>
-          洞察{behaviorCount > 0 && <span style={{ fontSize: 9, marginLeft: 3, opacity: 0.6 }}>({behaviorCount})</span>}
+        <button style={tabStyle('personas')} onClick={() => setTab('personas')}>
+          召唤
         </button>
       </div>
 
@@ -477,15 +613,38 @@ ${memory.slice(-3000)}`
         <>
           {conversations.length > 1 && (
             <div style={{ padding: '4px 8px', borderBottom: '1px solid var(--border-light)', display: 'flex', gap: 4, overflow: 'auto', flexShrink: 0 }}>
-              {conversations.slice(0, 8).map(c => (
-                <button key={c.id} onClick={() => setActiveConv(c)} style={{
-                  padding: '2px 8px', fontSize: 10, borderRadius: 10, cursor: 'pointer',
-                  border: c.id === activeConv?.id ? '1px solid var(--accent)' : '1px solid var(--border)',
-                  background: c.id === activeConv?.id ? 'var(--accent-soft)' : 'transparent',
-                  color: c.id === activeConv?.id ? 'var(--accent-hover)' : 'var(--text-muted)',
-                  whiteSpace: 'nowrap', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis',
-                }}>{c.title}</button>
-              ))}
+              {conversations.slice(0, 8).map(c => {
+                const isActive = c.id === activeConv?.id
+                return (
+                  <div key={c.id} style={{
+                    display: 'inline-flex', alignItems: 'center',
+                    borderRadius: 10,
+                    border: isActive ? '1px solid var(--accent)' : '1px solid var(--border)',
+                    background: isActive ? 'var(--accent-soft)' : 'transparent',
+                    color: isActive ? 'var(--accent-hover)' : 'var(--text-muted)',
+                    flexShrink: 0,
+                  }}>
+                    <button onClick={() => setActiveConv(c)} style={{
+                      padding: '2px 4px 2px 8px', fontSize: 10,
+                      cursor: 'pointer', background: 'none', border: 'none',
+                      color: 'inherit',
+                      whiteSpace: 'nowrap', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis',
+                    }} title={c.title}>{c.title}</button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDeleteConversation(c.id) }}
+                      title="删除对话"
+                      style={{
+                        padding: '0 6px 0 3px', fontSize: 12, lineHeight: 1,
+                        background: 'none', border: 'none',
+                        color: 'var(--text-muted)', cursor: 'pointer',
+                        opacity: 0.6,
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.color = 'var(--danger)' }}
+                      onMouseLeave={e => { e.currentTarget.style.opacity = '0.6'; e.currentTarget.style.color = 'var(--text-muted)' }}
+                    >×</button>
+                  </div>
+                )
+              })}
             </div>
           )}
 
@@ -521,13 +680,115 @@ ${memory.slice(-3000)}`
             <div ref={messagesEndRef} />
           </div>
 
+          {/* Summon banner — shown above the input bar when this conv is in
+              summon mode. Gives the user a clear visual that they're speaking
+              to a persona, not Hermes, + a one-click exit to Hermes mode. */}
+          {activeConv?.summonedPersonaId && (
+            <div style={{
+              padding: '6px 12px', margin: '0 12px', marginBottom: 4,
+              borderRadius: 6, background: 'var(--accent-soft)',
+              border: '1px solid var(--accent)',
+              display: 'flex', alignItems: 'center', gap: 8,
+              fontSize: 11, color: 'var(--accent-hover)',
+            }}>
+              <span style={{ flex: 1 }}>
+                🧙 正以 <b>{activeConv.summonedPersonaName || '某位名家'}</b> 视角对话
+              </span>
+              <button
+                onClick={async () => {
+                  const updated: AgentConversation = { ...activeConv, summonedPersonaId: undefined, summonedPersonaName: undefined, updatedAt: new Date().toISOString() }
+                  setActiveConv(updated)
+                  setConversations(prev => prev.map(c => c.id === updated.id ? updated : c))
+                  await window.electronAPI.agentSaveConversation(updated)
+                }}
+                style={{ padding: '2px 8px', fontSize: 10, border: '1px solid var(--accent)', borderRadius: 3, background: 'transparent', color: 'var(--accent)', cursor: 'pointer' }}>
+                取消召唤
+              </button>
+            </div>
+          )}
+
+          {/* Summon menu — expanded on click of the 🧙 button. Lists existing
+              personas (distilled / imported only; legacy skipped since they
+              have no skill artifact). Selecting one sets this conv's
+              summonedPersonaId + saves. */}
+          {showSummonMenu && (
+            <div style={{
+              margin: '0 12px', marginBottom: 4,
+              padding: '8px 10px',
+              background: 'var(--bg-warm)', border: '1px solid var(--border)', borderRadius: 6,
+              maxHeight: 240, overflowY: 'auto',
+            }}>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 6 }}>
+                召唤一位名家接管这段对话（skill 作为 system prompt）
+              </div>
+              {personaList.length === 0 && (
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', fontStyle: 'italic', padding: '6px 0' }}>
+                  还没有蒸馏好的 skill——先去「召唤」tab 蒸馏一位名家。
+                </div>
+              )}
+              {personaList.map(p => (
+                <div key={p.id}
+                     onClick={async () => {
+                       if (!activeConv) {
+                         // need to create a fresh conv first
+                         const freshConv: AgentConversation = {
+                           id: uuid(), title: `召唤 ${p.canonicalName || p.name}`, messages: [],
+                           summonedPersonaId: p.id, summonedPersonaName: p.canonicalName || p.name,
+                           createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+                         }
+                         setConversations(prev => [freshConv, ...prev])
+                         setActiveConv(freshConv)
+                         await window.electronAPI.agentSaveConversation(freshConv)
+                       } else {
+                         const updated: AgentConversation = { ...activeConv, summonedPersonaId: p.id, summonedPersonaName: p.canonicalName || p.name, updatedAt: new Date().toISOString() }
+                         setActiveConv(updated)
+                         setConversations(prev => prev.map(c => c.id === updated.id ? updated : c))
+                         await window.electronAPI.agentSaveConversation(updated)
+                       }
+                       setShowSummonMenu(false)
+                     }}
+                     style={{
+                       padding: '6px 10px', marginBottom: 3, borderRadius: 4,
+                       cursor: 'pointer', background: 'var(--bg)', border: '1px solid var(--border-light)',
+                       fontSize: 11,
+                     }}
+                     onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--accent)'}
+                     onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--border-light)'}>
+                  <div style={{ fontWeight: 500, color: 'var(--text)' }}>
+                    {p.canonicalName || p.name}
+                    {typeof p.currentFitnessTotal === 'number' && (
+                      <span style={{ marginLeft: 6, fontSize: 9, padding: '1px 5px', borderRadius: 8, background: p.currentFitnessTotal >= 40 ? 'var(--success)' : 'var(--warning)', color: '#fff' }}>
+                        {p.currentFitnessTotal}%
+                      </span>
+                    )}
+                  </div>
+                  {p.identity && (
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>{p.identity}</div>
+                  )}
+                </div>
+              ))}
+              <div style={{ marginTop: 6, textAlign: 'right' }}>
+                <button onClick={() => setShowSummonMenu(false)}
+                        style={{ padding: '3px 10px', fontSize: 10, border: '1px solid var(--border)', borderRadius: 3, background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer' }}>
+                  关闭
+                </button>
+              </div>
+            </div>
+          )}
+
           <div style={{ padding: '8px 12px', borderTop: '1px solid var(--border-light)', flexShrink: 0, display: 'flex', gap: 6, alignItems: 'flex-end' }}>
             <button onClick={handleNewConversation} style={{ padding: '6px', background: 'none', border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer', color: 'var(--text-muted)', flexShrink: 0 }} title="新对话">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             </button>
+            <button
+              onClick={() => { setShowSummonMenu(!showSummonMenu); refreshPersonaList() }}
+              style={{ padding: '6px 8px', background: activeConv?.summonedPersonaId ? 'var(--accent-soft)' : 'none', border: `1px solid ${activeConv?.summonedPersonaId ? 'var(--accent)' : 'var(--border)'}`, borderRadius: 6, cursor: 'pointer', color: activeConv?.summonedPersonaId ? 'var(--accent)' : 'var(--text-muted)', flexShrink: 0, fontSize: 11 }}
+              title="召唤一位名家接管对话">
+              🧙
+            </button>
             <textarea value={input} onChange={e => setInput(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
-              placeholder="问 Hermes..." rows={1}
+              placeholder={activeConv?.summonedPersonaId ? `问 ${activeConv.summonedPersonaName}...` : '问 Hermes...'} rows={1}
               style={{ flex: 1, padding: '6px 10px', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12, outline: 'none', resize: 'none', fontFamily: 'var(--font)', background: 'var(--bg)', color: 'var(--text)', lineHeight: 1.5, maxHeight: 100, overflow: 'auto' }}
               onFocus={e => e.currentTarget.style.borderColor = 'var(--accent)'}
               onBlur={e => e.currentTarget.style.borderColor = 'var(--border)'}
@@ -552,26 +813,92 @@ ${memory.slice(-3000)}`
           {/* Action bar */}
           <div style={{
             padding: '10px 12px', borderBottom: '1px solid var(--border-light)',
-            display: 'flex', alignItems: 'center', gap: 8,
+            display: 'flex', flexDirection: 'column', gap: 8,
           }}>
-            <button
-              onClick={() => generateApprentice()}
-              disabled={generatingApprentice}
-              style={{
-                padding: '6px 14px', fontSize: 11, fontWeight: 500,
-                border: 'none', borderRadius: 6, cursor: generatingApprentice ? 'wait' : 'pointer',
-                background: generatingApprentice ? 'var(--border)' : 'var(--accent)',
-                color: generatingApprentice ? 'var(--text-muted)' : '#fff',
-                display: 'flex', alignItems: 'center', gap: 6,
-              }}
-            >
-              {generatingApprentice && <span className="loading-spinner" style={{ width: 10, height: 10 }} />}
-              {generatingApprentice ? '学徒正在翻你这周的痕迹…' : '让学徒写本周观察'}
-            </button>
-            {apprenticeEntries.length > 0 && (
-              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                上次: {apprenticeEntries[0].weekCode} · {formatTimeAgo(apprenticeEntries[0].mtime)}
-              </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                onClick={() => generateApprentice()}
+                disabled={generatingApprentice}
+                style={{
+                  padding: '6px 14px', fontSize: 11, fontWeight: 500,
+                  border: 'none', borderRadius: 6, cursor: generatingApprentice ? 'wait' : 'pointer',
+                  background: generatingApprentice ? 'var(--border)' : 'var(--accent)',
+                  color: generatingApprentice ? 'var(--text-muted)' : '#fff',
+                  display: 'flex', alignItems: 'center', gap: 6,
+                }}
+              >
+                {generatingApprentice && <span className="loading-spinner" style={{ width: 10, height: 10 }} />}
+                {generatingApprentice ? '学徒正在翻你的痕迹…' : '让学徒写最近 7 天观察'}
+              </button>
+              <button
+                onClick={() => setShowCustomRange(!showCustomRange)}
+                disabled={generatingApprentice}
+                style={{
+                  padding: '5px 10px', fontSize: 10, fontWeight: 500,
+                  border: '1px solid var(--border)', borderRadius: 6,
+                  cursor: generatingApprentice ? 'wait' : 'pointer',
+                  background: showCustomRange ? 'var(--accent-soft)' : 'transparent',
+                  color: showCustomRange ? 'var(--accent-hover)' : 'var(--text-muted)',
+                }}
+              >
+                {showCustomRange ? '收起' : '自定义日期…'}
+              </button>
+              {apprenticeEntries.length > 0 && !showCustomRange && (
+                <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                  上次: {apprenticeEntries[0].weekCode} · {formatTimeAgo(apprenticeEntries[0].mtime)}
+                </span>
+              )}
+            </div>
+
+            {/* Custom range picker */}
+            {showCustomRange && !generatingApprentice && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
+                fontSize: 11, color: 'var(--text-secondary)',
+                padding: '6px 10px', background: 'var(--bg-warm)',
+                border: '1px solid var(--border-light)', borderRadius: 6,
+              }}>
+                <span>从</span>
+                <input
+                  type="date"
+                  value={customStart}
+                  max={customEnd}
+                  onChange={e => { setCustomStart(e.target.value); setCustomRangeError(null) }}
+                  style={{ padding: '3px 6px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--text)' }}
+                />
+                <span>到</span>
+                <input
+                  type="date"
+                  value={customEnd}
+                  min={customStart}
+                  max={todayIso}
+                  onChange={e => { setCustomEnd(e.target.value); setCustomRangeError(null) }}
+                  style={{ padding: '3px 6px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--text)' }}
+                />
+                <button
+                  onClick={() => {
+                    const s = new Date(customStart + 'T00:00:00')
+                    const e = new Date(customEnd + 'T23:59:59')
+                    if (s >= e) { setCustomRangeError('起止日期无效'); return }
+                    const days = Math.round((e.getTime() - s.getTime()) / 86400000)
+                    if (days > 56) { setCustomRangeError(`跨度最长 56 天（当前 ${days} 天）`); return }
+                    setCustomRangeError(null)
+                    generateApprentice({ startIso: s.toISOString(), endIso: e.toISOString() })
+                  }}
+                  style={{
+                    padding: '4px 10px', fontSize: 11, border: 'none', borderRadius: 4,
+                    background: 'var(--accent)', color: '#fff', cursor: 'pointer',
+                  }}
+                >
+                  生成观察
+                </button>
+                <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>最长 56 天</span>
+                {customRangeError && (
+                  <span style={{ fontSize: 10, color: 'var(--danger)', flexBasis: '100%' }}>
+                    {customRangeError}
+                  </span>
+                )}
+              </div>
             )}
           </div>
 
@@ -740,22 +1067,42 @@ ${memory.slice(-3000)}`
                   fontSize: 10, color: 'var(--text-muted)', marginTop: 6,
                   lineHeight: 1.5,
                 }}>
-                  对话是临时的，不保存。切换周报会重置。
+                  追问会和这周的报告一起保存，下次打开还在。
                 </div>
               </div>
             </div>
           )}
 
-          {/* History list at bottom */}
+          {/* History list at bottom. Collapsible when 3+ reports exist — only
+              the newest is shown by default with a "展开全部 (N)" toggle. Keeps
+              bottom strip compact so the current report gets more vertical space. */}
           {apprenticeEntries.length > 0 && !generatingApprentice && (
             <div style={{
               borderTop: '1px solid var(--border-light)', background: 'var(--bg-warm)',
-              padding: '6px 10px', maxHeight: 140, overflow: 'auto', flexShrink: 0,
+              padding: '6px 10px',
+              maxHeight: historyExpanded ? 320 : 90,
+              overflow: 'auto', flexShrink: 0,
+              transition: 'max-height 0.2s ease',
             }}>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4, fontWeight: 500 }}>
-                历史观察
+              <div style={{
+                fontSize: 10, color: 'var(--text-muted)', marginBottom: 4,
+                fontWeight: 500, display: 'flex', alignItems: 'center',
+                justifyContent: 'space-between',
+              }}>
+                <span>历史观察 ({apprenticeEntries.length})</span>
+                {apprenticeEntries.length >= 3 && (
+                  <button
+                    onClick={() => setHistoryExpanded(!historyExpanded)}
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      color: 'var(--accent)', fontSize: 10, padding: 0,
+                    }}
+                  >
+                    {historyExpanded ? '收起' : `展开全部 (${apprenticeEntries.length})`}
+                  </button>
+                )}
               </div>
-              {apprenticeEntries.map(e => (
+              {(historyExpanded ? apprenticeEntries : apprenticeEntries.slice(0, 2)).map(e => (
                 <div key={e.weekCode}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 6,
@@ -785,60 +1132,14 @@ ${memory.slice(-3000)}`
         </div>
       )}
 
-      {/* ===== Tab: Insights ===== */}
-      {tab === 'insights' && (
-        <div style={{ flex: 1, overflow: 'auto', padding: '12px' }}>
-          {/* AI Insight card */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>AI 研究洞察</span>
-              <button onClick={generateInsight} disabled={generatingInsight || !memory.trim()} style={{
-                padding: '3px 10px', fontSize: 10, borderRadius: 4, cursor: 'pointer',
-                background: 'var(--accent-soft)', border: '1px solid var(--accent)', color: 'var(--accent-hover)',
-              }}>
-                {generatingInsight ? '分析中...' : insight ? '重新分析' : '生成洞察'}
-              </button>
-            </div>
-
-            {generatingInsight && streamingText && (
-              <div style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--bg-warm)', border: '1px solid var(--border-light)', fontSize: 12, lineHeight: 1.8 }}>
-                <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{streamingText}</ReactMarkdown>
-                <span className="streaming-cursor" />
-              </div>
-            )}
-
-            {!generatingInsight && insight && (
-              <div style={{ padding: '10px 12px', borderRadius: 8, background: 'linear-gradient(135deg, var(--accent-soft), var(--bg-warm))', border: '1px solid var(--border-light)' }}>
-                <div style={{ fontSize: 12, lineHeight: 1.8, color: 'var(--text)' }}>
-                  <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{insight.content}</ReactMarkdown>
-                </div>
-                <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 6 }}>
-                  基于 {insight.basedOn} 条行为记录 · {new Date(insight.generatedAt).toLocaleString('zh-CN')}
-                </div>
-              </div>
-            )}
-
-            {!generatingInsight && !insight && (
-              <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 11 }}>
-                {memory.trim() ? '点击「生成洞察」让 AI 分析你的阅读行为' : '暂无行为记录。使用拾卷阅读、注释后，Hermes 会自动学习'}
-              </div>
-            )}
-          </div>
-
-          {/* Raw behavior log */}
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 8 }}>行为记录</div>
-            {behaviorCount === 0 ? (
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center', padding: 16 }}>暂无记录</div>
-            ) : (
-              <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.7, maxHeight: 300, overflow: 'auto' }}>
-                {memory.split('\n').filter(l => l.startsWith('- [')).slice(-15).map((line, i) => (
-                  <div key={i} style={{ padding: '2px 0', borderBottom: '1px solid var(--border-light)' }}>{line.replace(/^- /, '')}</div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+      {/* ===== Tab: 召唤 (Personas — WIP batch 29) =====
+          Progressive persona generation:
+          user types a name → multi-source web search (Wikipedia + Baidu Baike
+          + DuckDuckGo) → AI disambig from combined candidates → AI generates
+          initial archive → user can refine / feed material / rename.
+          Each revision carries a rigorous 5-dimension fitness score. */}
+      {tab === 'personas' && (
+        <PersonasTab />
       )}
 
       {/* Skills tab removed in batch 28 — see note at top of file. */}

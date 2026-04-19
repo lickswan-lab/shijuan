@@ -298,6 +298,19 @@ export function registerAgentIpc(): void {
     }
   })
 
+  // Delete a conversation by id
+  ipcMain.handle('agent-delete-conversation', async (_event, conversationId: string) => {
+    try {
+      await ensureAgentDir()
+      const conversations = await safeLoadJsonOrBackup<AgentConversation[]>(CONVERSATIONS_FILE, [])
+      const next = conversations.filter(c => c.id !== conversationId)
+      await atomicWriteJson(CONVERSATIONS_FILE, next)
+      return { success: true }
+    } catch (err: any) {
+      return { success: false, error: err.message }
+    }
+  })
+
   // Execute tool
   ipcMain.handle('agent-execute-tool', async (_event, toolName: string, argsJson: string) => {
     try {

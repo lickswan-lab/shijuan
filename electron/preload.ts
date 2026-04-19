@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { Library, PdfMeta, HistoryEntry, ReadingLogEvent, ReadingLog } from '../src/types/library'
+import type { Library, PdfMeta, HistoryEntry, ReadingLogEvent, ReadingLog, Persona, PersonaSource } from '../src/types/library'
 
 const electronAPI = {
   // Library (central storage)
@@ -95,8 +95,8 @@ const electronAPI = {
     ipcRenderer.invoke('glm-ask', question, selectedText, history, model),
 
   // === Streaming AI ===
-  aiChatStream: (streamId: string, modelSpec: string, messages: Array<{ role: string; content: string }>): Promise<{ success: boolean; text?: string; error?: string; aborted?: boolean }> =>
-    ipcRenderer.invoke('ai-chat-stream', streamId, modelSpec, '', messages),
+  aiChatStream: (streamId: string, modelSpec: string, messages: Array<{ role: string; content: string }>, opts?: { webSearch?: boolean }): Promise<{ success: boolean; text?: string; error?: string; aborted?: boolean }> =>
+    ipcRenderer.invoke('ai-chat-stream', streamId, modelSpec, '', messages, opts),
   aiAbortStream: (streamId: string): Promise<boolean> =>
     ipcRenderer.invoke('ai-abort-stream', streamId),
 
@@ -135,6 +135,8 @@ const electronAPI = {
     ipcRenderer.invoke('agent-load-conversations'),
   agentSaveConversation: (conversation: any): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('agent-save-conversation', conversation),
+  agentDeleteConversation: (conversationId: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('agent-delete-conversation', conversationId),
   agentLoadInsight: (): Promise<{ success: boolean; insight: any | null }> =>
     ipcRenderer.invoke('agent-load-insight'),
   agentSaveInsight: (insight: any): Promise<{ success: boolean; error?: string }> =>
@@ -145,8 +147,8 @@ const electronAPI = {
     ipcRenderer.invoke('agent-save-skills', skills),
 
   // === Apprentice (weekly observation log) ===
-  apprenticeCollectContext: (targetDateIso?: string): Promise<{ success: boolean; context?: any; error?: string }> =>
-    ipcRenderer.invoke('apprentice-collect-context', targetDateIso),
+  apprenticeCollectContext: (params?: string | { startIso?: string; endIso?: string; targetDateIso?: string }): Promise<{ success: boolean; context?: any; error?: string }> =>
+    ipcRenderer.invoke('apprentice-collect-context', params),
   apprenticeList: (): Promise<{ success: boolean; entries: Array<{ weekCode: string; size: number; mtime: string }>; error?: string }> =>
     ipcRenderer.invoke('apprentice-list'),
   apprenticeLoad: (weekCode: string): Promise<{ success: boolean; content?: string; error?: string }> =>
@@ -155,6 +157,112 @@ const electronAPI = {
     ipcRenderer.invoke('apprentice-save', weekCode, content),
   apprenticeDelete: (weekCode: string): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('apprentice-delete', weekCode),
+  apprenticeLoadDialogue: (weekCode: string): Promise<{ success: boolean; history: Array<{ role: string; content: string; createdAt?: string }>; error?: string }> =>
+    ipcRenderer.invoke('apprentice-load-dialogue', weekCode),
+  apprenticeSaveDialogue: (weekCode: string, history: Array<{ role: string; content: string; createdAt?: string }>): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('apprentice-save-dialogue', weekCode, history),
+
+  // === 召唤 (Personas) ===
+  personaList: (): Promise<{ success: boolean; entries: Array<{ id: string; name: string; canonicalName?: string; identity?: string; updatedAt: string; currentFitnessTotal?: number }>; error?: string }> =>
+    ipcRenderer.invoke('persona-list'),
+  personaLoad: (id: string): Promise<{ success: boolean; persona?: Persona; error?: string }> =>
+    ipcRenderer.invoke('persona-load', id),
+  personaSave: (persona: Persona): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('persona-save', persona),
+  personaDelete: (id: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('persona-delete', id),
+  // Multi-source web search (Wikipedia zh+en + Baidu Baike + DuckDuckGo)
+  nuwaSearch: (query: string): Promise<{ success: boolean; sources: PersonaSource[]; error?: string }> =>
+    ipcRenderer.invoke('nuwa-search', query),
+  // Fetch full body for a selected source
+  nuwaFetchPage: (source: PersonaSource): Promise<{ success: boolean; fullContent?: string; error?: string }> =>
+    ipcRenderer.invoke('nuwa-fetch-page', source),
+  // Open a source URL in the user's default browser
+  nuwaOpenUrl: (url: string): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('nuwa-open-url', url),
+  // Export a persona's skill to a directory (defaults to ~/.claude/skills/<slug>/)
+  personaExportSkill: (personaId: string, opts?: { outDir?: string; includeResearch?: boolean }): Promise<{ success: boolean; skillDir?: string; error?: string }> =>
+    ipcRenderer.invoke('persona-export-skill', personaId, opts),
+  // Dialog — pick a root directory to export skill under
+  personaPickExportDir: (): Promise<{ success: boolean; dir?: string }> =>
+    ipcRenderer.invoke('persona-pick-export-dir'),
+  // Import an existing skill (SKILL.md file or its containing directory)
+  personaImportSkill: (absPath: string): Promise<{ success: boolean; persona?: Persona; error?: string }> =>
+    ipcRenderer.invoke('persona-import-skill', absPath),
+  // Dialog — pick a SKILL.md file or skill directory to import
+  personaPickSkillPath: (): Promise<{ success: boolean; path?: string }> =>
+    ipcRenderer.invoke('persona-pick-skill-path'),
+  // Build the system prompt used when summoning a persona for chat / annotation.
+  // When userQuery is passed, the prompt is augmented with retrieved original-
+  // text snippets (embedding cos sim if index built, else BM25) from
+  // persona.sourcesUsed so the AI can cite real passages via [资料 N] instead
+  // of reciting pretrained general knowledge.
+  personaGetSystemPrompt: (personaId: string, userQuery?: string): Promise<{
+    success: boolean
+    systemPrompt?: string
+    persona?: { id: string; name: string; canonicalName?: string; skillMode: 'legacy' | 'distilled' | 'imported' }
+    retrievedCount?: number
+    retrievalMode?: 'embedding' | 'bm25' | 'empty'
+    // Wave-3: chunks injected into the prompt — UI uses these for citation
+    // reverse-parse (find [资料 N] in AI output → look up source card).
+    chunks?: Array<{
+      n: number
+      sourceId: string
+      sourceTitle: string
+      sourceType: string
+      trust: string
+      chunkIdx: number
+      text: string
+      url?: string
+    }>
+    totalChunks?: number
+    error?: string
+  }> =>
+    ipcRenderer.invoke('persona-get-system-prompt', personaId, userQuery),
+  // Directly retrieve top-K chunks for a persona + query (embedding if
+  // indexed, BM25 fallback). persona-get-system-prompt already calls this
+  // internally when userQuery is passed.
+  personaRagRetrieve: (personaId: string, query: string, topK?: number): Promise<{
+    success: boolean
+    chunks?: Array<{ sourceId: string; sourceTitle: string; sourceType: string; trust: string; chunkIdx: number; text: string; score: number }>
+    totalChunks?: number
+    retrievalMode?: 'embedding' | 'bm25' | 'empty'
+    error?: string
+  }> => ipcRenderer.invoke('persona-rag-retrieve', personaId, query, topK),
+  // Build the persona's semantic index (Phase A). Embeds every chunk via the
+  // chosen provider (defaults to whichever key is configured; GLM preferred for
+  // Chinese users, OpenAI fallback). Persisted to <personaId>.rag.json.
+  personaRagBuild: (personaId: string, opts?: { providerId?: 'openai' | 'glm' }): Promise<{
+    success: boolean
+    builtAt?: string
+    chunkCount?: number
+    provider?: 'openai' | 'glm'
+    model?: string
+    dim?: number
+    error?: string
+  }> => ipcRenderer.invoke('persona-rag-build', personaId, opts),
+  // Index status: built? stale? which provider? how many chunks?
+  personaRagStatus: (personaId: string): Promise<{
+    success: boolean
+    built: boolean
+    needsRebuild?: boolean
+    builtAt?: string
+    provider?: 'openai' | 'glm'
+    model?: string
+    dim?: number
+    chunkCount?: number
+    currentHydratedSources?: number
+    availableProviders?: Array<{ id: 'openai' | 'glm'; hasKey: boolean; displayName: string; model: string; dim: number }>
+    error?: string
+  }> => ipcRenderer.invoke('persona-rag-status', personaId),
+  personaRagClear: (personaId: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('persona-rag-clear', personaId),
+  // Progress event for persona-rag-build
+  onPersonaRagBuildProgress: (callback: (payload: { personaId: string; phase: 'chunk' | 'embed' | 'save' | 'done'; done: number; total: number }) => void) => {
+    const handler = (_event: any, payload: any) => callback(payload)
+    ipcRenderer.on('persona-rag-build-progress', handler)
+    return () => { ipcRenderer.removeListener('persona-rag-build-progress', handler) }
+  },
 
   // === Auto Update ===
   checkUpdate: (): Promise<{

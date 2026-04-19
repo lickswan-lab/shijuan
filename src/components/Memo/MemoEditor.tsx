@@ -935,8 +935,19 @@ export default function MemoEditor() {
         ) : (
           <div style={{ flex: 1, overflow: 'hidden' }}>
             <span
-              style={{ fontSize: 15, fontWeight: 600, cursor: 'pointer' }}
-              onDoubleClick={() => { setEditingTitle(true); setTitleInput(activeMemo.title) }}
+              // Click (or double-click) to rename — whichever feels natural.
+              // Hover shows a subtle background + edit cursor so the click
+              // affordance is visible instead of hidden behind "try double-clicking".
+              style={{
+                fontSize: 15, fontWeight: 600, cursor: 'text',
+                padding: '2px 6px', borderRadius: 4,
+                transition: 'background 0.15s',
+                display: 'inline-block',
+              }}
+              onClick={() => { setEditingTitle(true); setTitleInput(activeMemo.title) }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              title="点击重命名"
             >
               {activeMemo.title}
             </span>

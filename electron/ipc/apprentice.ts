@@ -2,7 +2,7 @@ import { ipcMain, app } from 'electron'
 import fs from 'fs/promises'
 import path from 'path'
 import type { Library, PdfMeta, HistoryEntry } from '../../src/types/library'
-import { atomicWriteFile } from './library'
+import { atomicWriteFile, atomicWriteJson, safeLoadJsonOrBackup } from './library'
 
 // ===== Paths =====
 const DATA_DIR = path.join(app.getPath('home'), '.lit-manager')
@@ -119,17 +119,32 @@ export interface ApprenticeContext {
 }
 
 // ===== Core context collector =====
-export async function collectApprenticeContext(targetDate: Date): Promise<ApprenticeContext> {
+// Accepts an arbitrary [start, end) window. Callers typically pass:
+//   - Default "last 7 days": start = now-7d, end = now
+//   - Custom range: user-selected start/end (hard-capped at 56 days in the caller)
+//   - Legacy "ISO week": start = weekStart, end = +7d (for back-compat paths)
+//
+// The returned `weekCode` is a label string — may be an ISO-week code
+// (YYYY-Wxx) or a date-range string. Callers shouldn't rely on its format.
+export async function collectApprenticeContext(start: Date, end: Date): Promise<ApprenticeContext> {
   const library = await loadLibrary()
   if (!library) {
     throw new Error('库未初始化')
   }
 
-  const start = weekStart(targetDate)
-  const end = new Date(start.getTime() + 7 * 86400000)
   const startMs = start.getTime()
   const endMs = end.getTime()
-  const weekCode = isoWeekCode(start)
+  const spanDays = Math.max(1, Math.round((endMs - startMs) / 86400000))
+  // Label: if span is exactly a Mon-Sun ISO week, use the ISO-week code for
+  // file-name compatibility with legacy apprentice/2026-Wxx.md files. Otherwise
+  // use a date-range label.
+  const isAlignedISOWeek = spanDays === 7 && (() => {
+    const ws = weekStart(start)
+    return ws.getTime() === startMs
+  })()
+  const weekCode = isAlignedISOWeek
+    ? isoWeekCode(start)
+    : `${start.toISOString().slice(0, 10)}_to_${new Date(endMs - 1).toISOString().slice(0, 10)}`
 
   // === 1. Reading activity (entry opens) ===
   const readingMap = new Map<string, { entry: any; days: Set<string> }>()
@@ -244,12 +259,26 @@ export async function collectApprenticeContext(targetDate: Date): Promise<Appren
   for (const t of thinking) activeDays.add(new Date(t.createdAt).toISOString().slice(0, 10))
   for (const m of memos) activeDays.add(new Date(m.updatedAt).toISOString().slice(0, 10))
 
-  // === 6. Previous week's log for continuity ===
-  const prevStart = new Date(start.getTime() - 7 * 86400000)
-  const prevWeekCode = isoWeekCode(prevStart)
+  // === 6. Previous log for continuity ===
+  // List existing apprentice logs and pick the most recent one (by mtime)
+  // whose window ends before current start. More robust than trying to
+  // construct the previous ISO-week code — works for both aligned and
+  // custom ranges.
   let previousWeekLog: string | null = null
   try {
-    previousWeekLog = await fs.readFile(path.join(APPRENTICE_DIR, `${prevWeekCode}.md`), 'utf-8')
+    const files = await fs.readdir(APPRENTICE_DIR)
+    const candidates: Array<{ file: string; mtime: number }> = []
+    for (const f of files) {
+      if (!f.endsWith('.md')) continue
+      try {
+        const s = await fs.stat(path.join(APPRENTICE_DIR, f))
+        if (s.mtimeMs < startMs) candidates.push({ file: f, mtime: s.mtimeMs })
+      } catch { /* skip */ }
+    }
+    candidates.sort((a, b) => b.mtime - a.mtime)
+    if (candidates[0]) {
+      previousWeekLog = await fs.readFile(path.join(APPRENTICE_DIR, candidates[0].file), 'utf-8')
+    }
   } catch { /* may not exist */ }
 
   // === Build reading list ===
@@ -285,11 +314,36 @@ export async function collectApprenticeContext(targetDate: Date): Promise<Appren
 
 // ===== IPC handlers =====
 export function registerApprenticeIpc(): void {
-  // Collect the context for a given week. `targetDateIso` optional (defaults to now).
-  ipcMain.handle('apprentice-collect-context', async (_event, targetDateIso?: string) => {
+  // Collect context for an observation window.
+  // - No params or { targetDateIso } → default: last 7 days ending now (sliding window)
+  // - { startIso, endIso } → explicit custom range (caller enforces ≤ 56 days)
+  // Legacy targetDateIso path is kept so older renderer builds still work;
+  // new code should use the range form.
+  ipcMain.handle('apprentice-collect-context', async (_event, params?: string | { startIso?: string; endIso?: string; targetDateIso?: string }) => {
     try {
-      const target = targetDateIso ? new Date(targetDateIso) : new Date()
-      const ctx = await collectApprenticeContext(target)
+      let start: Date
+      let end: Date
+      // Back-compat: string argument means the old targetDateIso form
+      if (typeof params === 'string') {
+        end = new Date(params)
+        start = new Date(end.getTime() - 7 * 86400000)
+      } else if (params && (params.startIso || params.endIso)) {
+        end = params.endIso ? new Date(params.endIso) : new Date()
+        start = params.startIso ? new Date(params.startIso) : new Date(end.getTime() - 7 * 86400000)
+      } else if (params && params.targetDateIso) {
+        end = new Date(params.targetDateIso)
+        start = new Date(end.getTime() - 7 * 86400000)
+      } else {
+        // Default: last 7 days ending now
+        end = new Date()
+        start = new Date(end.getTime() - 7 * 86400000)
+      }
+      // Guardrail: clamp to max 56-day span, and require start < end
+      if (start >= end) throw new Error('起止时间无效')
+      const spanDays = (end.getTime() - start.getTime()) / 86400000
+      if (spanDays > 56) throw new Error('观察跨度最长 56 天')
+
+      const ctx = await collectApprenticeContext(start, end)
       return { success: true, context: ctx }
     } catch (err: any) {
       return { success: false, error: err.message }
@@ -342,10 +396,40 @@ export function registerApprenticeIpc(): void {
     }
   })
 
-  // Delete a log
+  // Delete a log (+ its dialogue sidecar if any)
   ipcMain.handle('apprentice-delete', async (_event, weekCode: string) => {
     try {
       await fs.unlink(path.join(APPRENTICE_DIR, `${weekCode}.md`))
+      // Dialogue file is optional — silently ignore if absent
+      try { await fs.unlink(path.join(APPRENTICE_DIR, `${weekCode}.dialogue.json`)) } catch { /* fine */ }
+      return { success: true }
+    } catch (err: any) {
+      return { success: false, error: err.message }
+    }
+  })
+
+  // ===== Dialogue sidecar =====
+  // Per-week follow-up conversation, stored alongside the weekly report.
+  // Shape: Array<{ role: 'user' | 'assistant'; content: string; createdAt: string }>.
+  // Kept separate from the report .md so users editing the report can't
+  // accidentally corrupt the dialogue, and vice versa.
+
+  ipcMain.handle('apprentice-load-dialogue', async (_event, weekCode: string) => {
+    try {
+      await ensureDir()
+      const file = path.join(APPRENTICE_DIR, `${weekCode}.dialogue.json`)
+      const history = await safeLoadJsonOrBackup<Array<{ role: string; content: string; createdAt?: string }>>(file, [])
+      return { success: true, history }
+    } catch (err: any) {
+      return { success: false, error: err.message, history: [] }
+    }
+  })
+
+  ipcMain.handle('apprentice-save-dialogue', async (_event, weekCode: string, history: Array<{ role: string; content: string; createdAt?: string }>) => {
+    try {
+      await ensureDir()
+      const file = path.join(APPRENTICE_DIR, `${weekCode}.dialogue.json`)
+      await atomicWriteJson(file, history)
       return { success: true }
     } catch (err: any) {
       return { success: false, error: err.message }

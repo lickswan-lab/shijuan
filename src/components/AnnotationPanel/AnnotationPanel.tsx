@@ -226,6 +226,8 @@ function getTypeDisplay(type: HistoryEntry['type']) {
     ai_interpretation: { label: 'AI', color: 'var(--success)', bgClass: 'ai-response' },
     ai_qa: { label: 'AI', color: 'var(--warning)', bgClass: 'ai-qa' },
     ai_feedback: { label: 'AI', color: '#9DB5B2', bgClass: 'ai-feedback' },
+    // 召唤名家以其视角批注——label 会被 HistoryEntryItem 覆盖成 personaName
+    ai_persona: { label: '🧙', color: '#9b59b6', bgClass: 'ai-persona' },
   }
   return map[type] || map.note
 }
@@ -466,10 +468,16 @@ export default function AnnotationPanel() {
   const { selectedAiModel: aiModel, setSelectedAiModel: setAiModel, annotationColor } = useUiStore()
   const [configuredProviders, setConfiguredProviders] = useState<Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>>([])
 
-  // Load configured AI providers
+  // Persona list for "召唤名家批注" entry — loaded alongside providers below.
+  const [personaListAnno, setPersonaListAnno] = useState<Array<{ id: string; name: string; canonicalName?: string; currentFitnessTotal?: number }>>([])
+
+  // Load configured AI providers + personas
   useEffect(() => {
     if (window.electronAPI?.aiGetConfigured) {
       window.electronAPI.aiGetConfigured().then(setConfiguredProviders).catch(() => {})
+    }
+    if (window.electronAPI?.personaList) {
+      window.electronAPI.personaList().then(r => { if (r.success) setPersonaListAnno(r.entries) }).catch(() => {})
     }
   }, [])
   const [citingEntry, setCitingEntry] = useState<{ historyEntry: HistoryEntry; annotation: Annotation } | null>(null)
@@ -1025,6 +1033,106 @@ export default function AnnotationPanel() {
     handleAskQuestionWithText(noteInput)
   }, [noteInput, handleAskQuestionWithText])
 
+  // Summon-mode annotate — call a distilled persona's skill as system prompt
+  // and ask it to annotate the currently selected text. Result becomes an
+  // 'ai_persona' history entry on the annotation.
+  //
+  // Differs from handleAskQuestionWithText: no Hermes context injection, no
+  // cross-document linking, no ReAct. Plain chat with persona as narrator.
+  // This is the "让名家在这段文字旁批注" affordance.
+  const handleSummonAnnotate = useCallback(async (personaId: string, personaName: string) => {
+    if (!displayAnnotation && !textSelection) { alert('请先选中一段文字'); return }
+    const anchorText = displayAnnotation?.anchor.selectedText || textSelection?.text || ''
+    if (!anchorText.trim()) return
+    setAiLoading(true)
+    setStreamingText('')
+    try {
+      // RAG seed: build the query from the user's note (if any) plus the
+      // anchor text, so BM25 can pull the persona's most relevant original
+      // passages for this specific annotation. Cap the anchor to avoid
+      // flooding the query vocabulary.
+      const ragQuery = [noteInput.trim(), anchorText.slice(0, 400)].filter(Boolean).join(' \n ')
+      const sysRes = await window.electronAPI.personaGetSystemPrompt?.(personaId, ragQuery)
+      if (!sysRes?.success || !sysRes.systemPrompt) throw new Error(sysRes?.error || '无法加载 skill')
+      const userQ = noteInput.trim()
+        ? `请以你的视角批注下面这段文字，并回应用户的问题。\n\n【选中文字】\n${anchorText}\n\n【用户追问】\n${noteInput.trim()}`
+        : `请以你的视角批注下面这段文字——你会注意什么、挑剔什么、反问什么？\n\n【选中文字】\n${anchorText}`
+
+      const streamId = uuid()
+      let fullText = ''
+      const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => {
+        if (sid !== streamId) return
+        fullText += chunk
+        setStreamingText(fullText)
+      })
+      try {
+        const res = await Promise.race([
+          window.electronAPI.aiChatStream(streamId, aiModel, [
+            { role: 'system', content: sysRes.systemPrompt },
+            { role: 'user', content: userQ },
+          ]),
+          new Promise<{ success: false; error: string }>((resolve) =>
+            setTimeout(() => resolve({ success: false, error: 'AI 响应超时（60秒）' }), 60000)),
+        ])
+        if (!res.success) throw new Error(res.error || 'AI 调用失败')
+        if ((res as any).text) fullText = (res as any).text
+      } finally { cleanup() }
+      setStreamingText('')
+
+      const entry: HistoryEntry = {
+        id: uuid(),
+        type: 'ai_persona',
+        content: fullText,
+        userQuery: noteInput.trim() || '（无追问，纯批注）',
+        author: 'ai',
+        modelLabel: getModelLabel(aiModel),
+        personaId,
+        personaName,
+        createdAt: new Date().toISOString(),
+      }
+
+      // Attach entry to the active/selected annotation, creating one if the
+      // user only had a textSelection without a persisted annotation yet.
+      const existingAnn = displayAnnotation || (textSelection
+        ? currentPdfMeta?.annotations.find(a => a.anchor.selectedText === textSelection.text)
+        : null)
+      if (existingAnn) {
+        await updatePdfMeta(meta => ({
+          ...meta,
+          annotations: meta.annotations.map(a =>
+            a.id === existingAnn.id
+              ? { ...a, historyChain: [...a.historyChain, entry], updatedAt: new Date().toISOString() }
+              : a
+          )
+        }))
+        if (!activeAnnotationId) setActiveAnnotation(existingAnn.id)
+      } else if (textSelection) {
+        const newAnnotation: Annotation = {
+          id: uuid(),
+          anchor: {
+            pageNumber: textSelection.pageNumber,
+            startOffset: textSelection.startOffset,
+            endOffset: textSelection.endOffset,
+            selectedText: textSelection.text,
+          },
+          historyChain: [entry],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }
+        await updatePdfMeta(meta => ({
+          ...meta,
+          annotations: [...meta.annotations, newAnnotation]
+        }))
+        setActiveAnnotation(newAnnotation.id)
+      }
+      setNoteInput('')
+    } catch (err: any) {
+      alert(`召唤批注失败：${err.message}`)
+    } finally {
+      setAiLoading(false)
+    }
+  }, [displayAnnotation, textSelection, noteInput, aiModel, currentPdfMeta, activeAnnotationId, updatePdfMeta, setActiveAnnotation])
+
   // ===== Edit / Delete =====
   const handleEdit = useCallback(async (entryId: string, newContent: string) => {
     if (!displayAnnotation) return
@@ -1471,6 +1579,34 @@ export default function AnnotationPanel() {
               style={{ fontSize: 12, padding: '6px 18px' }}
             >
               {aiLoading ? '...' : '发送 AI'}
+            </button>
+            <button
+              className="btn btn-sm"
+              disabled={aiLoading}
+              onClick={() => {
+                if (personaListAnno.length === 0) {
+                  alert('还没有蒸馏好的 skill。\n先去 Hermes 面板的「召唤」tab 蒸馏一位名家。')
+                  return
+                }
+                const options = personaListAnno.map((p, i) =>
+                  `${i + 1}. ${p.canonicalName || p.name}${typeof p.currentFitnessTotal === 'number' ? ` · ${p.currentFitnessTotal}%` : ''}`
+                ).join('\n')
+                const pick = window.prompt(
+                  `召唤哪位名家批注这段文字？\n（会以该人物视角评论、挑剔、追问）\n\n${options}\n\n输入序号：`,
+                )
+                if (!pick) return
+                const idx = parseInt(pick, 10) - 1
+                if (isNaN(idx) || idx < 0 || idx >= personaListAnno.length) {
+                  alert('序号无效')
+                  return
+                }
+                const p = personaListAnno[idx]
+                handleSummonAnnotate(p.id, p.canonicalName || p.name)
+              }}
+              title="召唤一位蒸馏好的名家，以其视角批注这段文字"
+              style={{ fontSize: 12, padding: '6px 12px' }}
+            >
+              🧙 召唤
             </button>
           </div>
           <button className="btn btn-sm btn-primary" onClick={handleAddNote} disabled={!noteInput.trim() || (!displayAnnotation && !textSelection)}

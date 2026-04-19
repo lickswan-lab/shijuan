@@ -2494,9 +2494,10 @@ export default function PdfViewer() {
           )
         )}
 
-        {/* 合上书 — AI-generated closing reflection memo from this book's annotations.
+        {/* 回顾 — AI-generated closing reflection memo from this book's annotations.
             Fifth AI-companion surface alongside instant feedback / daily log /
-            weekly apprentice / reread greeting. Time scale: one book. */}
+            weekly apprentice / reread greeting. Time scale: one book.
+            Earlier names tried: "反刍" (too literal) → "合上书" (too long) → "回顾". */}
         {currentPdfMeta && currentPdfMeta.annotations.length >= 2 && (
           <button className="btn btn-sm" style={{ marginLeft: 8, fontSize: 11 }}
             title="读完这本之后，让同伴帮你回看这次留下了什么"
@@ -2542,14 +2543,14 @@ export default function PdfViewer() {
                 if (memo) {
                   await useLibraryStore.getState().updateMemo(memo.id, {
                     content: fullText.trim(),
-                    title: `合上《${title}》`,
+                    title: `回顾《${title}》`,
                   })
                   useUiStore.getState().setActiveMemo(memo.id)
                 }
               }
             }}
           >
-            合上书
+            回顾
           </button>
         )}
 

@@ -8,6 +8,7 @@ import { registerUpdaterIpc } from './updater'
 import { registerAgentIpc } from './ipc/agent'  // Needed for Hermes memory + knowledge map
 import { registerApprenticeIpc } from './ipc/apprentice'  // Hermes apprentice log (weekly observation)
 import { registerDiagnosticIpc } from './ipc/diagnostic'
+import { registerPersonasIpc } from './ipc/personas'  // 召唤 — persona archives with multi-source web search
 
 function createWindow(): BrowserWindow {
   // Remove default menu bar
@@ -103,6 +104,7 @@ if (!gotTheLock) {
   registerReadingLogIpc()
   registerAgentIpc()   // Hermes memory + tools (used by annotation AI)
   registerApprenticeIpc()  // Hermes apprentice weekly observation log
+  registerPersonasIpc()    // 召唤: persona archives + multi-source web search
   registerUpdaterIpc()
   registerDiagnosticIpc()
 
