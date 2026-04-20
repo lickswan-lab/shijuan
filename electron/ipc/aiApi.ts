@@ -1176,18 +1176,68 @@ export function registerAiApiIpc(): void {
           }
           const data = await response.json()
 
-          // Prefer layout_details (per-page) so we can merge pageTexts accurately.
-          // md_results is the fallback whole-doc markdown.
+          // === Block extraction: preserve images, formulas, tables ===
+          // Previous impl only kept `b.content`, which dropped every image block
+          // (images come back with empty `content` and a separate `image_url` /
+          // `img` / `url` field). For image-heavy literature that meant the OCR
+          // output was text-only — users couldn't see any figures. Now we:
+          //   1. Iterate each block and emit markdown for its type:
+          //      - image → `![](url)`
+          //      - formula → `$$latex$$`
+          //      - table → html/markdown table
+          //      - anything else → fall back to `content`
+          //   2. If layout_details somehow gives us NO text and md_results is
+          //      richer, use md_results as the source of truth. GLM-OCR's
+          //      md_results already renders images/formulas inline.
+          const extractBlock = (b: any): string => {
+            if (!b || typeof b !== 'object') return ''
+            const imgUrl = b.image_url || b.img_url || b.img || b.image || b.url
+            const isImage = b.type === 'image' || b.type === 'figure' || b.type === 'photo'
+            if (isImage || (imgUrl && !b.content)) {
+              if (imgUrl) return `![](${imgUrl})`
+              // Image block with no URL — leave a placeholder so users know a
+              // figure was detected but not extractable.
+              return `![图片（OCR 未能提取）]()`
+            }
+            if (b.type === 'formula' || b.type === 'equation') {
+              const latex = b.latex || b.formula || b.content
+              if (latex) return `$$${String(latex).replace(/^\$+|\$+$/g, '')}$$`
+            }
+            if (b.type === 'table') {
+              if (b.html) return b.html
+              if (b.markdown) return b.markdown
+            }
+            return b.content || ''
+          }
+
           let chunkText = ''
           const chunkPageTexts: string[] = []
           if (data.layout_details && Array.isArray(data.layout_details)) {
             for (const page of data.layout_details) {
-              const pageText = page.map((b: any) => b.content || '').filter(Boolean).join('\n\n')
+              const pageText = (page as any[]).map(extractBlock).filter(Boolean).join('\n\n')
               chunkPageTexts.push(pageText)
             }
             chunkText = chunkPageTexts.join('\n\n')
-          } else {
-            chunkText = data.md_results || ''
+          }
+          // Fallback: if layout_details extraction was empty OR md_results is
+          // noticeably richer (likely has figures/formulas we missed), prefer
+          // md_results. Threshold: md_results at least 20% longer than what we
+          // built from blocks. This catches the common "images in md_results
+          // but not in layout blocks" case without destroying page mapping
+          // when layout_details already had everything.
+          const layoutLen = chunkText.length
+          const mdLen = (data.md_results || '').length
+          if (data.md_results && (layoutLen === 0 || mdLen > layoutLen * 1.2)) {
+            chunkText = data.md_results
+            // If we switched to md_results, we lose the per-page split. Put the
+            // full md into the first page slot and leave the rest as empty
+            // placeholders so page count still matches.
+            if (chunkPageTexts.length > 0) {
+              chunkPageTexts[0] = data.md_results
+              for (let pi = 1; pi < chunkPageTexts.length; pi++) chunkPageTexts[pi] = ''
+            } else {
+              chunkPageTexts.push(data.md_results)
+            }
           }
 
           // Normalize circled numbers and excessive blank lines

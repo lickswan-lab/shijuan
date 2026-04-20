@@ -20,8 +20,29 @@ function logStartup(msg: string, extra?: Record<string, unknown>): void {
 }
 
 function createWindow(): BrowserWindow {
-  // Remove default menu bar
-  Menu.setApplicationMenu(null)
+  // Hide the menu bar but KEEP Edit roles so Ctrl+C / Ctrl+V / Ctrl+X / Ctrl+A
+  // keep working on selected text. Previously we called
+  // `Menu.setApplicationMenu(null)` which stripped every accelerator
+  // registered by the default menu — that's why users reported "can't copy
+  // selected text with Ctrl+C". Electron binds the clipboard shortcuts
+  // through the Edit menu's role items, so the menu has to exist even when
+  // it's not visible. We pair this with `autoHideMenuBar: true` below so
+  // the bar itself never shows up.
+  const editMenu = Menu.buildFromTemplate([
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+  ])
+  Menu.setApplicationMenu(editMenu)
 
   const mainWindow = new BrowserWindow({
     width: 1400,
@@ -32,6 +53,7 @@ function createWindow(): BrowserWindow {
     icon: join(__dirname, '../../build/icon.png'),
     show: false,
     backgroundColor: '#E9E0C8',
+    autoHideMenuBar: true,  // Hide the Edit menu bar — shortcuts still fire
     titleBarStyle: 'hidden',
     titleBarOverlay: {
       color: '#E9E0C8',

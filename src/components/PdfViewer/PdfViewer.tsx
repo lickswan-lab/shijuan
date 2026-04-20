@@ -12,6 +12,7 @@ import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
 import { cleanOcrText } from './cleanOcrText'
 import { collectTextNodes } from './highlights'
+import TranslateModal, { type TranslateModalProps } from './TranslateModal'
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 
@@ -1453,6 +1454,14 @@ export default function PdfViewer() {
   // doubles as a stop control while a stream is in flight.
   const [reviewing, setReviewing] = useState(false)
   const reviewStreamIdRef = useRef<string | null>(null)
+
+  // Translate modal — opened either from the floating toolbar ("选中" preset)
+  // or from the main toolbar ("全文/按页" preset). Modal reads selected text,
+  // OCR full text, and per-page OCR texts from the caller (this component)
+  // and handles streaming + chunking itself.
+  const [translateOpen, setTranslateOpen] = useState(false)
+  const [translateInitialMode, setTranslateInitialMode] = useState<TranslateModalProps['initialMode']>('selection')
+  const [translateSelectedText, setTranslateSelectedText] = useState<string>('')
   // If the user switches entry (or closes the viewer) mid-generation, abort
   // the in-flight stream so we don't quietly keep burning tokens in the
   // background and dump a memo onto the wrong entry.
@@ -2580,6 +2589,24 @@ export default function PdfViewer() {
           </button>
         )}
 
+        {/* 翻译 — opens modal with full-text / page-range options. Only show when
+            OCR text is available (for PDFs). For the 选中 mode, the button lives
+            in the floating toolbar instead, since that's selection-triggered. */}
+        {ocrFullText && (
+          <button
+            className="btn btn-sm"
+            style={{ marginLeft: 8, fontSize: 11 }}
+            title="翻译全文 / 按页"
+            onClick={() => {
+              setTranslateSelectedText('')
+              setTranslateInitialMode('full')
+              setTranslateOpen(true)
+            }}
+          >
+            翻译
+          </button>
+        )}
+
         {/* Edit button — for OCR text, TXT, MD, DOCX views */}
         {(viewMode === 'ocr' || isText || ['docx', 'doc'].includes(fileExt)) && (
           editMode ? (
@@ -3181,6 +3208,21 @@ export default function PdfViewer() {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
                 <span>高亮</span>
               </button>
+              <span className="ft-divider" />
+              <button
+                onClick={() => {
+                  const tb = toolbarRef.current
+                  if (!tb) return
+                  setTranslateSelectedText(tb.text)
+                  setTranslateInitialMode('selection')
+                  setTranslateOpen(true)
+                  setToolbar(null)
+                }}
+                title="翻译选中文本"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 8h14M9 4v4m-2 8a18 18 0 0 0 8 0M11 14s2.5-5 5-5 5 5 5 5m-5-2v10"/></svg>
+                <span>翻译</span>
+              </button>
             </>
           )}
 
@@ -3222,6 +3264,34 @@ export default function PdfViewer() {
           onClose={() => { setToolbar(null); setTextSelection(null) }}
         />
       )}
+
+      {/* ===== Translate Modal ===== */}
+      <TranslateModal
+        open={translateOpen}
+        onClose={() => setTranslateOpen(false)}
+        initialMode={translateInitialMode}
+        selectedText={translateSelectedText}
+        fullText={ocrFullText || undefined}
+        pageTexts={
+          // Prefer the structured per-page texts when the meta stores them
+          // (populated on fresh OCR runs). Fall back to parsing the full text
+          // by "=== 第 N 页 ===" markers for older OCR output.
+          currentPdfMeta?.pages && currentPdfMeta.pages.length > 0
+            ? currentPdfMeta.pages.map(p => p.ocrText || '')
+            : ocrFullText
+              ? (() => {
+                  const parts = ocrFullText.split(/=== 第 \d+ 页 ===/).slice(1)
+                  return parts.length > 0 ? parts.map(s => s.trim()) : [ocrFullText]
+                })()
+              : undefined
+        }
+        totalPages={
+          currentPdfMeta?.pages && currentPdfMeta.pages.length > 0
+            ? currentPdfMeta.pages.length
+            : numPages || 0
+        }
+        docTitle={currentEntry?.title}
+      />
     </div>
   )
 }
