@@ -1448,6 +1448,24 @@ export default function PdfViewer() {
   // Save scroll position before entering immersive mode to restore on exit
   const savedScrollPos = useRef<number>(0)
 
+  // 回顾 generation state — without this, rapid clicks fan out parallel AI
+  // streams and create duplicate memos with no way to stop. The button now
+  // doubles as a stop control while a stream is in flight.
+  const [reviewing, setReviewing] = useState(false)
+  const reviewStreamIdRef = useRef<string | null>(null)
+  // If the user switches entry (or closes the viewer) mid-generation, abort
+  // the in-flight stream so we don't quietly keep burning tokens in the
+  // background and dump a memo onto the wrong entry.
+  useEffect(() => {
+    return () => {
+      const sid = reviewStreamIdRef.current
+      if (sid) {
+        window.electronAPI.aiAbortStream?.(sid).catch(() => {})
+        reviewStreamIdRef.current = null
+      }
+    }
+  }, [currentEntry?.id])
+
   // Auto-switch OCR background when dark mode toggles
   useEffect(() => {
     if (darkMode && ocrBgLight > 50) {
@@ -2623,9 +2641,36 @@ export default function PdfViewer() {
             weekly apprentice / reread greeting. Time scale: one book.
             Earlier names tried: "反刍" (too literal) → "合上书" (too long) → "回顾". */}
         {currentPdfMeta && currentPdfMeta.annotations.length >= 2 && (
-          <button className="btn btn-sm" style={{ marginLeft: 8, fontSize: 11 }}
-            title="读完这本之后，让同伴帮你回看这次留下了什么"
+          <button
+            className="btn btn-sm"
+            style={{
+              marginLeft: 8, fontSize: 11,
+              // Visual feedback while generating: accent border + soft fill so it
+              // reads as "active task" rather than just a normal button. Also
+              // doubles as the affordance hint that clicking now means "stop".
+              ...(reviewing ? {
+                background: 'var(--accent-soft)',
+                borderColor: 'var(--accent)',
+                color: 'var(--accent)',
+              } : {}),
+            }}
+            title={reviewing
+              ? '正在生成回顾 — 点击中止'
+              : '读完这本之后，让同伴帮你回看这次留下了什么'}
             onClick={async () => {
+              // STOP path: a stream is in flight — abort it instead of starting
+              // another one. Without this, rapid clicks would fan out parallel
+              // streams and silently create duplicate memos.
+              if (reviewing) {
+                const sid = reviewStreamIdRef.current
+                if (sid) {
+                  window.electronAPI.aiAbortStream?.(sid).catch(() => {})
+                  reviewStreamIdRef.current = null
+                }
+                setReviewing(false)
+                return
+              }
+
               const annotations = currentPdfMeta.annotations
               if (annotations.length < 2) return
               const title = currentEntry?.title || '未知文献'
@@ -2648,6 +2693,8 @@ export default function PdfViewer() {
 
               const model = useUiStore.getState().selectedAiModel
               const streamId = uuid()
+              reviewStreamIdRef.current = streamId
+              setReviewing(true)
               let fullText = ''
               const cleanup = window.electronAPI.onAiStreamChunk((sid: string, chunk: string) => { if (sid === streamId) fullText += chunk })
 
@@ -2656,7 +2703,12 @@ export default function PdfViewer() {
                   { role: 'system', content: CLOSING_SYSTEM_PROMPT },
                   { role: 'user', content: userMsg },
                 ])
-              } finally { cleanup() }
+              } catch { /* abort or network — fullText may be partial; just bail */ }
+              finally {
+                cleanup()
+                reviewStreamIdRef.current = null
+                setReviewing(false)
+              }
 
               if (fullText.trim()) {
                 // Title is plain and editable — no "反刍：" prefix forced upon user.
@@ -2674,7 +2726,12 @@ export default function PdfViewer() {
               }
             }}
           >
-            回顾
+            {reviewing ? (
+              <>
+                <span className="loading-spinner" style={{ width: 10, height: 10, marginRight: 6, verticalAlign: -1 }} />
+                生成中 · 停止
+              </>
+            ) : '回顾'}
           </button>
         )}
 

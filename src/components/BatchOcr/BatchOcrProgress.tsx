@@ -45,17 +45,27 @@ export default function BatchOcrProgress() {
             }
           </div>
           {currentItem && (
-            <div style={{
-              fontSize: 10, color: 'var(--text-muted)',
-              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-            }}>
-              正在处理: {currentItem.title}
-              {ocrQueue.currentChunk && ocrQueue.currentChunk.totalChunks > 1 && (
-                <span style={{ color: 'var(--accent)', marginLeft: 4 }}>
-                  （片段 {ocrQueue.currentChunk.chunkIndex + 1}/{ocrQueue.currentChunk.totalChunks}）
-                </span>
-              )}
-            </div>
+            <>
+              <div style={{
+                fontSize: 10, color: 'var(--text-muted)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>
+                正在处理: {currentItem.title}
+                {ocrQueue.currentChunk && ocrQueue.currentChunk.totalChunks > 1 && (
+                  <span style={{ color: 'var(--accent)', marginLeft: 4 }}>
+                    （片段 {ocrQueue.currentChunk.chunkIndex + 1}/{ocrQueue.currentChunk.totalChunks}）
+                  </span>
+                )}
+              </div>
+              {/* OCR runs in main process, so minimizing/backgrounding the window is safe.
+                  Closing the window WILL lose the in-flight OCR (renderer can't receive the
+                  IPC response back), so the hint specifically says "minimize" not "close". */}
+              <div style={{
+                fontSize: 9, color: 'var(--text-muted)', opacity: 0.75, marginTop: 2,
+              }}>
+                可最小化窗口，OCR 在后台继续运行（请勿关闭窗口）
+              </div>
+            </>
           )}
           {isDone && (
             <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
