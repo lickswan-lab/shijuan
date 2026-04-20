@@ -187,6 +187,11 @@ function AppendAnnotationList({ annotations, otherEntries, onAppend, onAppendOth
 }
 
 // ===== DOM text highlighting utilities =====
+// Position-aware overlap resolution: when two targets cover the same chars,
+// the LATER target (higher index in `targets`) wins. Older target's
+// non-overlapping portions still wrap normally, so partial overlap renders
+// as 2 spans (old-prefix + new) and full containment as 3 (prefix + new + suffix).
+// The caller should append new marks at the end of `targets` so they win.
 
 function findAndWrapAll(
   container: HTMLElement,
@@ -194,39 +199,68 @@ function findAndWrapAll(
   wrapFn: (target: { text: string; id: string }) => HTMLElement,
   skipClass?: string,
 ) {
-  for (const target of targets) {
+  // === Phase 1: build flat string + char→DOM map (one pass, before any wrap) ===
+  const textNodes = collectTextNodes(container)
+  const charMap: Array<{ ni: number; offset: number }> = []
+  let flat = ''
+  for (let ni = 0; ni < textNodes.length; ni++) {
+    const node = textNodes[ni]
+    if (skipClass && (node.parentNode as HTMLElement)?.classList?.contains(skipClass)) continue
+    const raw = node.textContent || ''
+    for (let ri = 0; ri < raw.length; ri++) {
+      if (/\s/.test(raw[ri])) continue
+      charMap.push({ ni, offset: ri })
+      flat += raw[ri]
+    }
+  }
+  if (charMap.length === 0) return
+
+  // === Phase 2: locate each target's [start, end) in the flat string ===
+  type Range = { target: { text: string; id: string }; start: number; end: number; idx: number }
+  const ranges: Range[] = []
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i]
     const searchText = target.text.replace(/\s+/g, '').trim()
     if (searchText.length < 2) continue
-
-    // Re-collect text nodes each iteration (DOM changes between iterations)
-    const textNodes = collectTextNodes(container)
-
-    // Build flat string + map each flat char back to (nodeIndex, rawOffset)
-    const charMap: Array<{ ni: number; offset: number }> = []
-    let flat = ''
-    for (let ni = 0; ni < textNodes.length; ni++) {
-      const node = textNodes[ni]
-      if (skipClass && (node.parentNode as HTMLElement)?.classList?.contains(skipClass)) continue
-      const raw = node.textContent || ''
-      for (let ri = 0; ri < raw.length; ri++) {
-        if (/\s/.test(raw[ri])) continue // skip whitespace in flat string
-        charMap.push({ ni, offset: ri })
-        flat += raw[ri]
-      }
-    }
-
     const flatIdx = flat.indexOf(searchText)
     if (flatIdx === -1) continue
+    ranges.push({ target, start: flatIdx, end: flatIdx + searchText.length, idx: i })
+  }
 
-    const flatEnd = flatIdx + searchText.length
+  // === Phase 3: subtract LATER ranges from each older range ===
+  // For each range r, compute visible sub-intervals = [r.start, r.end) minus
+  // the union of all ranges with idx > r.idx.
+  type WrapTask = { target: { text: string; id: string }; start: number; end: number }
+  const tasks: WrapTask[] = []
+  for (const r of ranges) {
+    let intervals: Array<[number, number]> = [[r.start, r.end]]
+    for (const other of ranges) {
+      if (other.idx <= r.idx) continue
+      const next: Array<[number, number]> = []
+      for (const [a, b] of intervals) {
+        if (other.end <= a || other.start >= b) {
+          next.push([a, b])
+        } else {
+          if (other.start > a) next.push([a, other.start])
+          if (other.end < b) next.push([other.end, b])
+        }
+      }
+      intervals = next
+      if (intervals.length === 0) break
+    }
+    for (const [a, b] of intervals) {
+      if (b > a) tasks.push({ target: r.target, start: a, end: b })
+    }
+  }
+  if (tasks.length === 0) return
 
-    // Collect which nodes are involved and their raw start/end offsets
+  // === Phase 4: wrap tasks right-to-left so leftward charMap stays valid ===
+  tasks.sort((a, b) => b.start - a.start)
+
+  for (const task of tasks) {
     const segments: Array<{ node: Text; startOffset: number; endOffset: number }> = []
-    let currentNi = -1
-    let segStart = 0
-    let segEnd = 0
-
-    for (let fi = flatIdx; fi < flatEnd; fi++) {
+    let currentNi = -1, segStart = 0, segEnd = 0
+    for (let fi = task.start; fi < task.end; fi++) {
       const cm = charMap[fi]
       if (cm.ni !== currentNi) {
         if (currentNi >= 0) segments.push({ node: textNodes[currentNi], startOffset: segStart, endOffset: segEnd + 1 })
@@ -236,28 +270,27 @@ function findAndWrapAll(
       segEnd = cm.offset
     }
     if (currentNi >= 0) segments.push({ node: textNodes[currentNi], startOffset: segStart, endOffset: segEnd + 1 })
-
     if (segments.length === 0) continue
 
-    // Wrap each segment (reverse order to preserve offsets)
     try {
       for (let si = segments.length - 1; si >= 0; si--) {
         const seg = segments[si]
         if (!seg.node.isConnected) continue
+        const parent = seg.node.parentNode
+        if (!parent) continue
         const raw = seg.node.textContent || ''
         const before = raw.substring(0, seg.startOffset)
         const match = raw.substring(seg.startOffset, seg.endOffset)
         const after = raw.substring(seg.endOffset)
-        const parent = seg.node.parentNode!
 
-        const wrapper = wrapFn(target)
+        const wrapper = wrapFn(task.target)
         wrapper.textContent = match
 
         if (after) parent.insertBefore(document.createTextNode(after), seg.node.nextSibling)
         parent.insertBefore(wrapper, seg.node.nextSibling)
         if (before) { seg.node.textContent = before } else { parent.removeChild(seg.node) }
       }
-    } catch { /* DOM changed, skip */ }
+    } catch { /* DOM changed mid-wrap, skip */ }
   }
 }
 
