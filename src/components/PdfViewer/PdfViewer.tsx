@@ -1197,6 +1197,34 @@ function EpubViewer({
     }
   }, [absPath, onTextSelect])
 
+  // Resize bridge: when parent layout changes (e.g. annotation panel opens
+  // or closes, sidebar toggles, window resize), the rendition keeps its old
+  // iframe width and a blank strip appears on the right. ResizeObserver
+  // forwards container size changes to rendition.resize() so the iframe
+  // re-lays out to fill the space.
+  useEffect(() => {
+    if (!containerRef.current) return
+    const el = containerRef.current
+    let raf = 0
+    const ro = new ResizeObserver(() => {
+      // coalesce multi-fires per frame to avoid fighting epub.js internal work
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        const r = renditionRef.current
+        if (!r) return
+        try {
+          const w = el.clientWidth
+          const h = el.clientHeight
+          if (w > 0 && h > 0) r.resize(w, h)
+        } catch (err) {
+          console.warn('[epub] resize failed', err)
+        }
+      })
+    })
+    ro.observe(el)
+    return () => { cancelAnimationFrame(raf); ro.disconnect() }
+  }, [])
+
   // Keyboard: ← previous chapter · → next chapter. Attached at the wrapper
   // level so focus inside the iframe doesn't need to bubble for it to work
   // — we use capture phase on window to catch it regardless of focus target.
