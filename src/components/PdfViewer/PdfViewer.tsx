@@ -1212,7 +1212,13 @@ function EpubViewer({
     const t = setTimeout(() => {
       const r = renditionRef.current
       if (!r) return
+      // Preserve reading position across resize. Without this, resize resets
+      // the scroll/currentLocation and the user "jumps back" when they scroll
+      // up past the newly reflowed section.
+      let cfi: string | undefined
+      try { cfi = r.currentLocation()?.start?.cfi } catch {}
       try { r.resize() } catch (err) { console.warn('[epub] resize failed', err) }
+      if (cfi) { try { r.display(cfi) } catch {} }
     }, 350)
     return () => clearTimeout(t)
   }, [annotationPanelCollapsed, sidebarCollapsed, rightPanel])
