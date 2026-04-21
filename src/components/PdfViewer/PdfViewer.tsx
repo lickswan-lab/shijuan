@@ -1912,11 +1912,89 @@ function ImmersiveAnnotationBox({ toolbar, textSelection, annotations, onAnnotat
 
 type ViewMode = 'pdf' | 'ocr'
 
+// Viewport-aware PDF page. When `inRange` is false we render a minimal
+// placeholder div (keeps the wrapper mounted so IntersectionObserver still
+// fires as the user scrolls near it) and skip react-pdf's <Page> entirely.
+// This is the key fix for big-PDF lag: a 500-page document used to mount
+// 500 <Page> canvases on load; now only ~5 mount at a time.
+function LazyPdfPage({
+  pageNum, scale, inRange, onVisible,
+}: {
+  pageNum: number
+  scale: number
+  inRange: boolean
+  onVisible: (pageNum: number) => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const io = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) onVisible(pageNum)
+      }
+    }, { rootMargin: '400px 0px' })  // preload when 400px away from viewport
+    io.observe(el)
+    return () => io.disconnect()
+  }, [pageNum, onVisible])
+
+  // Placeholder keeps roughly the same height as a real page so scrollbar
+  // doesn't jump when pages materialize. 800 * scale ~= typical A4 at 100%.
+  const phHeight = 800 * scale
+  return (
+    <div
+      ref={ref}
+      className="pdf-page-wrapper"
+      data-page-number={pageNum}
+      style={{ position: 'relative', minHeight: inRange ? undefined : phHeight }}
+    >
+      <div style={{
+        position: 'absolute', top: 4, right: 8, fontSize: 11,
+        color: '#999', background: 'rgba(255,255,255,0.85)', padding: '2px 8px',
+        borderRadius: 4, zIndex: 5,
+      }}>
+        {pageNum}
+      </div>
+      {inRange ? (
+        <Page
+          pageNumber={pageNum}
+          scale={scale}
+          renderTextLayer={true}
+          renderAnnotationLayer={false}
+          loading={
+            <div style={{ width: 600 * scale, height: phHeight, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
+              第 {pageNum} 页...
+            </div>
+          }
+          onLoadError={(err) => console.warn(`[pdf] page ${pageNum} load error`, err)}
+          onRenderError={(err) => console.warn(`[pdf] page ${pageNum} render error`, err)}
+        />
+      ) : (
+        <div style={{ width: 600 * scale, height: phHeight, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: 12, background: 'rgba(0,0,0,0.02)' }}>
+          第 {pageNum} 页（滚动到此自动加载）
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function PdfViewer() {
   const { currentEntry, currentPdfMeta, updatePdfMeta, updateEntry } = useLibraryStore()
   const { textSelection, setTextSelection, setActiveAnnotation, glmApiKeyStatus, immersiveMode, darkMode, dualPageMode, searchHighlight, setSearchHighlight } = useUiStore()
   const [numPages, setNumPages] = useState(0)
   const [scale, setScale] = useState(1.0)
+  // Which pages are currently "in render range" — others render as a fixed-
+  // height placeholder so react-pdf doesn't instantiate 500 <Page> canvases
+  // at once. Updated from an IntersectionObserver on each page wrapper.
+  // Initial range covers first 3 pages; observer expands as user scrolls.
+  const [pageRenderRange, setPageRenderRange] = useState<{ start: number; end: number }>({ start: 1, end: 3 })
+  // debounced scale — so dragging the zoom slider (or rapid +/- keys) doesn't
+  // force every visible Page canvas to re-rasterize on each tick.
+  const [debouncedScale, setDebouncedScale] = useState(1.0)
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedScale(scale), 120)
+    return () => clearTimeout(t)
+  }, [scale])
   const [pdfFileUrl, setPdfFileUrl] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [loadProgress, setLoadProgress] = useState<number>(0)
@@ -3515,28 +3593,28 @@ export default function PdfViewer() {
                 })()
               ) : (
                 /* Normal single-page scroll layout */
-                Array.from({ length: numPages }, (_, i) => (
-                  <div key={i + 1} className="pdf-page-wrapper" data-page-number={i + 1} style={{ position: 'relative' }}>
-                    <div style={{
-                      position: 'absolute', top: 4, right: 8, fontSize: 11,
-                      color: '#999', background: 'rgba(255,255,255,0.85)', padding: '2px 8px',
-                      borderRadius: 4, zIndex: 5
-                    }}>
-                      {i + 1}
-                    </div>
-                    <Page
-                      pageNumber={i + 1}
-                      scale={scale}
-                      renderTextLayer={true}
-                      renderAnnotationLayer={false}
-                      loading={
-                        <div style={{ width: 600 * scale, height: 800 * scale, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
-                          第 {i + 1} 页...
-                        </div>
-                      }
+                Array.from({ length: numPages }, (_, i) => {
+                  const pageNum = i + 1
+                  // Render real <Page> only for pages near the current range
+                  // (±2 around pageRenderRange), placeholder for others. This
+                  // prevents react-pdf from instantiating every Page canvas
+                  // for huge PDFs, which was the main source of load+resize lag.
+                  const inRange = pageNum >= pageRenderRange.start - 2 && pageNum <= pageRenderRange.end + 2
+                  return (
+                    <LazyPdfPage
+                      key={pageNum}
+                      pageNum={pageNum}
+                      scale={debouncedScale}
+                      inRange={inRange}
+                      onVisible={(n) => {
+                        setPageRenderRange(prev => ({
+                          start: Math.min(prev.start, n),
+                          end: Math.max(prev.end, n),
+                        }))
+                      }}
                     />
-                  </div>
-                ))
+                  )
+                })
               )}
             </Document>
           )}
