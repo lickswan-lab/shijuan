@@ -99,6 +99,23 @@ export default function TranslateModal(props: TranslateModalProps) {
   const streamIdRef = useRef<string | null>(null)
   const cancelledRef = useRef(false)
 
+  // Local model override — defaults to the globally selected model but can be
+  // overridden per-translation (e.g. pick a bigger model for long docs).
+  // We keep it local so switching here doesn't pollute the global choice used
+  // by划词提问 / 回顾 etc.
+  const [localModel, setLocalModel] = useState<string>(selectedAiModel)
+  const [configuredProviders, setConfiguredProviders] = useState<
+    Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>
+  >([])
+
+  // Load configured AI providers once on mount, and refresh whenever the modal
+  // opens (the user may have added/removed a provider between opens).
+  useEffect(() => {
+    if (open && (window as any).electronAPI?.aiGetConfigured) {
+      (window as any).electronAPI.aiGetConfigured().then(setConfiguredProviders).catch(() => {})
+    }
+  }, [open])
+
   // Reset state when modal opens / mode switches to a new request
   useEffect(() => {
     if (open) {
@@ -106,7 +123,11 @@ export default function TranslateModal(props: TranslateModalProps) {
       setResult('')
       setProgressMsg('')
       cancelledRef.current = false
+      // Sync local model to current global choice on each open — user's latest
+      // pick from the top bar should win unless they override inside the modal.
+      setLocalModel(selectedAiModel)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, props.initialMode])
 
   // Also reset page range when modal opens, so stale state from a prior entry doesn't carry over
@@ -151,7 +172,7 @@ export default function TranslateModal(props: TranslateModalProps) {
           }
         })
         try {
-          await window.electronAPI.aiChatStream(streamId, selectedAiModel, [
+          await window.electronAPI.aiChatStream(streamId, localModel, [
             {
               role: 'system',
               content: `你是一名学术翻译。请将用户给出的文本翻译为${target}。\n要求：${style}\n直接输出译文，不要添加任何解释、前言、说明、"翻译如下"之类的元话语。`,
@@ -297,8 +318,8 @@ export default function TranslateModal(props: TranslateModalProps) {
             </div>
           )}
 
-          {/* Target language + source preview */}
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8 }}>
+          {/* Target language + model + source preview */}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>译为</span>
             <select
               value={targetLang} onChange={e => setTargetLang(e.target.value as any)} disabled={running}
@@ -306,6 +327,29 @@ export default function TranslateModal(props: TranslateModalProps) {
             >
               <option value="zh">中文</option>
               <option value="en">英文</option>
+            </select>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>模型</span>
+            <select
+              value={localModel}
+              onChange={e => setLocalModel(e.target.value)}
+              disabled={running}
+              title="选择本次翻译使用的模型（仅本弹窗生效，不影响全局）"
+              style={{
+                fontSize: 12, padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 3,
+                background: 'var(--bg)', color: 'var(--text)', maxWidth: 200,
+              }}
+            >
+              {configuredProviders.length > 0 ? (
+                configuredProviders.map(p => (
+                  <optgroup key={p.id} label={p.name}>
+                    {p.models.map(m => (
+                      <option key={`${p.id}:${m.id}`} value={`${p.id}:${m.id}`}>{m.name}</option>
+                    ))}
+                  </optgroup>
+                ))
+              ) : (
+                <option value={localModel}>请先配置 Key</option>
+              )}
             </select>
             <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 'auto' }}>
               源文 {currentSource.length.toLocaleString()} 字
