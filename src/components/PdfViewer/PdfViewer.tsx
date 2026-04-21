@@ -744,14 +744,131 @@ ${annHighlightJS}
   )
 }
 
-// EPUB viewer using epub.js
-function EpubViewer({ absPath, onTextSelect }: {
+// EPUB viewer using epub.js.
+//
+// Annotation highlighting: epub.js renders each chapter in a per-section
+// iframe. To underline annotations we:
+//   1. Inject our highlight CSS into each iframe's <head> on first render
+//   2. Walk the iframe's body text nodes, wrapping matches with
+//      .ocr-ann-underline + a clickable .ocr-ann-marker dot
+//   3. Re-apply when annotations change — we cache each iframe's Contents
+//      object so we can reach it again after the user has navigated.
+// This is conceptually the same as DocxViewer's useAnnotationHighlights but
+// has to run inside a foreign document, so we use the refactored
+// findAndWrapAll that respects Node.ownerDocument.
+function EpubViewer({ absPath, onTextSelect, annotations, onAnnotationClick }: {
   absPath: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
+  annotations?: Array<{ id: string; selectedText: string }>
+  onAnnotationClick?: (id: string) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const bookRef = useRef<any>(null)
   const renditionRef = useRef<any>(null)
+  // Latest rendered section's Contents objects, keyed by cfiBase. Each Contents
+  // exposes .document (the iframe Document) + .window. When annotations change,
+  // we iterate this map and re-apply highlights to every known section so
+  // marks survive scrolling between chapters.
+  const contentsMapRef = useRef<Map<string, any>>(new Map())
+
+  // Keep the latest annotation list + click handler in refs so the
+  // applyHighlights closure (wired into rendition events) always sees the
+  // freshest data without needing to re-register event listeners.
+  const annsRef = useRef(annotations || [])
+  annsRef.current = annotations || []
+  const onClickRef = useRef(onAnnotationClick)
+  onClickRef.current = onAnnotationClick
+
+  // Apply / re-apply annotation underlines and marker dots inside one
+  // iframe's document. Idempotent: clears any prior wrap before redoing the
+  // pass, so updates don't accumulate stale spans.
+  const applyHighlights = (contents: any) => {
+    const doc = contents?.document as Document | undefined
+    if (!doc || !doc.body) return
+
+    // Inject CSS once per iframe (globals.css isn't reachable from inside it).
+    if (!doc.getElementById('sj-epub-highlight-style')) {
+      const style = doc.createElement('style')
+      style.id = 'sj-epub-highlight-style'
+      style.textContent = `
+        .ocr-ann-underline {
+          text-decoration: underline;
+          text-decoration-color: rgba(200,149,108,0.5);
+          text-decoration-thickness: 1px;
+          text-underline-offset: 3px;
+          pointer-events: none;
+          border-radius: 2px;
+        }
+        .ocr-ann-marker {
+          display: inline-block;
+          width: 6px; height: 6px;
+          background: #C8956C;
+          border-radius: 50%;
+          margin: 0 3px 0 1px;
+          vertical-align: middle;
+          cursor: pointer;
+          opacity: 0.7;
+          transition: opacity 0.15s, transform 0.15s;
+          position: relative;
+          top: -1px;
+        }
+        .ocr-ann-marker:hover { opacity: 1; transform: scale(1.5); }
+      `
+      doc.head.appendChild(style)
+    }
+
+    // Clear previous annotation spans — unwrap underlines, remove markers.
+    doc.body.querySelectorAll('.ocr-ann-underline, .ocr-ann-marker').forEach(el => {
+      try {
+        const parent = el.parentNode
+        if (!parent) return
+        if (el.classList.contains('ocr-ann-marker')) { parent.removeChild(el); return }
+        while (el.firstChild) parent.insertBefore(el.firstChild, el)
+        parent.removeChild(el)
+      } catch {}
+    })
+    try { doc.body.normalize() } catch {}
+
+    const anns = annsRef.current
+    if (!anns.length) return
+
+    const targets = anns.map(a => ({ text: a.selectedText, id: a.id }))
+    findAndWrapAll(doc.body, targets, (target) => {
+      const span = doc.createElement('span')
+      span.className = 'ocr-ann-underline'
+      ;(span as any).dataset.annId = (target as any).id
+      return span
+    }, 'ocr-ann-underline')
+
+    // Insert a clickable dot marker right before the first underline span of
+    // each distinct annotation. pointerEvents:none on the underline keeps text
+    // selection intact, so the marker is the only "click to open" surface.
+    const highlighted = doc.body.querySelectorAll('.ocr-ann-underline[data-ann-id]')
+    const seen = new Set<string>()
+    highlighted.forEach(el => {
+      const annId = (el as HTMLElement).dataset.annId
+      if (!annId || seen.has(annId)) return
+      seen.add(annId)
+      const marker = doc.createElement('span')
+      marker.className = 'ocr-ann-marker'
+      ;(marker as any).dataset.annId = annId
+      marker.addEventListener('click', (e) => {
+        e.stopPropagation()
+        onClickRef.current?.(annId)
+      })
+      el.parentNode?.insertBefore(marker, el)
+    })
+  }
+
+  // Re-apply whenever the annotation list changes — iterate all iframes we've
+  // seen so far. New sections rendered later will apply on their own
+  // 'rendered' event.
+  useEffect(() => {
+    for (const contents of contentsMapRef.current.values()) {
+      applyHighlights(contents)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [annotations])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -779,13 +896,28 @@ function EpubViewer({ absPath, onTextSelect }: {
       })
 
       // Capture text selection
-      rendition.on('selected', (cfiRange: string, contents: any) => {
+      rendition.on('selected', (_cfiRange: string, contents: any) => {
         const sel = contents?.window?.getSelection()
         if (sel) {
           const text = sel.toString().trim()
           if (text && text.length >= 2) {
             onTextSelect({ pageNumber: 1, text, startOffset: 0, endOffset: text.length })
           }
+        }
+      })
+
+      // After each section renders (or re-renders), cache its Contents object
+      // and paint annotation highlights. For scrolled-doc flow, multiple
+      // sections may be live at once — getContents() returns them all.
+      rendition.on('rendered', () => {
+        try {
+          const list = rendition.getContents() as any[]
+          list.forEach((c) => {
+            if (c?.cfiBase) contentsMapRef.current.set(c.cfiBase, c)
+            applyHighlights(c)
+          })
+        } catch (err) {
+          console.error('[epub] highlight pass failed', err)
         }
       })
 
@@ -796,6 +928,7 @@ function EpubViewer({ absPath, onTextSelect }: {
 
     return () => {
       destroyed = true
+      contentsMapRef.current.clear()
       if (renditionRef.current) try { renditionRef.current.destroy() } catch {}
       if (bookRef.current) try { bookRef.current.destroy() } catch {}
     }
@@ -3047,7 +3180,13 @@ export default function PdfViewer() {
       {/* ===== EPUB View ===== */}
       {viewMode === 'pdf' && fileExt === 'epub' && (
         <div className="pdf-scroll-area" style={{ padding: 0 }}>
-          <EpubViewer key={currentEntry?.id} absPath={absPath} onTextSelect={setTextSelection} />
+          <EpubViewer
+            key={currentEntry?.id}
+            absPath={absPath}
+            onTextSelect={setTextSelection}
+            annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
+            onAnnotationClick={(id) => setActiveAnnotation(id)}
+          />
         </div>
       )}
 

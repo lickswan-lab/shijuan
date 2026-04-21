@@ -10,7 +10,11 @@ import { useEffect } from 'react'
 
 export function collectTextNodes(root: Node): Text[] {
   const nodes: Text[] = []
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  // Use the root's own document — critical for iframe bodies where
+  // `document` refers to the parent page, not the iframe's.
+  const ownerDoc = (root as any).ownerDocument as Document | null
+  const doc: Document = ownerDoc || document
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   while (walker.nextNode()) nodes.push(walker.currentNode as Text)
   return nodes
 }
@@ -120,7 +124,12 @@ export function findAndWrapAll(
         const wrapper = wrapFn(task.target)
         wrapper.textContent = match
 
-        if (after) parent.insertBefore(document.createTextNode(after), seg.node.nextSibling)
+        // Same-document note: wrapFn is expected to create nodes in the same
+        // document as `container` (callers from iframe must use iframe's
+        // document). We only create a text node here for the "after" remainder,
+        // so use the node's ownerDocument to match.
+        const ownerDoc = (seg.node as any).ownerDocument as Document | null || document
+        if (after) parent.insertBefore(ownerDoc.createTextNode(after), seg.node.nextSibling)
         parent.insertBefore(wrapper, seg.node.nextSibling)
         if (before) { seg.node.textContent = before } else { parent.removeChild(seg.node) }
       }
