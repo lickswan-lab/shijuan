@@ -905,9 +905,30 @@ function EpubViewer({ absPath, onTextSelect, annotations, onAnnotationClick }: {
       })
       renditionRef.current = rendition
 
+      // Reading layout: body centered with comfortable reading width.
+      // max-width 760 → 860 gives Chinese prose more breathing room in wide
+      // viewports without losing legibility (optimal 45-75 CJK chars / line).
+      // padding block 40/56 makes chapter headings breathe at the top.
       rendition.themes.default({
-        body: { 'font-family': '"Noto Serif SC", "Source Han Serif", Georgia, serif', 'line-height': '2', 'max-width': '760px', 'margin': '0 auto', 'padding': '24px 32px' },
-        'h1,h2,h3': { 'font-family': '-apple-system, "Microsoft YaHei", sans-serif' },
+        'html': { 'height': '100%' },
+        'body': {
+          'font-family': '"Noto Serif SC", "Source Han Serif", Georgia, serif',
+          'line-height': '1.9',
+          'max-width': '860px',
+          'margin': '0 auto',
+          'padding': '40px 56px',
+          'text-align': 'justify',
+          'color': '#3D3529',
+          'font-size': '17px',
+        },
+        'h1,h2,h3': {
+          'font-family': '-apple-system, "Microsoft YaHei", sans-serif',
+          'text-align': 'center',
+          'margin-top': '1.6em',
+          'margin-bottom': '1em',
+        },
+        'p': { 'margin': '0 0 1em 0', 'text-indent': '2em' },
+        'img': { 'max-width': '100%', 'height': 'auto', 'margin': '1em auto', 'display': 'block' },
       })
 
       // Capture text selection
