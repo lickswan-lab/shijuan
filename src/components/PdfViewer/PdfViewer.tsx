@@ -1937,6 +1937,14 @@ export default function PdfViewer() {
     if (glmApiKeyStatus !== 'set') { alert('请先在设置中填入 GLM API Key'); return }
     setOcrProgress({ status: '正在上传 PDF 并识别文字...' })
 
+    // Flag the entry as OCR-running so FileTree shows the spinner. Cleared on
+    // success/failure paths below.
+    await updateEntry(currentEntry.id, {
+      ocrStatus: 'running',
+      ocrStatusUpdatedAt: new Date().toISOString(),
+      ocrError: undefined,
+    }).catch(() => {})
+
     try {
       const result = await window.electronAPI.glmOcrPdf(currentEntry.absPath)
 
@@ -1967,14 +1975,29 @@ export default function PdfViewer() {
         setOcrFullText(textToSave)
         setOcrFilePath(savedPath)
         // Update entry OCR status
-        await updateEntry(currentEntry.id, { ocrStatus: 'complete', ocrFilePath: savedPath })
+        await updateEntry(currentEntry.id, {
+          ocrStatus: 'complete',
+          ocrFilePath: savedPath,
+          ocrStatusUpdatedAt: new Date().toISOString(),
+          ocrError: undefined,
+        })
         setOcrProgress({ status: 'OCR 完成！' })
         setTimeout(() => setOcrProgress(null), 2000)
       } else {
+        await updateEntry(currentEntry.id, {
+          ocrStatus: 'failed',
+          ocrStatusUpdatedAt: new Date().toISOString(),
+          ocrError: result.error || '未知错误',
+        }).catch(() => {})
         setOcrProgress({ status: `失败: ${result.error}` })
         setTimeout(() => setOcrProgress(null), 5000)
       }
     } catch (err: any) {
+      await updateEntry(currentEntry.id, {
+        ocrStatus: 'failed',
+        ocrStatusUpdatedAt: new Date().toISOString(),
+        ocrError: err?.message || String(err),
+      }).catch(() => {})
       setOcrProgress({ status: `错误: ${err.message}` })
       setTimeout(() => setOcrProgress(null), 5000)
     }
@@ -3323,10 +3346,14 @@ function TranslateButtonWithBadge({ entryId, onClick }: { entryId: string; onCli
   const job = useTranslationJobsStore(s => s.jobs[entryId])
   const badge = (() => {
     if (!job || !entryId) return null
+    // Running state always shows — it's a live progress indicator.
     if (job.status === 'running') return { bg: '#4a90e2', text: '', pulse: true, title: `翻译中 ${job.currentChunk}/${job.totalChunks}` }
-    if (job.status === 'completed') return { bg: '#8BB174', text: '✓', pulse: false, title: '翻译完成，点击查看' }
-    if (job.status === 'failed') return { bg: '#C97070', text: '!', pulse: false, title: `翻译失败：${job.error || ''}` }
-    if (job.status === 'aborted') return { bg: '#D4A84B', text: '!', pulse: false, title: '翻译已停止' }
+    // Terminal states suppress once the user has opened the modal and seen them,
+    // to avoid a "stale notification" forever sitting on the button.
+    if (job.viewed) return null
+    if (job.status === 'completed') return { bg: '#8BB174', text: '✓', pulse: false, title: '翻译完成，点击查看（查看后自动隐藏）' }
+    if (job.status === 'failed') return { bg: '#C97070', text: '!', pulse: false, title: `翻译失败：${job.error || ''}（查看后自动隐藏）` }
+    if (job.status === 'aborted') return { bg: '#D4A84B', text: '!', pulse: false, title: '翻译已停止（查看后自动隐藏）' }
     return null
   })()
 

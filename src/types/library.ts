@@ -35,7 +35,17 @@ export interface LibraryEntry {
   notes: string
   folderId?: string        // Virtual folder ID (null = root level)
   sortIndex?: number       // Manual sort order (lower = higher in list)
-  ocrStatus: 'none' | 'partial' | 'complete'
+  // 'none'     — never attempted
+  // 'partial'  — older half-completed OCR (kept for backward compat)
+  // 'running'  — currently being OCR'd (set at run start, cleared on finish/fail)
+  // 'complete' — OCR text saved to ocrFilePath
+  // 'failed'   — last OCR attempt threw or returned empty; user should retry
+  ocrStatus: 'none' | 'partial' | 'running' | 'complete' | 'failed'
+  // When last set; used for "just finished" animations / stale-status cleanup
+  // (e.g. 'running' older than 1h after boot is almost certainly orphaned).
+  ocrStatusUpdatedAt?: string
+  // Error message from the last failed OCR run — surfaced in the tooltip.
+  ocrError?: string
   ocrFilePath?: string     // Path to .ocr.txt (next to PDF)
   addedAt: string          // When imported
   lastOpenedAt?: string

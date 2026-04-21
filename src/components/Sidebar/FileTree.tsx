@@ -164,15 +164,10 @@ const EntryItem = memo(function EntryItem({ entry, multiSelect, selected, onTogg
             {folder}
           </div>
         </div>
-        {(entry.ocrStatus === 'complete' || entry.ocrFilePath) && (
-          <span style={{
-            flexShrink: 0, fontSize: 9, color: 'var(--success)',
-            background: 'rgba(76,175,80,0.1)', padding: '1px 4px',
-            borderRadius: 3, fontWeight: 500, letterSpacing: 0.5,
-          }}>
-            OCR
-          </span>
-        )}
+        <OcrStatusBadge entry={entry} />
+        <style>{`
+          @keyframes filetree-ocr-spin { to { transform: rotate(360deg); } }
+        `}</style>
       </div>
       {menuPos && (
         <EntryContextMenu
@@ -203,6 +198,73 @@ const EntryItem = memo(function EntryItem({ entry, multiSelect, selected, onTogg
     </>
   )
 })
+
+// Small status dot shown at the right edge of each entry row. Reflects the
+// library's persisted ocrStatus field:
+//   running  — blue spinner (entry currently being OCR'd by main process)
+//   complete — green "OCR" pill (same as the old UI, kept to minimize churn)
+//   failed   — red "!" with the error in the tooltip, clickable-looking
+//   partial  — amber "OCR·半" (legacy half-complete runs)
+//   none     — nothing rendered (don't clutter untouched entries)
+// The fallback to ocrFilePath mirrors the old behavior: if the file is on disk
+// we still count the entry as having OCR even if ocrStatus wasn't migrated.
+function OcrStatusBadge({ entry }: { entry: LibraryEntry }) {
+  const status = entry.ocrStatus
+  if (status === 'running') {
+    return (
+      <span
+        title={`正在 OCR...（${entry.ocrStatusUpdatedAt ? new Date(entry.ocrStatusUpdatedAt).toLocaleTimeString() : '' }）`}
+        style={{
+          flexShrink: 0, width: 14, height: 14, borderRadius: '50%',
+          border: '2px solid rgba(74,144,226,0.25)',
+          borderTopColor: '#4a90e2',
+          animation: 'filetree-ocr-spin 0.8s linear infinite',
+        }}
+      />
+    )
+  }
+  if (status === 'failed') {
+    return (
+      <span
+        title={`OCR 失败：${entry.ocrError || '未知错误'}（在阅读栏点"重新 OCR"可以重试）`}
+        style={{
+          flexShrink: 0, fontSize: 9, color: '#fff', background: '#C97070',
+          padding: '1px 5px', borderRadius: 3, fontWeight: 700, letterSpacing: 0.3,
+        }}
+      >
+        !
+      </span>
+    )
+  }
+  if (status === 'partial') {
+    return (
+      <span
+        title="OCR 不完整（历史数据，建议重新 OCR）"
+        style={{
+          flexShrink: 0, fontSize: 9, color: '#fff', background: '#D4A84B',
+          padding: '1px 4px', borderRadius: 3, fontWeight: 500, letterSpacing: 0.5,
+        }}
+      >
+        OCR·半
+      </span>
+    )
+  }
+  if (status === 'complete' || entry.ocrFilePath) {
+    return (
+      <span
+        title="OCR 已完成"
+        style={{
+          flexShrink: 0, fontSize: 9, color: 'var(--success)',
+          background: 'rgba(76,175,80,0.1)', padding: '1px 4px',
+          borderRadius: 3, fontWeight: 500, letterSpacing: 0.5,
+        }}
+      >
+        OCR
+      </span>
+    )
+  }
+  return null
+}
 
 // Two-step context menu for entry
 function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep, onDeleteConfirm, onShowInFolder, onCopyCitation, onCopyBibTeX }: {

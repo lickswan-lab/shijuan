@@ -60,6 +60,12 @@ export default function BatchOcrRunner() {
       try {
         const api = window.electronAPI
         if (!api?.glmOcrPdf) throw new Error('OCR API unavailable')
+        // Flip to 'running' so the FileTree badge shows a spinner for this entry.
+        await updateEntry(item.entryId, {
+          ocrStatus: 'running',
+          ocrStatusUpdatedAt: new Date().toISOString(),
+          ocrError: undefined,
+        })
         // Pass entryId so the backend's chunk-progress events can be correlated here
         const result = await api.glmOcrPdf(item.absPath, { entryId: item.entryId })
         if (stopped) return
@@ -69,9 +75,16 @@ export default function BatchOcrRunner() {
           await updateEntry(item.entryId, {
             ocrStatus: 'complete',
             ocrFilePath: savedPath,
+            ocrStatusUpdatedAt: new Date().toISOString(),
+            ocrError: undefined,
           })
           advanceOcrQueue({ entryId: item.entryId, success: true })
         } else {
+          await updateEntry(item.entryId, {
+            ocrStatus: 'failed',
+            ocrStatusUpdatedAt: new Date().toISOString(),
+            ocrError: result.error || '未知错误',
+          })
           advanceOcrQueue({
             entryId: item.entryId,
             success: false,
@@ -80,10 +93,16 @@ export default function BatchOcrRunner() {
         }
       } catch (err: any) {
         if (stopped) return
+        const msg = err?.message || String(err)
+        await updateEntry(item.entryId, {
+          ocrStatus: 'failed',
+          ocrStatusUpdatedAt: new Date().toISOString(),
+          ocrError: msg,
+        }).catch(() => {})
         advanceOcrQueue({
           entryId: item.entryId,
           success: false,
-          error: err?.message || String(err),
+          error: msg,
         })
       }
     })()

@@ -117,6 +117,7 @@ export default function TranslateModal(props: TranslateModalProps) {
   const job = useTranslationJobsStore(s => s.jobs[entryId])
   const startTranslation = useTranslationJobsStore(s => s.startTranslation)
   const abortTranslation = useTranslationJobsStore(s => s.abortTranslation)
+  const markJobViewed = useTranslationJobsStore(s => s.markJobViewed)
 
   const result = job?.result || ''
   const running = job?.status === 'running'
@@ -147,16 +148,17 @@ export default function TranslateModal(props: TranslateModalProps) {
   // Reset local-only state when modal opens. We DON'T clear result/progress
   // here — those come from the jobs store and should persist across open/close
   // cycles so the user can reopen a minimized translation and see its state.
+  // Also: mark a terminal-state job as "viewed" so the顶栏 badge对勾/!号 fades
+  // out now that the user has seen the result.
   useEffect(() => {
     if (open) {
       setMode(props.initialMode)
       setLocalProgressMsg('')
-      // Sync local model to current global choice on each open — user's latest
-      // pick from the top bar should win unless they override inside the modal.
       setLocalModel(selectedAiModel)
+      if (entryId) markJobViewed(entryId)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, props.initialMode])
+  }, [open, props.initialMode, entryId])
 
   // Also reset page range when modal opens, so stale state from a prior entry doesn't carry over
   useEffect(() => {

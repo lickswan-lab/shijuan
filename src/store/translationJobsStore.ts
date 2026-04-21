@@ -42,6 +42,10 @@ export interface TranslationJob {
   // Timestamps for UX ("翻译完成于 3 秒前")
   startedAt: string
   completedAt?: string
+  // Set true once the user has opened the modal after a terminal state
+  // (completed / failed / aborted). The badge reads this to hide the
+  // "unviewed" indicator — user's already seen the result, don't nag.
+  viewed?: boolean
   // Internal: current in-flight stream id, used by abort()
   _currentStreamId?: string
   _aborted?: boolean
@@ -71,6 +75,10 @@ interface JobsStore {
 
   // Drop a job entirely (used when the user explicitly dismisses the badge).
   clearJob: (entryId: string) => void
+
+  // Mark the job as viewed by the user — the terminal-state badge will hide.
+  // Safe no-op when there's no job or it's still running.
+  markJobViewed: (entryId: string) => void
 
   getJob: (entryId: string) => TranslationJob | undefined
 }
@@ -200,6 +208,14 @@ export const useTranslationJobsStore = create<JobsStore>((set, get) => ({
       delete next[entryId]
       return { jobs: next }
     })
+  },
+
+  markJobViewed: (entryId) => {
+    const j = get().jobs[entryId]
+    if (!j || j.status === 'running' || j.viewed) return
+    set(state => ({
+      jobs: { ...state.jobs, [entryId]: { ...state.jobs[entryId]!, viewed: true } }
+    }))
   },
 
   getJob: (entryId) => get().jobs[entryId],
