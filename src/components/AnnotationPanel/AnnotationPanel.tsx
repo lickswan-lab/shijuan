@@ -1580,7 +1580,7 @@ export default function AnnotationPanel() {
               className="btn btn-sm"
               onClick={handleAskQuestion}
               disabled={aiLoading || !noteInput.trim()}
-              style={{ fontSize: 12, padding: '6px 18px' }}
+              style={{ fontSize: 12, padding: '6px 14px', whiteSpace: 'nowrap', flexShrink: 0 }}
             >
               {aiLoading ? '...' : '发送 AI'}
             </button>
@@ -1591,9 +1591,10 @@ export default function AnnotationPanel() {
               disabled
               title="召唤功能正在打磨中，敬请期待"
               style={{
-                fontSize: 12, padding: '6px 12px',
+                fontSize: 12, padding: '6px 10px',
                 opacity: 0.45, cursor: 'not-allowed',
                 display: 'inline-flex', alignItems: 'center', gap: 4,
+                whiteSpace: 'nowrap', flexShrink: 0,
               }}
             >
               🧙 召唤
@@ -1607,8 +1608,9 @@ export default function AnnotationPanel() {
             </button>
           </div>
           <button className="btn btn-sm btn-primary" onClick={handleAddNote} disabled={!noteInput.trim() || (!displayAnnotation && !textSelection)}
-            style={{ fontSize: 12, padding: '6px 14px' }}>
-            保存笔记 <span style={{ fontSize: 9, opacity: 0.5 }}>Ctrl+↵</span>
+            title="保存笔记（Ctrl+Enter）"
+            style={{ fontSize: 12, padding: '6px 14px', whiteSpace: 'nowrap', flexShrink: 0 }}>
+            保存笔记
           </button>
         </div>
       </div>
