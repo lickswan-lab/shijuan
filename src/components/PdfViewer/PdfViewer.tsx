@@ -770,6 +770,14 @@ function EpubViewer({ absPath, onTextSelect, annotations, onAnnotationClick }: {
   // we iterate this map and re-apply highlights to every known section so
   // marks survive scrolling between chapters.
   const contentsMapRef = useRef<Map<string, any>>(new Map())
+  // Navigation state: TOC (chapter list) + current chapter label for the bar.
+  const [toc, setToc] = useState<Array<{ label: string; href: string }>>([])
+  const [currentChapter, setCurrentChapter] = useState<string>('')
+  const [progressPct, setProgressPct] = useState<number>(0)
+  // Track load state so we can show a clear message if the epub failed to load
+  // (past symptom: "只看到封面" — usually because flow:'scrolled-doc' never
+  //  advanced past the first spine item).
+  const [loadErr, setLoadErr] = useState<string | null>(null)
 
   // Keep the latest annotation list + click handler in refs so the
   // applyHighlights closure (wired into rendition events) always sees the
@@ -882,11 +890,18 @@ function EpubViewer({ absPath, onTextSelect, annotations, onAnnotationClick }: {
 
       if (destroyed || !containerRef.current) return
 
+      // flow: 'scrolled' renders all spine items in one continuous scroll area
+      // so封面之后用户直接滚动就能看到正文。scrolled-doc 只渲染当前 section，
+      // 在没有导航 UI 的情况下会表现为"只看到封面，翻不动"。
+      // manager: 'continuous' 让 epub.js 按需懒加载相邻 sections，不会一次性
+      // 把整本书灌进 DOM（内存安全）。
       const rendition = book.renderTo(containerRef.current, {
         width: '100%',
         height: '100%',
         spread: 'none',
-        flow: 'scrolled-doc',
+        flow: 'scrolled',
+        manager: 'continuous',
+        allowScriptedContent: true,
       })
       renditionRef.current = rendition
 
@@ -909,22 +924,61 @@ function EpubViewer({ absPath, onTextSelect, annotations, onAnnotationClick }: {
       // After each section renders (or re-renders), cache its Contents object
       // and paint annotation highlights. For scrolled-doc flow, multiple
       // sections may be live at once — getContents() returns them all.
-      rendition.on('rendered', () => {
+      rendition.on('rendered', (section: any) => {
         try {
           const list = rendition.getContents() as any[]
           list.forEach((c) => {
             if (c?.cfiBase) contentsMapRef.current.set(c.cfiBase, c)
             applyHighlights(c)
           })
+          // Update chapter label from the spine item's nearest TOC entry
+          if (section?.href) {
+            const match = book.navigation?.get(section.href)
+            if (match?.label) setCurrentChapter(match.label.trim())
+          }
         } catch (err) {
           console.error('[epub] highlight pass failed', err)
         }
       })
 
+      // Track reading progress + update chapter label on relocate
+      rendition.on('relocated', (location: any) => {
+        try {
+          if (location?.start?.percentage !== undefined) {
+            setProgressPct(Math.round(location.start.percentage * 100))
+          }
+          const href = location?.start?.href
+          if (href) {
+            const match = book.navigation?.get(href)
+            if (match?.label) setCurrentChapter(match.label.trim())
+          }
+        } catch {}
+      })
+
       await rendition.display()
+
+      // Load table of contents for the nav dropdown. book.loaded.navigation
+      // resolves once the NCX / nav.xhtml is parsed.
+      try {
+        const nav = await book.loaded.navigation
+        const flat: Array<{ label: string; href: string }> = []
+        const walk = (items: any[]) => {
+          for (const it of items) {
+            if (it?.label && it?.href) flat.push({ label: it.label.trim(), href: it.href })
+            if (it?.subitems?.length) walk(it.subitems)
+          }
+        }
+        walk((nav as any)?.toc || [])
+        if (!destroyed) setToc(flat)
+      } catch (err) {
+        console.warn('[epub] TOC load failed', err)
+      }
     }
 
-    loadEpub().catch(err => console.error('[epub] Load error:', err))
+    loadEpub().catch(err => {
+      console.error('[epub] Load error:', err)
+      setLoadErr(err?.message || String(err))
+    })
 
     return () => {
       destroyed = true
@@ -934,7 +988,66 @@ function EpubViewer({ absPath, onTextSelect, annotations, onAnnotationClick }: {
     }
   }, [absPath, onTextSelect])
 
-  return <div ref={containerRef} style={{ width: '100%', height: '100%', overflow: 'auto', background: 'var(--bg)' }} />
+  // Keyboard: ← previous chapter · → next chapter. Attached at the wrapper
+  // level so focus inside the iframe doesn't need to bubble for it to work
+  // — we use capture phase on window to catch it regardless of focus target.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement)?.tagName === 'INPUT') return
+      if ((e.target as HTMLElement)?.tagName === 'TEXTAREA') return
+      const r = renditionRef.current
+      if (!r) return
+      if (e.key === 'ArrowRight' || e.key === 'PageDown') { r.next(); e.preventDefault() }
+      else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { r.prev(); e.preventDefault() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  const gotoHref = (href: string) => {
+    try { renditionRef.current?.display(href) } catch (err) { console.error('[epub] goto failed', err) }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: 'var(--bg)' }}>
+      {/* Top nav bar — chapter dropdown + prev/next + progress */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '6px 12px', borderBottom: '1px solid var(--border-light)',
+        background: 'var(--bg-warm)', fontSize: 12, flexShrink: 0,
+      }}>
+        <button
+          onClick={() => renditionRef.current?.prev()}
+          title="上一章（←）"
+          style={{ padding: '3px 8px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', cursor: 'pointer' }}
+        >← 上一章</button>
+        <button
+          onClick={() => renditionRef.current?.next()}
+          title="下一章（→）"
+          style={{ padding: '3px 8px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', cursor: 'pointer' }}
+        >下一章 →</button>
+        {toc.length > 0 && (
+          <select
+            value=""
+            onChange={e => { if (e.target.value) gotoHref(e.target.value) }}
+            title="跳转到章节"
+            style={{ fontSize: 11, padding: '3px 6px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', maxWidth: 260 }}
+          >
+            <option value="">目录（{toc.length} 章）…</option>
+            {toc.map((t, i) => (
+              <option key={i} value={t.href}>{t.label}</option>
+            ))}
+          </select>
+        )}
+        <span style={{ flex: 1, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {currentChapter || (loadErr ? `加载失败：${loadErr}` : '—')}
+        </span>
+        <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{progressPct}%</span>
+      </div>
+      {/* Book content */}
+      <div ref={containerRef} style={{ flex: 1, width: '100%', overflow: 'auto', background: 'var(--bg)' }} />
+    </div>
+  )
 }
 
 // DOCX viewer: convert to HTML using mammoth
