@@ -862,6 +862,10 @@ function EpubViewer({
   marksRef.current = marks || []
   const onRemoveMarkRef = useRef(onRemoveMark)
   onRemoveMarkRef.current = onRemoveMark
+  // Floating menu shown when the user right-clicks a mark span inside the
+  // iframe. Coords are translated to the parent document so the menu sits
+  // under the actual cursor position.
+  const [markMenu, setMarkMenu] = useState<{ x: number; y: number; markId: string; markType: string } | null>(null)
   // Same trick for typography props — refs let us read latest values from
   // inside the rendition.on('rendered') closure without re-registering.
   const styleRef = useRef({ fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight })
@@ -981,16 +985,24 @@ function EpubViewer({
         ;(span as any).dataset.markType = t.type
         return span
       }, 'ocr-mark')
-      // Right-click a mark to remove it. Listener lives on body; each call
-      // re-attaches, but the previous one was auto-GC'd when iframe content
-      // replaced — fine in practice.
+      // Right-click a mark inside the iframe opens the mark menu (parent doc
+      // floating div). Translate iframe coords to parent coords so the menu
+      // appears under the real cursor position.
+      const iframeEl: HTMLIFrameElement | null =
+        (contents as any).iframe || (doc.defaultView?.frameElement as HTMLIFrameElement | null)
       doc.body.oncontextmenu = (e: Event) => {
-        const target = e.target as HTMLElement | null
+        const me = e as MouseEvent
+        const target = me.target as HTMLElement | null
         const span = target?.closest?.('.ocr-mark[data-mark-id]') as HTMLElement | null
         if (!span) return
         e.preventDefault()
-        const id = span.dataset.markId
-        if (id && confirm('删除这条标记？')) onRemoveMarkRef.current?.(id)
+        const iframeRect = iframeEl?.getBoundingClientRect() || { left: 0, top: 0 }
+        setMarkMenu({
+          x: iframeRect.left + me.clientX,
+          y: iframeRect.top + me.clientY,
+          markId: span.dataset.markId || '',
+          markType: span.dataset.markType || '',
+        })
       }
     }
 
@@ -1243,6 +1255,34 @@ function EpubViewer({
       </div>
       {/* Book content */}
       <div ref={containerRef} style={{ flex: 1, width: '100%', overflow: 'auto', background: 'var(--bg)' }} />
+      {/* Mark remove menu — floats at translated cursor position */}
+      {markMenu && (
+        <div style={{
+          position: 'fixed', left: markMenu.x, top: markMenu.y, zIndex: 1000,
+          background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6,
+          boxShadow: '0 2px 8px rgba(0,0,0,0.15)', padding: 4, minWidth: 120,
+        }}
+          onMouseLeave={() => setMarkMenu(null)}
+        >
+          <button
+            onClick={() => {
+              onRemoveMarkRef.current?.(markMenu.markId)
+              setMarkMenu(null)
+            }}
+            style={{ padding: '6px 12px', fontSize: 12, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text)', width: '100%', textAlign: 'left', borderRadius: 4 }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
+            onMouseLeaveCapture={e => (e.currentTarget.style.background = 'none')}
+          >
+            {markMenu.markType === 'bold' ? '取消高亮' : '取消划线'}
+          </button>
+          <button
+            onClick={() => setMarkMenu(null)}
+            style={{ padding: '6px 12px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', width: '100%', textAlign: 'left', borderRadius: 4 }}
+          >
+            关闭
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -2616,6 +2656,23 @@ export default function PdfViewer() {
     setToolbar(null)
   }, [toolbar, currentEntry])
 
+  // Removes any existing marks on the same page whose selectedText is a
+  // subset (or equal) of the new mark's selectedText. Rationale: when the
+  // user draws a new underline / highlight that visually covers old ones,
+  // the old marks should be gone — one state per span of text.
+  // Kept as a pure helper so both underline and bold handlers reuse it.
+  const filterSupersededMarks = (
+    existing: import('../../types/library').TextMark[] | undefined,
+    incoming: import('../../types/library').TextMark,
+  ): import('../../types/library').TextMark[] => {
+    if (!existing?.length) return []
+    return existing.filter(m => {
+      if (m.pageNumber !== incoming.pageNumber) return true
+      // Drop old mark when incoming wraps it (equal or old ⊂ new).
+      return !incoming.selectedText.includes(m.selectedText)
+    })
+  }
+
   // Toolbar action: add underline mark
   const handleToolbarUnderline = useCallback((color: string) => {
     const tb = toolbarRef.current
@@ -2630,7 +2687,7 @@ export default function PdfViewer() {
     }
     updatePdfMeta(meta => ({
       ...meta,
-      marks: [...(meta.marks || []), mark],
+      marks: [...filterSupersededMarks(meta.marks, mark), mark],
     }))
     window.getSelection()?.removeAllRanges()
     // In immersive mode, keep annotation box open (no floating toolbar to dismiss)
@@ -2650,7 +2707,7 @@ export default function PdfViewer() {
     }
     updatePdfMeta(meta => ({
       ...meta,
-      marks: [...(meta.marks || []), mark],
+      marks: [...filterSupersededMarks(meta.marks, mark), mark],
     }))
     window.getSelection()?.removeAllRanges()
     // In immersive mode, keep annotation box open
