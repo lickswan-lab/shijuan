@@ -1197,6 +1197,26 @@ function EpubViewer({
     }
   }, [absPath, onTextSelect])
 
+  // Layout-change resize: when annotation panel / sidebar toggles, the
+  // container width changes but epub.js doesn't auto-detect it and leaves
+  // a blank strip on the right. Triggered after a 350 ms delay so CSS
+  // transitions have settled, then call rendition.resize() with no args
+  // (epub.js reads container dimensions itself). The earlier ResizeObserver
+  // approach fired too often and fought with epub.js internal layout,
+  // producing a blank page; this debounced listen-to-state approach is
+  // gentler.
+  const annotationPanelCollapsed = useUiStore(s => s.annotationPanelCollapsed)
+  const sidebarCollapsed = useUiStore(s => s.sidebarCollapsed)
+  const rightPanel = useUiStore(s => s.rightPanel)
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const r = renditionRef.current
+      if (!r) return
+      try { r.resize() } catch (err) { console.warn('[epub] resize failed', err) }
+    }, 350)
+    return () => clearTimeout(t)
+  }, [annotationPanelCollapsed, sidebarCollapsed, rightPanel])
+
   // Keyboard: ← previous chapter · → next chapter. Attached at the wrapper
   // level so focus inside the iframe doesn't need to bubble for it to work
   // — we use capture phase on window to catch it regardless of focus target.
