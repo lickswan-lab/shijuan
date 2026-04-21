@@ -992,20 +992,19 @@ function EpubViewer({
         'img': { 'max-width': '100%', 'height': 'auto', 'margin': '1em auto', 'display': 'block' },
       })
 
-      // Capture text selection inside iframe and surface it to the parent:
-      //   1. Push to onTextSelect (drives the annotation panel)
-      //   2. Compute selection bounding rect in iframe coords, translate to
-      //      parent-page coords (add iframe.getBoundingClientRect()), and call
-      //      onToolbarShow so the floating toolbar appears next to the
-      //      highlight just like in the PDF / OCR / DOCX viewers.
+      // Capture text selection inside iframe and surface it ONLY to the
+      // floating toolbar. We deliberately do NOT setTextSelection here —
+      // doing that would auto-open the annotation panel the instant the user
+      // highlights text, which was the legacy EPUB behavior. The new
+      // contract (matching PDF/OCR/DOCX) is: selecting just shows the
+      // toolbar; the annotation side-panel only opens when the user clicks
+      // the toolbar's "注释" button.
       rendition.on('selected', (_cfiRange: string, contents: any) => {
         const win = contents?.window as Window | undefined
         const sel = win?.getSelection()
         if (!sel || sel.rangeCount === 0) return
         const text = sel.toString().trim()
         if (!text || text.length < 2) return
-
-        onTextSelect({ pageNumber: 1, text, startOffset: 0, endOffset: text.length })
 
         try {
           const range = sel.getRangeAt(0)
