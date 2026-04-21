@@ -756,11 +756,27 @@ ${annHighlightJS}
 // This is conceptually the same as DocxViewer's useAnnotationHighlights but
 // has to run inside a foreign document, so we use the refactored
 // findAndWrapAll that respects Node.ownerDocument.
-function EpubViewer({ absPath, onTextSelect, annotations, onAnnotationClick }: {
+function EpubViewer({
+  absPath, onTextSelect, annotations, onAnnotationClick,
+  fontSize = 17, fontWeight = 400, colorDepth = 80,
+  bgHue = 38, bgSat = 55, bgLight = 92,
+  onToolbarShow,
+}: {
   absPath: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
   annotations?: Array<{ id: string; selectedText: string }>
   onAnnotationClick?: (id: string) => void
+  // Reading typography + background color — forwarded from PdfViewer's top
+  // toolbar so EPUB matches OCR/DOCX/TXT behavior.
+  fontSize?: number
+  fontWeight?: number
+  colorDepth?: number
+  bgHue?: number
+  bgSat?: number
+  bgLight?: number
+  // Floating toolbar trigger — when user selects text inside the iframe,
+  // translate coords to parent document and ask parent to show its toolbar.
+  onToolbarShow?: (x: number, y: number, text: string) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const bookRef = useRef<any>(null)
@@ -786,6 +802,21 @@ function EpubViewer({ absPath, onTextSelect, annotations, onAnnotationClick }: {
   annsRef.current = annotations || []
   const onClickRef = useRef(onAnnotationClick)
   onClickRef.current = onAnnotationClick
+  // Same trick for typography props — refs let us read latest values from
+  // inside the rendition.on('rendered') closure without re-registering.
+  const styleRef = useRef({ fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight })
+  styleRef.current = { fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight }
+  const onToolbarRef = useRef(onToolbarShow)
+  onToolbarRef.current = onToolbarShow
+
+  // Compute the body text color from background lightness — matches the
+  // formula used by OCR / DOCX viewers so EPUB feels consistent.
+  const computeTextColor = () => {
+    const { colorDepth: cd, bgLight: bl } = styleRef.current
+    return bl < 50
+      ? `hsl(40, 15%, ${60 + (100 - cd) / 3}%)`
+      : `hsl(30, 20%, ${100 - cd}%)`
+  }
 
   // Apply / re-apply annotation underlines and marker dots inside one
   // iframe's document. Idempotent: clears any prior wrap before redoing the
@@ -794,59 +825,66 @@ function EpubViewer({ absPath, onTextSelect, annotations, onAnnotationClick }: {
     const doc = contents?.document as Document | undefined
     if (!doc || !doc.body) return
 
-    // Inject CSS once per iframe (globals.css isn't reachable from inside it).
-    // `!important` on the reading layout beats the EPUB's own CSS (many books
+    // Inject / refresh the reading-layout + highlight stylesheet inside the
+    // iframe. Re-runs every applyHighlights call so font size / weight /
+    // background updates from the parent toolbar take effect immediately.
+    // `!important` on the layout rules beats the EPUB's own CSS (many books
     // set body { margin: 0; max-width: none } which would otherwise win).
-    if (!doc.getElementById('sj-epub-highlight-style')) {
-      const style = doc.createElement('style')
+    let style = doc.getElementById('sj-epub-highlight-style') as HTMLStyleElement | null
+    if (!style) {
+      style = doc.createElement('style') as HTMLStyleElement
       style.id = 'sj-epub-highlight-style'
-      style.textContent = `
-        html, body {
-          box-sizing: border-box !important;
-        }
-        body {
-          max-width: 860px !important;
-          margin: 0 auto !important;
-          padding: 40px 56px !important;
-          font-family: "Noto Serif SC", "Source Han Serif", Georgia, serif !important;
-          line-height: 1.9 !important;
-          font-size: 17px !important;
-          color: #3D3529 !important;
-          text-align: justify !important;
-        }
-        p { margin: 0 0 1em 0 !important; text-indent: 2em !important; }
-        h1, h2, h3 {
-          font-family: -apple-system, "Microsoft YaHei", sans-serif !important;
-          text-align: center !important;
-          text-indent: 0 !important;
-          margin: 1.6em 0 1em !important;
-        }
-        img { max-width: 100% !important; height: auto !important; display: block !important; margin: 1em auto !important; }
-        .ocr-ann-underline {
-          text-decoration: underline;
-          text-decoration-color: rgba(200,149,108,0.5);
-          text-decoration-thickness: 1px;
-          text-underline-offset: 3px;
-          pointer-events: none;
-          border-radius: 2px;
-        }
-        .ocr-ann-marker {
-          display: inline-block;
-          width: 6px; height: 6px;
-          background: #C8956C;
-          border-radius: 50%;
-          margin: 0 3px 0 1px;
-          vertical-align: middle;
-          cursor: pointer;
-          opacity: 0.7;
-          transition: opacity 0.15s, transform 0.15s;
-          position: relative;
-          top: -1px;
-        }
-        .ocr-ann-marker:hover { opacity: 1; transform: scale(1.5); }
-      `
       doc.head.appendChild(style)
     }
+    const { fontSize: fs, fontWeight: fw, bgHue: bh, bgSat: bsa, bgLight: bl } = styleRef.current
+    const textColor = computeTextColor()
+    const bgColor = `hsl(${bh}, ${bsa}%, ${bl}%)`
+    style.textContent = `
+      html, body { box-sizing: border-box !important; background: ${bgColor} !important; }
+      body {
+        max-width: 860px !important;
+        margin: 0 auto !important;
+        padding: 40px 56px !important;
+        font-family: "Noto Serif SC", "Source Han Serif", Georgia, serif !important;
+        line-height: 1.9 !important;
+        font-size: ${fs}px !important;
+        font-weight: ${fw} !important;
+        color: ${textColor} !important;
+        text-align: justify !important;
+      }
+      p { margin: 0 0 1em 0 !important; text-indent: 2em !important; }
+      h1, h2, h3 {
+        font-family: -apple-system, "Microsoft YaHei", sans-serif !important;
+        text-align: center !important;
+        text-indent: 0 !important;
+        margin: 1.6em 0 1em !important;
+        color: ${textColor} !important;
+      }
+      img { max-width: 100% !important; height: auto !important; display: block !important; margin: 1em auto !important; }
+      ::selection { background: rgba(200, 149, 108, 0.35); }
+      .ocr-ann-underline {
+        text-decoration: underline;
+        text-decoration-color: rgba(200,149,108,0.5);
+        text-decoration-thickness: 1px;
+        text-underline-offset: 3px;
+        pointer-events: none;
+        border-radius: 2px;
+      }
+      .ocr-ann-marker {
+        display: inline-block;
+        width: 6px; height: 6px;
+        background: #C8956C;
+        border-radius: 50%;
+        margin: 0 3px 0 1px;
+        vertical-align: middle;
+        cursor: pointer;
+        opacity: 0.7;
+        transition: opacity 0.15s, transform 0.15s;
+        position: relative;
+        top: -1px;
+      }
+      .ocr-ann-marker:hover { opacity: 1; transform: scale(1.5); }
+    `
 
     // Clear previous annotation spans — unwrap underlines, remove markers.
     doc.body.querySelectorAll('.ocr-ann-underline, .ocr-ann-marker').forEach(el => {
@@ -891,15 +929,15 @@ function EpubViewer({ absPath, onTextSelect, annotations, onAnnotationClick }: {
     })
   }
 
-  // Re-apply whenever the annotation list changes — iterate all iframes we've
-  // seen so far. New sections rendered later will apply on their own
-  // 'rendered' event.
+  // Re-apply whenever annotations OR typography props change. Iterate all
+  // iframes we've seen so far. New sections rendered later will apply on
+  // their own 'rendered' event with the latest values via styleRef.
   useEffect(() => {
     for (const contents of contentsMapRef.current.values()) {
       applyHighlights(contents)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [annotations])
+  }, [annotations, fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -954,14 +992,34 @@ function EpubViewer({ absPath, onTextSelect, annotations, onAnnotationClick }: {
         'img': { 'max-width': '100%', 'height': 'auto', 'margin': '1em auto', 'display': 'block' },
       })
 
-      // Capture text selection
+      // Capture text selection inside iframe and surface it to the parent:
+      //   1. Push to onTextSelect (drives the annotation panel)
+      //   2. Compute selection bounding rect in iframe coords, translate to
+      //      parent-page coords (add iframe.getBoundingClientRect()), and call
+      //      onToolbarShow so the floating toolbar appears next to the
+      //      highlight just like in the PDF / OCR / DOCX viewers.
       rendition.on('selected', (_cfiRange: string, contents: any) => {
-        const sel = contents?.window?.getSelection()
-        if (sel) {
-          const text = sel.toString().trim()
-          if (text && text.length >= 2) {
-            onTextSelect({ pageNumber: 1, text, startOffset: 0, endOffset: text.length })
-          }
+        const win = contents?.window as Window | undefined
+        const sel = win?.getSelection()
+        if (!sel || sel.rangeCount === 0) return
+        const text = sel.toString().trim()
+        if (!text || text.length < 2) return
+
+        onTextSelect({ pageNumber: 1, text, startOffset: 0, endOffset: text.length })
+
+        try {
+          const range = sel.getRangeAt(0)
+          const rect = range.getBoundingClientRect()
+          // contents.iframe gives the iframe element; fall back to searching
+          // the container for it if not exposed.
+          const iframeEl: HTMLIFrameElement | null =
+            contents.iframe || (contents.document?.defaultView?.frameElement as HTMLIFrameElement | null)
+          const iframeRect = iframeEl?.getBoundingClientRect() || { left: 0, top: 0 }
+          const x = iframeRect.left + rect.left + rect.width / 2
+          const y = iframeRect.top + rect.bottom + 6
+          onToolbarRef.current?.(x, y, text)
+        } catch (err) {
+          console.warn('[epub] toolbar bridge failed', err)
         }
       })
 
@@ -2830,7 +2888,7 @@ export default function PdfViewer() {
             <span style={{ fontSize: 12, minWidth: 45, textAlign: 'center' }}>{Math.round(scale * 100)}%</span>
             <button className="btn btn-sm" onClick={() => setScale(s => Math.min(3, s + 0.2))}>+</button>
           </>
-        ) : (viewMode === 'ocr' || ['docx', 'doc'].includes(fileExt) || isText) ? (
+        ) : (viewMode === 'ocr' || ['docx', 'doc', 'epub'].includes(fileExt) || isText) ? (
           // flexShrink: 0 on the container + whiteSpace: nowrap on labels prevent
           // "字号/粗细/深浅" from wrapping vertically in narrow windows.
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
@@ -3343,6 +3401,16 @@ export default function PdfViewer() {
             onTextSelect={setTextSelection}
             annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
             onAnnotationClick={(id) => setActiveAnnotation(id)}
+            fontSize={ocrFontSize}
+            fontWeight={ocrFontWeight}
+            colorDepth={ocrColorDepth}
+            bgHue={ocrBgHue}
+            bgSat={ocrBgSat}
+            bgLight={ocrBgLight}
+            onToolbarShow={(x, y, text) => {
+              setToolbar({ x, y, text, pageNumber: 1 })
+              setToolbarMode('main')
+            }}
           />
         </div>
       )}
