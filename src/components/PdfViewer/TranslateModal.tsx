@@ -148,11 +148,20 @@ export default function TranslateModal(props: TranslateModalProps) {
   // Reset local-only state when modal opens. We DON'T clear result/progress
   // here — those come from the jobs store and should persist across open/close
   // cycles so the user can reopen a minimized translation and see its state.
-  // Also: mark a terminal-state job as "viewed" so the顶栏 badge对勾/!号 fades
-  // out now that the user has seen the result.
+  // mode picking order:
+  //   1. If there's an existing job for this entry (running OR terminal-but-
+  //      unviewed), reopen in that job's mode so the result preview lines up
+  //      with the mode UI (otherwise the user sees "全文" selected but a
+  //      "选中" result, very confusing).
+  //   2. Otherwise, honor the caller's initialMode (e.g. selection-triggered
+  //      open comes in as 'selection', top-bar button as 'full').
+  // Also: mark a terminal-state job as "viewed" so the 顶栏 badge 对勾/!号
+  // fades out now that the user has seen the result.
   useEffect(() => {
     if (open) {
-      setMode(props.initialMode)
+      const j = entryId ? useTranslationJobsStore.getState().jobs[entryId] : undefined
+      const preferredMode: TranslateMode | null = j && (j.status === 'running' || !j.viewed) ? j.mode : null
+      setMode(preferredMode || props.initialMode)
       setLocalProgressMsg('')
       setLocalModel(selectedAiModel)
       if (entryId) markJobViewed(entryId)

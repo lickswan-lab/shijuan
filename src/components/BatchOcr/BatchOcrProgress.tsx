@@ -1,13 +1,29 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useUiStore } from '../../store/uiStore'
 
 /**
  * Floating progress bar for batch OCR. Sits bottom-right.
  * Visible whenever ocrQueue.status !== 'idle'.
+ *
+ * Auto-dismiss: when all items succeed with no errors and no cancel, fade out
+ * after ~3s so the user doesn't have to manually ✕ a green checkmark. Errors
+ * and cancellation stick around until dismissed so the user can see what
+ * happened (per-entry状态 is also in FileTree now, so this panel doesn't need
+ * to linger for routine info).
  */
 export default function BatchOcrProgress() {
   const { ocrQueue, cancelOcrQueue, dismissOcrQueue } = useUiStore()
   const [expanded, setExpanded] = useState(false)
+
+  // Auto-dismiss on clean completion. Guards: must actually be done, no errors,
+  // not cancelled. A user-triggered ✕ or another OCR run resets the timer.
+  useEffect(() => {
+    if (ocrQueue.status !== 'done') return
+    if (ocrQueue.errors.length > 0) return
+    if (ocrQueue.cancelled) return
+    const t = setTimeout(() => dismissOcrQueue(), 3000)
+    return () => clearTimeout(t)
+  }, [ocrQueue.status, ocrQueue.errors.length, ocrQueue.cancelled, dismissOcrQueue])
 
   if (ocrQueue.status === 'idle') return null
 
@@ -57,13 +73,15 @@ export default function BatchOcrProgress() {
                   </span>
                 )}
               </div>
-              {/* OCR runs in main process, so minimizing/backgrounding the window is safe.
-                  Closing the window WILL lose the in-flight OCR (renderer can't receive the
-                  IPC response back), so the hint specifically says "minimize" not "close". */}
+              {/* OCR runs in main process; minimizing window is safe, closing
+                  loses the in-flight OCR — only show this hint if user hasn't
+                  seen the new per-entry OCR badges (which themselves now say
+                  "running"). We keep a one-liner here as a reminder the first
+                  few times a user runs a batch. */}
               <div style={{
-                fontSize: 9, color: 'var(--text-muted)', opacity: 0.75, marginTop: 2,
+                fontSize: 9, color: 'var(--text-muted)', opacity: 0.6, marginTop: 2,
               }}>
-                可最小化窗口，OCR 在后台继续运行（请勿关闭窗口）
+                可最小化，后台继续运行
               </div>
             </>
           )}
