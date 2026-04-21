@@ -14,16 +14,20 @@
 // Why inline instead of a PdfViewer-local helper: the modal is self-contained
 // and might also be triggered from the top bar in the future; keeping it in a
 // separate file lets that happen without further refactoring.
-import { useEffect, useRef, useState } from 'react'
-import { v4 as uuid } from 'uuid'
+import { useEffect, useState } from 'react'
 import { useUiStore } from '../../store/uiStore'
 import { useLibraryStore } from '../../store/libraryStore'
+import { useTranslationJobsStore } from '../../store/translationJobsStore'
 
 type TranslateMode = 'selection' | 'current-page' | 'range' | 'full'
 
 export interface TranslateModalProps {
   open: boolean
   onClose: () => void
+  // Entry the translation is associated with — key into the jobs store.
+  // Required so the modal can survive being closed ("minimized") without
+  // killing the in-flight chunk loop.
+  entryId: string
   initialMode: TranslateMode
   // Optional inputs — provided depending on what's available in the caller
   selectedText?: string
@@ -65,6 +69,20 @@ function splitForTranslation(text: string, chunkSize = 3500): string[] {
   return chunks
 }
 
+// Format a job's current state into a short status line shown in the modal's
+// action row. Returns '' for no-job / fresh-state so the row can stay empty.
+function deriveProgressMsg(job: ReturnType<typeof useTranslationJobsStore.getState>['jobs'][string] | undefined): string {
+  if (!job) return ''
+  if (job.status === 'running') {
+    const { currentChunk, totalChunks } = job
+    return totalChunks > 1 ? `正在翻译第 ${currentChunk}/${totalChunks} 段...` : '正在翻译...'
+  }
+  if (job.status === 'aborted') return '已停止'
+  if (job.status === 'failed') return `失败：${job.error || '未知错误'}`
+  if (job.status === 'completed') return `完成 · ${job.totalChunks} 段`
+  return ''
+}
+
 // Build the source text from the user's selected mode.
 function buildSourceText(props: TranslateModalProps, mode: TranslateMode, range: { start: number; end: number }): string {
   if (mode === 'selection') return props.selectedText || ''
@@ -84,7 +102,7 @@ function buildSourceText(props: TranslateModalProps, mode: TranslateMode, range:
 }
 
 export default function TranslateModal(props: TranslateModalProps) {
-  const { open, onClose, docTitle, totalPages = 0 } = props
+  const { open, onClose, entryId, docTitle, totalPages = 0 } = props
   const selectedAiModel = useUiStore(s => s.selectedAiModel)
   const createMemo = useLibraryStore(s => s.createMemo)
   const updateMemo = useLibraryStore(s => s.updateMemo)
@@ -93,14 +111,21 @@ export default function TranslateModal(props: TranslateModalProps) {
   const openEntry = useLibraryStore(s => s.openEntry)
   const currentEntry = useLibraryStore(s => s.currentEntry)
 
+  // Read the in-flight / latest job for this entry from the global store.
+  // The chunk loop and stream subscription live in the store, so closing this
+  // modal does NOT abort the translation — reopening just reattaches to state.
+  const job = useTranslationJobsStore(s => s.jobs[entryId])
+  const startTranslation = useTranslationJobsStore(s => s.startTranslation)
+  const abortTranslation = useTranslationJobsStore(s => s.abortTranslation)
+
+  const result = job?.result || ''
+  const running = job?.status === 'running'
+  const progressMsg = deriveProgressMsg(job)
+
   const [mode, setMode] = useState<TranslateMode>(props.initialMode)
   const [targetLang, setTargetLang] = useState<'zh' | 'en'>('zh')
   const [range, setRange] = useState<{ start: number; end: number }>({ start: 1, end: Math.min(5, totalPages || 1) })
-  const [result, setResult] = useState('')
-  const [running, setRunning] = useState(false)
-  const [progressMsg, setProgressMsg] = useState('')
-  const streamIdRef = useRef<string | null>(null)
-  const cancelledRef = useRef(false)
+  const [localProgressMsg, setLocalProgressMsg] = useState('')
 
   // Local model override — defaults to the globally selected model but can be
   // overridden per-translation (e.g. pick a bigger model for long docs).
@@ -119,13 +144,13 @@ export default function TranslateModal(props: TranslateModalProps) {
     }
   }, [open])
 
-  // Reset state when modal opens / mode switches to a new request
+  // Reset local-only state when modal opens. We DON'T clear result/progress
+  // here — those come from the jobs store and should persist across open/close
+  // cycles so the user can reopen a minimized translation and see its state.
   useEffect(() => {
     if (open) {
       setMode(props.initialMode)
-      setResult('')
-      setProgressMsg('')
-      cancelledRef.current = false
+      setLocalProgressMsg('')
       // Sync local model to current global choice on each open — user's latest
       // pick from the top bar should win unless they override inside the modal.
       setLocalModel(selectedAiModel)
@@ -146,73 +171,35 @@ export default function TranslateModal(props: TranslateModalProps) {
   const canRun = currentSource.trim().length > 0 && !running
 
   async function handleRun() {
-    if (!canRun) return
-    setRunning(true)
-    setResult('')
-    setProgressMsg('正在翻译...')
-    cancelledRef.current = false
-
+    if (!canRun || !entryId) return
     const chunks = splitForTranslation(currentSource)
-    const target = targetLang === 'zh' ? '中文（简体）' : 'English'
-    const style = targetLang === 'zh'
-      ? '学术中文，保留原文术语（首次出现用括号标注英文原文），不改写论证结构，忠实逐段对应。公式与引用保持原样。'
-      : 'Academic English, preserve original terminology, faithful paragraph-by-paragraph correspondence, keep formulas and citations intact.'
-
-    let accumulated = ''
-    try {
-      for (let i = 0; i < chunks.length; i++) {
-        if (cancelledRef.current) break
-        setProgressMsg(chunks.length > 1 ? `正在翻译第 ${i + 1}/${chunks.length} 段...` : '正在翻译...')
-
-        const streamId = uuid()
-        streamIdRef.current = streamId
-        let chunkText = ''
-        const cleanup = window.electronAPI.onAiStreamChunk((sid: string, c: string) => {
-          if (sid === streamId) {
-            chunkText += c
-            // Show chunks[0..i-1] (already finalized) + current partial
-            setResult(accumulated + chunkText)
-          }
-        })
-        try {
-          await window.electronAPI.aiChatStream(streamId, localModel, [
-            {
-              role: 'system',
-              content: `你是一名学术翻译。请将用户给出的文本翻译为${target}。\n要求：${style}\n直接输出译文，不要添加任何解释、前言、说明、"翻译如下"之类的元话语。`,
-            },
-            { role: 'user', content: chunks[i] },
-          ])
-        } finally {
-          cleanup()
-          streamIdRef.current = null
-        }
-        accumulated += (accumulated ? '\n\n' : '') + chunkText
-      }
-      setResult(accumulated)
-      setProgressMsg(cancelledRef.current ? '已停止' : `完成 · ${chunks.length} 段`)
-    } catch (err: any) {
-      setProgressMsg(`失败：${err?.message || err}`)
-    } finally {
-      setRunning(false)
-    }
+    if (chunks.length === 0) return
+    // Fire-and-forget: the store owns the chunk loop, so we don't await here.
+    // The modal re-renders from store state as chunks stream in.
+    startTranslation({
+      entryId,
+      mode,
+      targetLang,
+      model: localModel,
+      sourceText: currentSource,
+      chunks,
+      docTitle: docTitle || '未命名',
+    })
   }
 
   function handleAbort() {
-    cancelledRef.current = true
-    const sid = streamIdRef.current
-    if (sid) {
-      window.electronAPI.aiAbortStream?.(sid).catch(() => {})
-    }
+    if (!entryId) return
+    abortTranslation(entryId)
   }
 
   async function handleCopyResult() {
     if (!result) return
     try {
       await navigator.clipboard.writeText(result)
-      setProgressMsg('已复制到剪贴板')
-      setTimeout(() => { if (!running) setProgressMsg('') }, 1800)
+      setLocalProgressMsg('已复制到剪贴板')
+      setTimeout(() => setLocalProgressMsg(''), 1800)
     } catch {
-      setProgressMsg('复制失败，请手动选择文本')
+      setLocalProgressMsg('复制失败，请手动选择文本')
     }
   }
 
@@ -248,12 +235,12 @@ export default function TranslateModal(props: TranslateModalProps) {
   // 立刻看到结果。
   async function handleSaveAsEntry() {
     if (!result) return
-    setProgressMsg('正在保存为文献...')
+    setLocalProgressMsg('正在保存为文献...')
     try {
       const title = buildEntryTitle()
       const writeRes = await window.electronAPI.saveTranslationAsFile(title, result)
       if (!writeRes.success || !writeRes.absPath) {
-        setProgressMsg(`保存失败：${writeRes.error || '未知错误'}`)
+        setLocalProgressMsg(`保存失败：${writeRes.error || '未知错误'}`)
         return
       }
       // Put the new entry in the same folder as the source, if we have one —
@@ -261,16 +248,16 @@ export default function TranslateModal(props: TranslateModalProps) {
       const folderId = currentEntry?.folderId
       const entry = await addEntryFromPath(writeRes.absPath, title, folderId)
       if (!entry) {
-        setProgressMsg('保存成功但未能加入文献栏（库未初始化？）')
+        setLocalProgressMsg('保存成功但未能加入文献栏（库未初始化？）')
         return
       }
-      setProgressMsg(`已保存为文献：${title}`)
+      setLocalProgressMsg(`已保存为文献：${title}`)
       // Close the modal and open the new entry so the user sees it
       // immediately — same UX as "保存为备忘" jumps into the memo.
       openEntry(entry).catch(() => {})
       setTimeout(() => onClose(), 400)
     } catch (err: any) {
-      setProgressMsg(`保存失败：${err?.message || err}`)
+      setLocalProgressMsg(`保存失败：${err?.message || err}`)
     }
   }
 
@@ -290,7 +277,10 @@ export default function TranslateModal(props: TranslateModalProps) {
 
   return (
     <div
-      onClick={(e) => { if (e.target === e.currentTarget && !running) onClose() }}
+      // Backdrop click minimizes (not aborts) — the job continues in the
+      // background via the store. Click ✕ to still minimize; no longer blocks
+      // while running.
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
       style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 3000,
@@ -306,15 +296,24 @@ export default function TranslateModal(props: TranslateModalProps) {
           padding: '10px 16px', borderBottom: '1px solid var(--border-light)',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>翻译</div>
-          <button
-            onClick={() => { if (!running) onClose() }}
-            disabled={running}
-            style={{
-              background: 'transparent', border: 'none', cursor: running ? 'not-allowed' : 'pointer',
-              color: 'var(--text-muted)', fontSize: 16, padding: '0 4px',
-            }}
-          >✕</button>
+          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>
+            翻译
+            {running && (
+              <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--accent)', fontWeight: 400 }}>
+                · 后台运行中（关闭弹窗不会中止）
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button
+              onClick={onClose}
+              title={running ? '最小化（翻译后台继续）' : '关闭'}
+              style={{
+                background: 'transparent', border: 'none', cursor: 'pointer',
+                color: 'var(--text-muted)', fontSize: 14, padding: '0 6px',
+              }}
+            >{running ? '—' : '✕'}</button>
+          </div>
         </div>
 
         {/* Controls */}
@@ -429,7 +428,7 @@ export default function TranslateModal(props: TranslateModalProps) {
               </>
             )}
             <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 'auto' }}>
-              {progressMsg}
+              {localProgressMsg || progressMsg}
             </span>
           </div>
         </div>

@@ -13,6 +13,7 @@ import { useUiStore } from '../../store/uiStore'
 import { cleanOcrText } from './cleanOcrText'
 import { collectTextNodes } from './highlights'
 import TranslateModal, { type TranslateModalProps } from './TranslateModal'
+import { useTranslationJobsStore } from '../../store/translationJobsStore'
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 
@@ -2619,20 +2620,19 @@ export default function PdfViewer() {
 
         {/* 翻译 — opens modal with full-text / page-range options. Only show when
             OCR text is available (for PDFs). For the 选中 mode, the button lives
-            in the floating toolbar instead, since that's selection-triggered. */}
+            in the floating toolbar instead, since that's selection-triggered.
+            A status badge in the top-right corner reflects the translation job
+            for this entry: running (blue pulse), completed (green ✓), failed /
+            aborted (red !). Clicking reopens the modal to view the latest job. */}
         {ocrFullText && (
-          <button
-            className="btn btn-sm"
-            style={{ marginLeft: 8, fontSize: 11 }}
-            title="翻译全文 / 按页"
+          <TranslateButtonWithBadge
+            entryId={currentEntry?.id || ''}
             onClick={() => {
               setTranslateSelectedText('')
               setTranslateInitialMode('full')
               setTranslateOpen(true)
             }}
-          >
-            翻译
-          </button>
+          />
         )}
 
         {/* Edit button — for OCR text, TXT, MD, DOCX views */}
@@ -3236,34 +3236,6 @@ export default function PdfViewer() {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
                 <span>高亮</span>
               </button>
-              <span className="ft-divider" />
-              <button
-                onClick={() => {
-                  const tb = toolbarRef.current
-                  if (!tb) return
-                  navigator.clipboard?.writeText(tb.text).catch(() => {})
-                  setToolbar(null)
-                }}
-                title="复制选中文本（Ctrl+C）"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                <span>复制</span>
-              </button>
-              <span className="ft-divider" />
-              <button
-                onClick={() => {
-                  const tb = toolbarRef.current
-                  if (!tb) return
-                  setTranslateSelectedText(tb.text)
-                  setTranslateInitialMode('selection')
-                  setTranslateOpen(true)
-                  setToolbar(null)
-                }}
-                title="翻译选中文本"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 8h14M9 4v4m-2 8a18 18 0 0 0 8 0M11 14s2.5-5 5-5 5 5 5 5m-5-2v10"/></svg>
-                <span>翻译</span>
-              </button>
             </>
           )}
 
@@ -3310,6 +3282,7 @@ export default function PdfViewer() {
       <TranslateModal
         open={translateOpen}
         onClose={() => setTranslateOpen(false)}
+        entryId={currentEntry?.id || ''}
         initialMode={translateInitialMode}
         selectedText={translateSelectedText}
         fullText={ocrFullText || undefined}
@@ -3333,6 +3306,62 @@ export default function PdfViewer() {
         }
         docTitle={currentEntry?.title}
       />
+    </div>
+  )
+}
+
+// Translation button with a small status dot anchored to the top-right corner.
+// Reads this entry's translation job from the global store and renders:
+//   running   → blue dot with pulsing halo
+//   completed → green ✓
+//   failed    → red !
+//   aborted   → amber !
+//   (no job)  → no badge
+// Extracted so the top bar stays readable; the badge is a purely presentational
+// wrapper around the same 翻译 button as before.
+function TranslateButtonWithBadge({ entryId, onClick }: { entryId: string; onClick: () => void }) {
+  const job = useTranslationJobsStore(s => s.jobs[entryId])
+  const badge = (() => {
+    if (!job || !entryId) return null
+    if (job.status === 'running') return { bg: '#4a90e2', text: '', pulse: true, title: `翻译中 ${job.currentChunk}/${job.totalChunks}` }
+    if (job.status === 'completed') return { bg: '#8BB174', text: '✓', pulse: false, title: '翻译完成，点击查看' }
+    if (job.status === 'failed') return { bg: '#C97070', text: '!', pulse: false, title: `翻译失败：${job.error || ''}` }
+    if (job.status === 'aborted') return { bg: '#D4A84B', text: '!', pulse: false, title: '翻译已停止' }
+    return null
+  })()
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-block', marginLeft: 8 }}>
+      <button
+        className="btn btn-sm"
+        style={{ fontSize: 11 }}
+        title={badge?.title || '翻译全文 / 按页'}
+        onClick={onClick}
+      >
+        翻译
+      </button>
+      {badge && (
+        <span
+          style={{
+            position: 'absolute', top: -4, right: -4, minWidth: 12, height: 12,
+            padding: badge.text ? '0 3px' : 0, borderRadius: 6,
+            background: badge.bg, color: '#fff', fontSize: 9, lineHeight: '12px',
+            fontWeight: 700, textAlign: 'center',
+            boxShadow: badge.pulse ? `0 0 0 0 ${badge.bg}` : 'none',
+            animation: badge.pulse ? 'translate-badge-pulse 1.4s infinite' : undefined,
+            pointerEvents: 'none',
+          }}
+        >
+          {badge.text}
+        </span>
+      )}
+      <style>{`
+        @keyframes translate-badge-pulse {
+          0% { box-shadow: 0 0 0 0 rgba(74, 144, 226, 0.5); }
+          70% { box-shadow: 0 0 0 6px rgba(74, 144, 226, 0); }
+          100% { box-shadow: 0 0 0 0 rgba(74, 144, 226, 0); }
+        }
+      `}</style>
     </div>
   )
 }
