@@ -2682,23 +2682,6 @@ export default function PdfViewer() {
     setToolbar(null)
   }, [toolbar, currentEntry])
 
-  // Removes any existing marks on the same page whose selectedText is a
-  // subset (or equal) of the new mark's selectedText. Rationale: when the
-  // user draws a new underline / highlight that visually covers old ones,
-  // the old marks should be gone — one state per span of text.
-  // Kept as a pure helper so both underline and bold handlers reuse it.
-  const filterSupersededMarks = (
-    existing: import('../../types/library').TextMark[] | undefined,
-    incoming: import('../../types/library').TextMark,
-  ): import('../../types/library').TextMark[] => {
-    if (!existing?.length) return []
-    return existing.filter(m => {
-      if (m.pageNumber !== incoming.pageNumber) return true
-      // Drop old mark when incoming wraps it (equal or old ⊂ new).
-      return !incoming.selectedText.includes(m.selectedText)
-    })
-  }
-
   // Toolbar action: add underline mark
   const handleToolbarUnderline = useCallback((color: string) => {
     const tb = toolbarRef.current
@@ -2713,7 +2696,7 @@ export default function PdfViewer() {
     }
     updatePdfMeta(meta => ({
       ...meta,
-      marks: [...filterSupersededMarks(meta.marks, mark), mark],
+      marks: [...(meta.marks || []), mark],
     }))
     window.getSelection()?.removeAllRanges()
     // In immersive mode, keep annotation box open (no floating toolbar to dismiss)
@@ -2733,7 +2716,7 @@ export default function PdfViewer() {
     }
     updatePdfMeta(meta => ({
       ...meta,
-      marks: [...filterSupersededMarks(meta.marks, mark), mark],
+      marks: [...(meta.marks || []), mark],
     }))
     window.getSelection()?.removeAllRanges()
     // In immersive mode, keep annotation box open
