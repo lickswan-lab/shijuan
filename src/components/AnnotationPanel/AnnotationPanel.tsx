@@ -284,7 +284,7 @@ function HistoryEntryItem({
         </div>
       )}
       {entry.type === 'ai_qa' && entry.userQuery && (
-        <div style={{ fontSize: 12, color: 'var(--accent)', marginBottom: 6, fontWeight: 500 }}>
+        <div style={{ fontSize: 14, color: 'var(--accent)', marginBottom: 8, fontWeight: 600, lineHeight: 1.55 }}>
           问：{entry.userQuery}
         </div>
       )}
