@@ -652,28 +652,45 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
 }
 
 // HTML viewer: uses iframe for proper rendering + postMessage for text selection + annotation highlights
-function HtmlViewer({ absPath, onTextSelect, annotations }: {
+function HtmlViewer({
+  absPath, onTextSelect, annotations,
+  fontSize = 16, fontWeight = 400, colorDepth = 80,
+  bgHue = 38, bgSat = 55, bgLight = 92,
+  onToolbarShow,
+}: {
   absPath: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
   annotations?: Array<{ id: string; selectedText: string }>
+  // Typography controls from parent toolbar — mirror EPUB/DOCX behavior.
+  fontSize?: number
+  fontWeight?: number
+  colorDepth?: number
+  bgHue?: number
+  bgSat?: number
+  bgLight?: number
+  // Toolbar bridge: iframe → parent. Replaces the old "auto open annotation
+  // panel" behavior (onTextSelect(sel)) with the PDF-style "show floating
+  // toolbar, user clicks to open panel".
+  onToolbarShow?: (x: number, y: number, text: string) => void
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
 
-  // Listen for text selection messages from iframe
+  // Listen for selection messages from iframe. Two types:
+  //   'text-selection' — fires on mouseup inside iframe with coords+text
+  //   (we no longer auto-populate onTextSelect; the toolbar click handler
+  //   does that via setTextSelection.)
   useEffect(() => {
     const handler = (e: MessageEvent) => {
-      if (e.data?.type === 'text-selection' && e.data.text) {
-        onTextSelect({
-          pageNumber: 1,
-          text: e.data.text,
-          startOffset: 0,
-          endOffset: e.data.text.length,
-        })
-      }
+      if (e.data?.type !== 'text-selection') return
+      if (!e.data.text) return
+      const iframeRect = iframeRef.current?.getBoundingClientRect()
+      const x = (iframeRect?.left || 0) + (e.data.x || 0)
+      const y = (iframeRect?.top || 0) + (e.data.y || 0)
+      onToolbarShow?.(x, y, e.data.text)
     }
     window.addEventListener('message', handler)
     return () => window.removeEventListener('message', handler)
-  }, [onTextSelect])
+  }, [onToolbarShow])
 
   // Load HTML and inject selection script + annotation highlights
   useEffect(() => {
@@ -708,20 +725,55 @@ function highlightAnnotations() {
 setTimeout(highlightAnnotations, 200);
 ` : ''
 
-      // Inject script before </body>
+      // Reading typography & selection bridge — injected into iframe <body>.
+      // Script posts { type, text, x, y } on mouseup so the parent can place
+      // the floating toolbar next to the highlighted range (same pattern as
+      // EPUB's rendition.on('selected') bridge).
+      const textColor = bgLight < 50
+        ? `hsl(40, 15%, ${60 + (100 - colorDepth) / 3}%)`
+        : `hsl(30, 20%, ${100 - colorDepth}%)`
+      const bgColor = `hsl(${bgHue}, ${bgSat}%, ${bgLight}%)`
+      const typographyStyle = `
+<style id="sj-html-typography">
+  html, body {
+    background: ${bgColor} !important;
+    color: ${textColor} !important;
+    font-size: ${fontSize}px !important;
+    font-weight: ${fontWeight} !important;
+    line-height: 1.9 !important;
+    font-family: "Noto Serif SC", "Source Han Serif", Georgia, serif !important;
+  }
+  body { max-width: 860px; margin: 0 auto; padding: 32px 48px; }
+  ::selection { background: rgba(200, 149, 108, 0.35); }
+  img { max-width: 100%; height: auto; }
+</style>`
       const selectionScript = `
 <script>
 document.addEventListener('mouseup', function() {
   var sel = window.getSelection();
-  if (sel && !sel.isCollapsed) {
+  if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
     var text = sel.toString().trim();
     if (text && text.length >= 2) {
-      window.parent.postMessage({ type: 'text-selection', text: text }, '*');
+      var rect = sel.getRangeAt(0).getBoundingClientRect();
+      window.parent.postMessage({
+        type: 'text-selection',
+        text: text,
+        x: rect.left + rect.width / 2,
+        y: rect.bottom + 6
+      }, '*');
     }
   }
 });
 ${annHighlightJS}
 </script>`
+
+      if (html.includes('</head>')) {
+        html = html.replace('</head>', typographyStyle + '</head>')
+      } else if (html.includes('<body')) {
+        html = html.replace('<body', typographyStyle + '<body')
+      } else {
+        html = typographyStyle + html
+      }
 
       if (html.includes('</body>')) {
         html = html.replace('</body>', selectionScript + '</body>')
@@ -733,7 +785,7 @@ ${annHighlightJS}
     }).catch(() => {
       if (iframeRef.current) iframeRef.current.srcdoc = '<p>无法加载文件</p>'
     })
-  }, [absPath, annotations])
+  }, [absPath, annotations, fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight])
 
   return (
     <iframe
@@ -2931,7 +2983,7 @@ export default function PdfViewer() {
             <span style={{ fontSize: 12, minWidth: 45, textAlign: 'center' }}>{Math.round(scale * 100)}%</span>
             <button className="btn btn-sm" onClick={() => setScale(s => Math.min(3, s + 0.2))}>+</button>
           </>
-        ) : (viewMode === 'ocr' || ['docx', 'doc', 'epub'].includes(fileExt) || isText) ? (
+        ) : (viewMode === 'ocr' || ['docx', 'doc', 'epub', 'html', 'htm'].includes(fileExt) || isText) ? (
           // flexShrink: 0 on the container + whiteSpace: nowrap on labels prevent
           // "字号/粗细/深浅" from wrapping vertically in narrow windows.
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
@@ -3431,6 +3483,16 @@ export default function PdfViewer() {
         <div className="pdf-scroll-area" style={{ padding: 0 }}>
           <HtmlViewer key={currentEntry?.id} absPath={absPath} onTextSelect={setTextSelection}
             annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
+            fontSize={ocrFontSize}
+            fontWeight={ocrFontWeight}
+            colorDepth={ocrColorDepth}
+            bgHue={ocrBgHue}
+            bgSat={ocrBgSat}
+            bgLight={ocrBgLight}
+            onToolbarShow={(x, y, text) => {
+              setToolbar({ x, y, text, pageNumber: 1 })
+              setToolbarMode('main')
+            }}
           />
         </div>
       )}
