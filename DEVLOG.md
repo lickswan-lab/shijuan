@@ -4,6 +4,66 @@
 
 ---
 
+## 2026-04-21 · Batch 39 · 翻译功能 + Ctrl+C + OCR 保图（进行中）
+
+> 本 batch 跨多轮对话完成，中途有 context compact。以下为**当前最新状态**。
+
+### 已完成并已 commit
+
+| Commit | 内容 |
+|---|---|
+| `173ec0de` | 翻译弹窗初版（4 模式：选中 / 当前页 / 页码范围 / 全文，支持流式 + 停止）· OCR 保留 image/figure/formula/equation/table 块 · md_results 兜底（layout_details 比 md 短 20%+ 时切换）· main.ts Edit 菜单 + autoHideMenuBar 修 Ctrl+C（OS 层） |
+| `fadce46f` | 翻译弹窗独立模型下拉（读 aiGetConfigured 按 provider 分组；默认同步全局 selectedAiModel，弹窗内切换仅本次生效，不污染全局） |
+| `20ece840` | 保存为文献（.txt 写到 `~/.lit-manager/translations/<title>.txt`，按用户规范命名「源名 部分 翻译文本（语言）」，自动加入库栏跟随原文献 folder，保存后自动打开）· Ctrl+C renderer 层兜底（capture phase + `navigator.clipboard.writeText`，INPUT/TEXTAREA 不拦）· 划词工具栏加复制/翻译按钮（后已撤回） |
+| `a696a3a2` | 翻译任务后台化 · TranslateModal store-driven + 顶栏状态徽章（下面"挂起 1 + 2"两项全量完成） |
+
+### 已完成后仍需用户手测
+
+- 最小化流程：翻译中点 "—" 关闭 modal → 顶栏翻译按钮应有蓝色脉冲徽章 + chunk 进度 tooltip → 再点按钮重开 modal → 应看到累积译文和正确分段进度
+- 失败/中止状态：点"停止" → ✕ 按钮变回，徽章变琥珀色 "!"；新翻译应覆盖旧 job
+- 完成状态：跑完一次翻译 → 关闭 modal → 顶栏应显示绿色 "✓" 徽章
+- 切 entry：A 文献翻译中，切到 B 文献，B 的翻译按钮不应显示 A 的徽章（因 job 按 entryId 索引）
+
+### 挂起的工作（下一步）
+
+1. **OCR 状态图标（新需求）**
+   - 现状：OCR 已经在 main 进程跑，本身就是后台进程。但 UI 只有 `BatchOcrProgress` 浮窗显示当前项，文献栏每个 entry 没有独立的状态图标
+   - 需要：`src/components/Sidebar/FileTree.tsx` 的 entry 块**右侧**加小图标
+     - 正在 OCR → 蓝色旋转图标或进度
+     - 完成 → 绿色 ✅
+     - 失败 → 红色 ❗
+   - `LibraryEntry.ocrStatus` 现在是 `'none' | 'partial' | 'complete'`，需要加 `'running'` 态
+   - 需要 OCR 失败时也写回一个状态（目前失败是否有捕获？待查）
+
+2. **统一 OCR 和翻译的状态模型**
+   - 考虑把两个"后台任务状态"合并成一个 `useBackgroundJobsStore`
+   - 或者各自独立 store 但 UI 徽章组件复用
+
+### 本 batch 遇到的问题
+
+- **context 多次被 compact**：第一次是在验证 OCR 后台 + 增加翻译功能时；第二次在重写 TranslateModal 途中
+- **dev server 多次退出**（npm run dev 进程 exit 0）导致用户测试的是旧版本
+  - 解决：每次 main 进程代码改动后强制重启；每次确认 pid 存在
+- **划词工具栏的 翻译/复制 按钮决策反复**：一开始加了，后用户反馈冗余（对应有独立翻译按钮 + Ctrl+C 已能复制）→ 已撤
+- **Ctrl+C 多次反馈不生效**：排查发现是 dev server 在跑旧 main.ts（没 pick up 新的 Edit 菜单）。重启 dev 后修好；另外加了 renderer 层兜底 capture-phase 监听，双保险
+- **本轮对话输出 token 异常低**：可能是多个 system-reminder 堆叠 + 长 tool result 占用 context。已同用户确认。本日志作为一次"停下来梳理"
+
+### 积压（待用户授权）
+
+- lit-manager master 3 个 commit（`173ec0de` `fadce46f` `20ece840`）未 push
+- shijuan-website `23cf13f`（测试群二维码）未 push
+- v1.3.0-beta tag/release 需要 push 完后重新打
+
+### 已知要测的东西（等代码改完统一测）
+
+- [ ] 翻译模型下拉在 modal 内切换是否真的只对本次生效
+- [ ] 保存为文献的文件名在 Windows 下有特殊字符时能否正确 sanitize
+- [ ] Ctrl+C 在 OCR markdown 视图和 pdf.js 文本层都能复制
+- [ ] 翻译最小化后重开 modal 是否能正确续上流
+- [ ] OCR 状态图标在 BatchOcr 批量模式和单篇模式下都要正常
+
+---
+
 ## 2026-04-19 · Batch 38 · 文社科用户视角痛点修复（5 个）
 
 ### 出发点
