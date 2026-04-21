@@ -444,7 +444,7 @@ export async function callChat(providerId: string, model: string, messages: Arra
       'Content-Type': 'application/json',
       ...provider.authHeader(key),
     },
-    body: JSON.stringify({ model, messages }),
+    body: JSON.stringify({ model, messages, max_tokens: 16384 }),
   })
 
   if (!response.ok) {
@@ -547,7 +547,11 @@ export async function callChatStream(
     return callWithManualSearchLoop(provider, key, model, messages, onChunk, signal)
   }
 
-  const body: any = { model, messages, stream: true }
+  // Most OpenAI-compatible providers default to a low max_tokens (GLM ~1024,
+  // Kimi 1024-2048, Doubao varies). Without a floor, long notes get cut off
+  // mid-sentence (user-reported "答复生成不完整"). 8192 fits comfortably in
+  // current-gen context windows and is below every provider's hard cap.
+  const body: any = { model, messages, stream: true, max_tokens: 16384 }
   if (tools) body.tools = tools
 
   const response = await fetch(provider.chatUrl, {
@@ -653,7 +657,7 @@ async function callWithManualSearchLoop(
     const res = await fetch(provider.chatUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...provider.authHeader(key) },
-      body: JSON.stringify({ model, messages: conversation, tools: [webSearchTool], stream: false }),
+      body: JSON.stringify({ model, messages: conversation, tools: [webSearchTool], stream: false, max_tokens: 16384 }),
       signal,
     })
     if (!res.ok) {
@@ -702,7 +706,7 @@ async function callWithManualSearchLoop(
   const finalRes = await fetch(provider.chatUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...provider.authHeader(key) },
-    body: JSON.stringify({ model, messages: conversation, stream: true }),
+    body: JSON.stringify({ model, messages: conversation, stream: true, max_tokens: 16384 }),
     signal,
   })
   if (!finalRes.ok) {

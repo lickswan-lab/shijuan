@@ -295,15 +295,33 @@ function HistoryEntryItem({
       )}
       {editing ? (
         <div>
+          {/* Inline-edit textarea — styled to blend with the surrounding
+              history block rather than overlaying a dark boxed input: same
+              bg (transparent to inherit the .ai-qa / .user-note tint), no
+              chrome border, just a subtle accent outline while focused.
+              minHeight mirrors a typical AI reply so edit feels like "typing
+              over" the content instead of a popup. */}
           <textarea
             value={editText}
             onChange={e => setEditText(e.target.value)}
+            autoFocus
             style={{
-              width: '100%', minHeight: 80, padding: 8, border: '1px solid var(--border)',
-              borderRadius: 4, fontSize: 13, fontFamily: 'var(--font)', resize: 'vertical'
+              width: '100%',
+              minHeight: Math.max(120, Math.min(400, (editText.split('\n').length + 2) * 22)),
+              padding: '4px 2px',
+              border: 'none',
+              outline: 'none',
+              background: 'transparent',
+              color: 'inherit',
+              fontSize: 14,
+              lineHeight: 1.7,
+              fontFamily: 'var(--font)',
+              resize: 'vertical',
+              boxShadow: 'inset 0 0 0 1px rgba(200,149,108,0.25)',
+              borderRadius: 4,
             }}
           />
-          <div style={{ display: 'flex', gap: 6, marginTop: 6, justifyContent: 'flex-end' }}>
+          <div style={{ display: 'flex', gap: 6, marginTop: 8, justifyContent: 'flex-end' }}>
             <button className="btn btn-sm" onClick={() => setEditing(false)}>取消</button>
             <button className="btn btn-sm btn-primary" onClick={handleSave}>保存</button>
           </div>
@@ -955,25 +973,38 @@ export default function AnnotationPanel() {
     const streamId = uuid()
     let fullText = ''
 
-    // Listen for streaming chunks
+    // Idle timeout: reset every time a chunk arrives. A long-running task
+    // (e.g. 梳理几页脉络) can legitimately take minutes to finish — we don't
+    // want a hard 60s cap, but we DO want to fail fast if the stream stalls.
+    // 180s of complete silence = treat as dead connection.
+    const IDLE_LIMIT_MS = 180_000
+    let idleTimer: ReturnType<typeof setTimeout> | null = null
+    let resolveTimeout: ((v: { success: false; error: string }) => void) | null = null
+    const armIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => {
+        resolveTimeout?.({ success: false, error: 'AI 超时（180 秒未收到新内容，可能网络卡住）' })
+      }, IDLE_LIMIT_MS)
+    }
+
     const cleanupChunk = window.electronAPI.onAiStreamChunk((sid, chunk) => {
       if (sid !== streamId) return
       fullText += chunk
       setStreamingText(fullText)
+      armIdle()  // reset countdown on any progress
     })
+    armIdle()
 
     try {
-      // Timeout protection: 60s max for AI response
       const result = await Promise.race([
         window.electronAPI.aiChatStream(streamId, aiModel, messages),
-        new Promise<{ success: false; error: string }>((resolve) =>
-          setTimeout(() => resolve({ success: false, error: 'AI 响应超时（60秒）' }), 60000)
-        ),
+        new Promise<{ success: false; error: string }>((resolve) => { resolveTimeout = resolve }),
       ])
       if (!result.success) fullText = fullText || `错误：${result.error}`
     } catch (err: any) {
       fullText = fullText || `错误：${err.message}`
     } finally {
+      if (idleTimer) clearTimeout(idleTimer)
       cleanupChunk()
     }
 
@@ -1064,23 +1095,37 @@ export default function AnnotationPanel() {
 
       const streamId = uuid()
       let fullText = ''
+      // Idle timeout — same pattern as the 注释问答 path above. 180s of no
+      // new chunks = stream is dead; any activity resets the clock.
+      let idleTimer: ReturnType<typeof setTimeout> | null = null
+      let resolveTimeout: ((v: { success: false; error: string }) => void) | null = null
+      const armIdle = () => {
+        if (idleTimer) clearTimeout(idleTimer)
+        idleTimer = setTimeout(() => {
+          resolveTimeout?.({ success: false, error: 'AI 超时（180 秒未收到新内容）' })
+        }, 180_000)
+      }
       const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => {
         if (sid !== streamId) return
         fullText += chunk
         setStreamingText(fullText)
+        armIdle()
       })
+      armIdle()
       try {
         const res = await Promise.race([
           window.electronAPI.aiChatStream(streamId, aiModel, [
             { role: 'system', content: sysRes.systemPrompt },
             { role: 'user', content: userQ },
           ]),
-          new Promise<{ success: false; error: string }>((resolve) =>
-            setTimeout(() => resolve({ success: false, error: 'AI 响应超时（60秒）' }), 60000)),
+          new Promise<{ success: false; error: string }>((resolve) => { resolveTimeout = resolve }),
         ])
         if (!res.success) throw new Error(res.error || 'AI 调用失败')
         if ((res as any).text) fullText = (res as any).text
-      } finally { cleanup() }
+      } finally {
+        if (idleTimer) clearTimeout(idleTimer)
+        cleanup()
+      }
       setStreamingText('')
 
       const entry: HistoryEntry = {
@@ -1470,14 +1515,29 @@ export default function AnnotationPanel() {
         {aiLoading && (
           <div className="history-entry ai-response">
             {streamingText ? (
-              <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', whiteSpace: 'pre-wrap' }}>
-                {streamingText}
-                <span className="streaming-cursor" />
-              </div>
+              <>
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  fontSize: 10, color: 'var(--accent)', fontWeight: 500,
+                  marginBottom: 6, letterSpacing: 0.3,
+                }}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span className="loading-spinner" style={{ width: 10, height: 10 }} />
+                    正在生成
+                  </span>
+                  <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>
+                    {streamingText.length} 字
+                  </span>
+                </div>
+                <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', whiteSpace: 'pre-wrap' }}>
+                  {streamingText}
+                  <span className="streaming-cursor" />
+                </div>
+              </>
             ) : (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-muted)' }}>
                 <span className="loading-spinner" />
-                AI 正在思考...
+                AI 正在思考...（首 token 返回前可能需要几秒）
               </div>
             )}
           </div>
