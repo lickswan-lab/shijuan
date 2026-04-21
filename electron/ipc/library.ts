@@ -428,6 +428,41 @@ export function registerLibraryIpc(): void {
     return allResults.slice(0, 50)
   })
 
+  // Persist a translated text as a .txt file in ~/.lit-manager/translations/
+  // so it can be imported back into the library as a normal LibraryEntry. We
+  // sanitize the title for filesystem-safe characters (Windows forbids
+  // <>:"/\|?* ) and fall back to a timestamp if the sanitized result is empty.
+  ipcMain.handle('save-translation-as-file', async (_e, title: string, content: string): Promise<{ success: boolean; absPath?: string; error?: string }> => {
+    try {
+      const translationsDir = path.join(DATA_DIR, 'translations')
+      await fs.mkdir(translationsDir, { recursive: true })
+      // Strip path-unsafe chars, collapse whitespace, cap length so Explorer/
+      // Finder don't truncate ugly. Keep Chinese — only reject what Windows
+      // genuinely forbids.
+      const cleaned = (title || '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120)
+      const base = cleaned || `translation-${Date.now()}`
+      let fileName = `${base}.txt`
+      let absPath = path.join(translationsDir, fileName)
+      // If a file with that exact name already exists, append a short suffix so
+      // we don't silently overwrite a prior translation.
+      let i = 2
+      while (true) {
+        try {
+          await fs.access(absPath)
+          fileName = `${base} (${i}).txt`
+          absPath = path.join(translationsDir, fileName)
+          i++
+        } catch {
+          break
+        }
+      }
+      await fs.writeFile(absPath, content, 'utf-8')
+      return { success: true, absPath }
+    } catch (err: any) {
+      return { success: false, error: err?.message || String(err) }
+    }
+  })
+
   // Export file with save dialog
   ipcMain.handle('export-file', async (_event, defaultName: string, filters: Array<{ name: string; extensions: string[] }>, content: string | Buffer) => {
     try {

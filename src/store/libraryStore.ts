@@ -64,6 +64,11 @@ interface LibraryState {
   importFolder: (folderId?: string) => Promise<number>
   importByPaths: (paths: string[], folderId?: string) => Promise<number>
   importFromBibTeX: (bibContent: string, folderId?: string) => Promise<{ added: number; skipped: number; missingFile: number; parseErrors: number }>
+  // Programmatic: add an already-on-disk file (any extension) as a library
+  // entry with a caller-specified title. Returns the new entry or null on
+  // failure. Used by TranslateModal's "保存为文献" flow after the main
+  // process has written the .txt.
+  addEntryFromPath: (absPath: string, title: string, folderId?: string) => Promise<LibraryEntry | null>
 
   removeEntry: (id: string) => Promise<void>
   deleteEntry: (id: string) => Promise<{ success: boolean; error?: string }>
@@ -211,6 +216,24 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       )
     }
     return added
+  },
+
+  addEntryFromPath: async (absPath, title, folderId) => {
+    const { library } = get()
+    if (!library) return null
+    // If an entry already points at this file, just return it — avoids
+    // duplicates when the user clicks "保存为文献" twice on the same
+    // translation (second click will just re-open the existing entry).
+    const existing = library.entries.find(e => e.absPath === absPath)
+    if (existing) return existing
+    const entry: LibraryEntry = {
+      id: uuid(), absPath, title, authors: [], tags: [], notes: '',
+      folderId, ocrStatus: 'none', addedAt: new Date().toISOString(),
+    }
+    library.entries.push(entry)
+    await window.electronAPI.saveLibrary(library)
+    set({ library: { ...library } })
+    return entry
   },
 
   importFolder: async (folderId?: string) => {

@@ -1857,6 +1857,34 @@ export default function PdfViewer() {
     }
   }, [pageJumpInput, scrollToPage, totalPages])
 
+  // Ctrl+C / Cmd+C fallback — ensures copy works even if the Electron
+  // application menu's `role: 'copy'` accelerator is somehow swallowed (e.g.
+  // when focus is inside the pdf.js text layer or a react-rendered span that
+  // isn't contentEditable). We manually write the current window selection
+  // into the clipboard via the async clipboard API. This runs in ADDITION to
+  // the OS-level shortcut: if the OS copy already succeeded, writing the
+  // identical string again is a no-op from the user's perspective.
+  //
+  // We intentionally do NOT preventDefault() — that would break the browser's
+  // own copy path for inputs/textareas.
+  useEffect(() => {
+    const copyHandler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      if (e.key !== 'c' && e.key !== 'C') return
+      // Let INPUT/TEXTAREA/contentEditable use their own copy — they already
+      // work, and we don't want to interfere with partial-field copies.
+      const tgt = e.target as HTMLElement
+      const tag = tgt?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tgt?.isContentEditable) return
+      const sel = window.getSelection()?.toString()
+      if (!sel || sel.length === 0) return
+      // Fire-and-forget; permission errors are silently ignored.
+      navigator.clipboard?.writeText(sel).catch(() => {})
+    }
+    document.addEventListener('keydown', copyHandler, true)  // capture phase
+    return () => document.removeEventListener('keydown', copyHandler, true)
+  }, [])
+
   // Keyboard shortcuts for PDF viewing
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -3207,6 +3235,19 @@ export default function PdfViewer() {
               <button onClick={handleToolbarBold} title="高亮">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
                 <span>高亮</span>
+              </button>
+              <span className="ft-divider" />
+              <button
+                onClick={() => {
+                  const tb = toolbarRef.current
+                  if (!tb) return
+                  navigator.clipboard?.writeText(tb.text).catch(() => {})
+                  setToolbar(null)
+                }}
+                title="复制选中文本（Ctrl+C）"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <span>复制</span>
               </button>
               <span className="ft-divider" />
               <button

@@ -89,6 +89,9 @@ export default function TranslateModal(props: TranslateModalProps) {
   const createMemo = useLibraryStore(s => s.createMemo)
   const updateMemo = useLibraryStore(s => s.updateMemo)
   const setActiveMemo = useUiStore(s => s.setActiveMemo)
+  const addEntryFromPath = useLibraryStore(s => s.addEntryFromPath)
+  const openEntry = useLibraryStore(s => s.openEntry)
+  const currentEntry = useLibraryStore(s => s.currentEntry)
 
   const [mode, setMode] = useState<TranslateMode>(props.initialMode)
   const [targetLang, setTargetLang] = useState<'zh' | 'en'>('zh')
@@ -221,6 +224,53 @@ export default function TranslateModal(props: TranslateModalProps) {
       await updateMemo(memo.id, { title, content: result })
       setActiveMemo(memo.id)
       onClose()
+    }
+  }
+
+  // Build the document title per user spec: 「源文本名称 翻译部分 翻译文本（语言）」
+  // 翻译部分 varies by mode: 全文 / 第N页 / 第N-M页 / 选中片段
+  function buildEntryTitle(): string {
+    const src = docTitle || '未命名'
+    const lang = targetLang === 'zh' ? '中文' : '英文'
+    let partLabel: string
+    switch (mode) {
+      case 'full': partLabel = '全文'; break
+      case 'current-page': partLabel = props.currentPageNumber ? `第${props.currentPageNumber}页` : '当前页'; break
+      case 'range': partLabel = range.start === range.end ? `第${range.start}页` : `第${range.start}-${range.end}页`; break
+      case 'selection':
+      default: partLabel = '选中片段'; break
+    }
+    return `${src} ${partLabel} 翻译文本（${lang}）`
+  }
+
+  // "保存为文献"：把当前译文写成 .txt 文件（在 ~/.lit-manager/translations/
+  // 下），然后作为一条 LibraryEntry 加入左侧文献栏。保存后直接打开，让用户
+  // 立刻看到结果。
+  async function handleSaveAsEntry() {
+    if (!result) return
+    setProgressMsg('正在保存为文献...')
+    try {
+      const title = buildEntryTitle()
+      const writeRes = await window.electronAPI.saveTranslationAsFile(title, result)
+      if (!writeRes.success || !writeRes.absPath) {
+        setProgressMsg(`保存失败：${writeRes.error || '未知错误'}`)
+        return
+      }
+      // Put the new entry in the same folder as the source, if we have one —
+      // so翻译跟着原文放，不会散到根目录。
+      const folderId = currentEntry?.folderId
+      const entry = await addEntryFromPath(writeRes.absPath, title, folderId)
+      if (!entry) {
+        setProgressMsg('保存成功但未能加入文献栏（库未初始化？）')
+        return
+      }
+      setProgressMsg(`已保存为文献：${title}`)
+      // Close the modal and open the new entry so the user sees it
+      // immediately — same UX as "保存为备忘" jumps into the memo.
+      openEntry(entry).catch(() => {})
+      setTimeout(() => onClose(), 400)
+    } catch (err: any) {
+      setProgressMsg(`保存失败：${err?.message || err}`)
     }
   }
 
@@ -374,6 +424,7 @@ export default function TranslateModal(props: TranslateModalProps) {
             {result && !running && (
               <>
                 <button onClick={handleCopyResult} className="btn btn-sm">复制</button>
+                <button onClick={handleSaveAsEntry} className="btn btn-sm" title="保存为 .txt 并加入左侧文献栏">保存为文献</button>
                 <button onClick={handleSaveAsMemo} className="btn btn-sm">保存为备忘</button>
               </>
             )}

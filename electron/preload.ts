@@ -43,6 +43,10 @@ const electronAPI = {
   // Export
   exportFile: (defaultName: string, filters: Array<{ name: string; extensions: string[] }>, content: string | Buffer): Promise<{ success: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('export-file', defaultName, filters, content),
+  // Save a translated text as .txt in ~/.lit-manager/translations/ — returns
+  // the absolute path the renderer can attach to a new LibraryEntry.
+  saveTranslationAsFile: (title: string, content: string): Promise<{ success: boolean; absPath?: string; error?: string }> =>
+    ipcRenderer.invoke('save-translation-as-file', title, content),
   exportFullBackup: (): Promise<{ success: boolean; path?: string; error?: string; stats?: { entryCount: number; memoCount: number; metaCount: number; apprenticeCount: number } }> =>
     ipcRenderer.invoke('export-full-backup'),
   pickAndReadBibFile: (): Promise<{ success: boolean; content?: string; path?: string; canceled?: boolean; error?: string }> =>
