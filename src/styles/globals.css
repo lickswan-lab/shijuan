@@ -238,7 +238,7 @@ html, body, #root {
 
 .history-entry {
   margin-bottom: 12px;
-  padding: 16px 18px;
+  padding: 16px 20px 16px 22px;
   border-radius: var(--radius-sm);
   font-size: 13px;
   line-height: 1.9;
