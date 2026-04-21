@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-04-21 · Batch 40 · v1.3.0 正式版发布
+
+主题：**翻译功能 / EPUB 格式文本优化**
+
+包含 batch 39 全部内容 + EPUB 大量改进：
+- EPUB 加载只显示封面 → flow:'scrolled' + 章节导航栏 + 键盘翻章
+- EPUB 排版居中（!important 覆盖原书 CSS）+ 宋体 + 图片自适应
+- EPUB 注释高亮 + 6 色划线 + 右键自定义菜单
+- 字号 / 粗细 / 深浅 / 背景色 全格式打通
+- 划词工具栏 全格式打通（含 EPUB iframe / HTML iframe 桥接）
+- 选中行为统一：仅弹工具栏，不再自动开注释栏
+- EPUB 注释栏开关后 350ms resize 修右侧空白条 + cfi 恢复阅读位置
+- HtmlViewer 接排版 props + iframe 注入
+- 注释面板底部按钮 nowrap
+
+回滚的：filterSupersededMarks（按 selectedText 子串删旧）—— 误伤"重复短语第二处划线"等场景，留待后续做 context-aware（mark 加 prefix/suffix 锚点）。
+
+发布产物：NSIS 安装版 + Windows zip + macOS arm64 / x64 zip
+
+---
+
 ## 2026-04-21 · Batch 39 · 翻译功能 + Ctrl+C + OCR 保图（进行中）
 
 > 本 batch 跨多轮对话完成，中途有 context compact。以下为**当前最新状态**。
