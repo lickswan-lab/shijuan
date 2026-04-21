@@ -795,10 +795,33 @@ function EpubViewer({ absPath, onTextSelect, annotations, onAnnotationClick }: {
     if (!doc || !doc.body) return
 
     // Inject CSS once per iframe (globals.css isn't reachable from inside it).
+    // `!important` on the reading layout beats the EPUB's own CSS (many books
+    // set body { margin: 0; max-width: none } which would otherwise win).
     if (!doc.getElementById('sj-epub-highlight-style')) {
       const style = doc.createElement('style')
       style.id = 'sj-epub-highlight-style'
       style.textContent = `
+        html, body {
+          box-sizing: border-box !important;
+        }
+        body {
+          max-width: 860px !important;
+          margin: 0 auto !important;
+          padding: 40px 56px !important;
+          font-family: "Noto Serif SC", "Source Han Serif", Georgia, serif !important;
+          line-height: 1.9 !important;
+          font-size: 17px !important;
+          color: #3D3529 !important;
+          text-align: justify !important;
+        }
+        p { margin: 0 0 1em 0 !important; text-indent: 2em !important; }
+        h1, h2, h3 {
+          font-family: -apple-system, "Microsoft YaHei", sans-serif !important;
+          text-align: center !important;
+          text-indent: 0 !important;
+          margin: 1.6em 0 1em !important;
+        }
+        img { max-width: 100% !important; height: auto !important; display: block !important; margin: 1em auto !important; }
         .ocr-ann-underline {
           text-decoration: underline;
           text-decoration-color: rgba(200,149,108,0.5);
