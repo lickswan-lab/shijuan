@@ -758,6 +758,7 @@ ${annHighlightJS}
 // findAndWrapAll that respects Node.ownerDocument.
 function EpubViewer({
   absPath, onTextSelect, annotations, onAnnotationClick,
+  marks, onRemoveMark,
   fontSize = 17, fontWeight = 400, colorDepth = 80,
   bgHue = 38, bgSat = 55, bgLight = 92,
   onToolbarShow,
@@ -766,6 +767,9 @@ function EpubViewer({
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
   annotations?: Array<{ id: string; selectedText: string }>
   onAnnotationClick?: (id: string) => void
+  // Inline marks (高光 + 6-color underline), same shape as DocxViewer
+  marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
+  onRemoveMark?: (id: string) => void
   // Reading typography + background color — forwarded from PdfViewer's top
   // toolbar so EPUB matches OCR/DOCX/TXT behavior.
   fontSize?: number
@@ -802,6 +806,10 @@ function EpubViewer({
   annsRef.current = annotations || []
   const onClickRef = useRef(onAnnotationClick)
   onClickRef.current = onAnnotationClick
+  const marksRef = useRef(marks || [])
+  marksRef.current = marks || []
+  const onRemoveMarkRef = useRef(onRemoveMark)
+  onRemoveMarkRef.current = onRemoveMark
   // Same trick for typography props — refs let us read latest values from
   // inside the rendition.on('rendered') closure without re-registering.
   const styleRef = useRef({ fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight })
@@ -862,6 +870,16 @@ function EpubViewer({
       }
       img { max-width: 100% !important; height: auto !important; display: block !important; margin: 1em auto !important; }
       ::selection { background: rgba(200, 149, 108, 0.35); }
+      /* 6-color underline marks + bold highlight, kept in sync with globals.css */
+      .mark-underline-yellow { text-decoration: underline; text-decoration-color: #FFD43B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .mark-underline-red    { text-decoration: underline; text-decoration-color: #FF6B6B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .mark-underline-green  { text-decoration: underline; text-decoration-color: #51CF66; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .mark-underline-blue   { text-decoration: underline; text-decoration-color: #339AF0; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .mark-underline-purple { text-decoration: underline; text-decoration-color: #CC5DE8; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .mark-underline-orange { text-decoration: underline; text-decoration-color: #FF922B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .mark-bold { background: rgba(255,212,59,0.25); border-radius: 2px; }
+      /* pointer-events: auto so right-click removal works; marks keep text selectable */
+      .ocr-mark { cursor: text; }
       .ocr-ann-underline {
         text-decoration: underline;
         text-decoration-color: rgba(200,149,108,0.5);
@@ -886,8 +904,8 @@ function EpubViewer({
       .ocr-ann-marker:hover { opacity: 1; transform: scale(1.5); }
     `
 
-    // Clear previous annotation spans — unwrap underlines, remove markers.
-    doc.body.querySelectorAll('.ocr-ann-underline, .ocr-ann-marker').forEach(el => {
+    // Clear previous annotation + mark spans — unwrap underlines, remove markers.
+    doc.body.querySelectorAll('.ocr-ann-underline, .ocr-ann-marker, .ocr-mark').forEach(el => {
       try {
         const parent = el.parentNode
         if (!parent) return
@@ -897,6 +915,32 @@ function EpubViewer({
       } catch {}
     })
     try { doc.body.normalize() } catch {}
+
+    // Render inline marks (bold + 6-color underlines) same way DocxViewer does,
+    // but inside the iframe document.
+    const mks = marksRef.current
+    if (mks.length) {
+      const markTargets = mks.map(m => ({ text: m.selectedText, id: m.id, type: m.type, color: m.color }))
+      findAndWrapAll(doc.body, markTargets, (target) => {
+        const t = target as typeof markTargets[number]
+        const span = doc.createElement('span')
+        span.className = t.type === 'bold' ? 'ocr-mark mark-bold' : `ocr-mark mark-underline-${t.color || 'yellow'}`
+        ;(span as any).dataset.markId = t.id
+        ;(span as any).dataset.markType = t.type
+        return span
+      }, 'ocr-mark')
+      // Right-click a mark to remove it. Listener lives on body; each call
+      // re-attaches, but the previous one was auto-GC'd when iframe content
+      // replaced — fine in practice.
+      doc.body.oncontextmenu = (e: Event) => {
+        const target = e.target as HTMLElement | null
+        const span = target?.closest?.('.ocr-mark[data-mark-id]') as HTMLElement | null
+        if (!span) return
+        e.preventDefault()
+        const id = span.dataset.markId
+        if (id && confirm('删除这条标记？')) onRemoveMarkRef.current?.(id)
+      }
+    }
 
     const anns = annsRef.current
     if (!anns.length) return
@@ -937,7 +981,7 @@ function EpubViewer({
       applyHighlights(contents)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [annotations, fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight])
+  }, [annotations, marks, fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -3400,6 +3444,8 @@ export default function PdfViewer() {
             onTextSelect={setTextSelection}
             annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
             onAnnotationClick={(id) => setActiveAnnotation(id)}
+            marks={memoizedMarks}
+            onRemoveMark={handleRemoveMark}
             fontSize={ocrFontSize}
             fontWeight={ocrFontWeight}
             colorDepth={ocrColorDepth}
