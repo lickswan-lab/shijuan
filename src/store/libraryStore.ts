@@ -5,6 +5,11 @@ import { createDefaultLibrary, createDefaultPdfMeta } from '../types/library'
 import { extractPdfMetadata } from '../utils/pdfMetadata'
 import { parseBibTeX, splitAuthors, splitKeywords, parseYear, extractFilePath } from '../utils/bibtexParser'
 
+// Per-entry write queue for updatePdfMetaByEntryId — chain concurrent bg
+// writes on the same entry so they read-modify-write in sequence instead of
+// racing. Entries self-clean on settle.
+const updatePdfMetaByEntryId_queue: Record<string, Promise<void>> = {}
+
 // Background PDF metadata enrichment. Called after import finishes — reads each
 // newly-imported PDF's Info dict and updates its title / authors / year when
 // present and non-garbage. Never blocks the import flow; runs sequentially with
@@ -524,10 +529,22 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       await get().updatePdfMeta(updater)
       return
     }
-    const meta = await window.electronAPI.loadPdfMeta(targetEntryId)
-    if (!meta) return
-    const updated = updater({ ...meta })
-    await window.electronAPI.savePdfMeta(targetEntryId, updated)
+    // Serialize concurrent writes on the same entry — without this, two
+    // background AI jobs loading+saving the same meta would silently
+    // overwrite each other. Chain to previous in-flight write via a
+    // per-entry promise queue.
+    const queueKey = `bg:${targetEntryId}`
+    const prev = (updatePdfMetaByEntryId_queue[queueKey] || Promise.resolve())
+    const next = prev.catch(() => {}).then(async () => {
+      const meta = await window.electronAPI.loadPdfMeta(targetEntryId)
+      if (!meta) return
+      const updated = updater({ ...meta })
+      await window.electronAPI.savePdfMeta(targetEntryId, updated)
+    })
+    updatePdfMetaByEntryId_queue[queueKey] = next.finally(() => {
+      if (updatePdfMetaByEntryId_queue[queueKey] === next) delete updatePdfMetaByEntryId_queue[queueKey]
+    })
+    await next
   },
 
   createFolder: async (name: string) => {

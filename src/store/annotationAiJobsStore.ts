@@ -107,7 +107,9 @@ export const useAnnotationAiJobsStore = create<JobsStore>((set, get) => ({
     const flushToEntry = () => {
       pendingFlush = false
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
-      void updater(entryId, annotationId, historyEntryId, { content: fullText })
+      // updater may reject if disk write fails — log so loss is at least visible
+      Promise.resolve(updater(entryId, annotationId, historyEntryId, { content: fullText }))
+        .catch(err => console.warn('[ai-job] flush updater rejected', err))
     }
     const scheduleFlush = () => {
       pendingFlush = true

@@ -1088,7 +1088,18 @@ export function registerAiApiIpc(): void {
       }
 
       const result = await callChatStream(pId, mId, messages, (chunk) => {
-        try { event.sender.send('ai-stream-chunk', streamId, chunk) } catch {}
+        // If sender.send throws, renderer has been destroyed (window closed
+        // mid-stream). Abort the in-flight request so we don't keep
+        // streaming into the void — saves CPU + network + provider quota.
+        try {
+          if (event.sender.isDestroyed()) {
+            controller.abort()
+            return
+          }
+          event.sender.send('ai-stream-chunk', streamId, chunk)
+        } catch {
+          controller.abort()
+        }
       }, controller.signal, opts)
       event.sender.send('ai-stream-done', streamId, result)
       return { success: true, text: result }
