@@ -1228,6 +1228,24 @@ function EpubViewer({
         await rendition.display()
       }
 
+      // Generate the locations index so location.start.percentage works
+      // (without this, progressPct stays 0%). 1500 chars per location is
+      // a reasonable balance between progress granularity and load time.
+      // Done in background so book display isn't blocked; relocated events
+      // fired before generation completes will simply lack percentage.
+      ;(async () => {
+        try {
+          await book.locations.generate(1500)
+          // Trigger a synthetic relocate so progressPct updates immediately
+          // for the current position.
+          const cur = rendition.currentLocation()
+          const pct = (cur as any)?.start?.percentage
+          if (typeof pct === 'number') setProgressPct(Math.round(pct * 100))
+        } catch (err) {
+          console.warn('[epub] locations.generate failed', err)
+        }
+      })()
+
       // Load table of contents for the nav dropdown. book.loaded.navigation
       // resolves once the NCX / nav.xhtml is parsed.
       try {
@@ -1300,9 +1318,10 @@ function EpubViewer({
   }, [annotationPanelCollapsed, sidebarCollapsed, rightPanel])
 
   // Container-width ResizeObserver: catches user dragging the annotation
-  // panel divider (which doesn't change uiStore state, so the effect above
-  // doesn't fire). Long debounce (500ms after movement stops) so the
-  // expensive epub.js resize doesn't run mid-drag.
+  // panel divider (which doesn't change uiStore state, so the toggling
+  // effect doesn't fire). Short debounce — long values made dragging feel
+  // unresponsive ("拖完还要等 0.5 秒才动"). 150ms strikes a balance: brief
+  // pause after the user stops moving, then reflow.
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -1318,7 +1337,7 @@ function EpubViewer({
         if (!r) return
         try { r.resize(el.clientWidth, el.clientHeight) } catch {}
         try { window.dispatchEvent(new Event('resize')) } catch {}
-      }, 500)
+      }, 150)
     })
     ro.observe(el)
     return () => { ro.disconnect(); if (timer) clearTimeout(timer) }
