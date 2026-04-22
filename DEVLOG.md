@@ -4,6 +4,84 @@
 
 ---
 
+## 2026-04-22 · Batch 42 · 热更新 asar gzip 压缩
+
+主题：**热更新下载包从 204.6MB 未压缩 → 65.3MB gzip（-68%，-139MB）**
+
+背景：Batch 41 发布 v1.3.1 时发现上传的 `app.asar` 未压缩 214MB，比 NSIS
+安装包还大。承诺下批做 gzip / bsdiff 优化。这批选 gzip——JS / JSON 占主体，
+典型 3-5× 压缩，Node `zlib` 内置零依赖，实现风险低。bsdiff 留待后续。
+
+**实测**：用真实 `v1.3.1/app.asar`（204.6 MB）跑 `compress-asar`，gzip level 9
+产出 65.3 MB（31.9% 原大小），耗时 8.7s。用户下载从 200 MB 降到 65 MB，
+流量省 2/3。
+
+### 做了什么
+
+1. **`electron/updater.ts` 新增 gzip 支持**
+   - `UpdateInfo` 增加 `compressed: boolean` 字段（additive，旧客户端仍兼容）
+   - `checkForUpdate` asset 优先级：`app.asar.gz` > `app.asar` > `*patch*.asar`
+   - `downloadFile` 加 `decompress: boolean` 入参：URL 以 `.asar.gz` 结尾时
+     response body 经 `zlib.createGunzip()` 流式解压，落盘已是原始 asar
+     - 进度条基于"raw 字节 / content-length"（即压缩字节），正确匹配下载感知
+     - file.on('finish') + 单次 settle flag 避免 gunzip / file / res 多端 error
+       二次 resolve
+   - `apply-update` 不动——落盘是未压缩 asar，swap 流程与之前一致
+
+2. **`scripts/compress-asar.mjs` 新脚本**
+   - 从 4 个候选路径自动找 asar（NSIS win-unpacked / mac .app / pack-portable
+     dist-packager）
+   - `createGzip({ level: 9 })` + `stream.pipeline`（2 行核心 + 60 行自动检测
+     + 打印体积对比 + 给出 `gh release upload` 命令）
+   - npm 脚本 `npm run compress-asar` 直连
+   - 发版流程：`npm run dist` → `npm run compress-asar` → 上传 `.gz` 到 release
+
+3. **preload.ts 类型签名同步**
+   - `checkUpdate` 返回类型补 `compressed: boolean` 字段；TopBar / uiStore 都
+     只读 `asarSize` / `downloadUrl`，不需要改
+
+### 验证
+
+- `npx electron-vite build`：4.91s ok，main bundle 内确认含 `createGunzip`
+  `asar.gz` `compressed:` 三处标记
+- 用 1.27 MB 的真实 pdfjs 产物做 round-trip：gzip level 9 → 0.26 MB (20.2%
+  原大小) → gunzip → sha256 与原文件完全一致 ✅ 证明 updater 落盘字节精确
+- tsc pre-existing 7 个错误（agent.ts / aiThrottle.ts / apprentice.ts /
+  glmApi.ts / library.ts，见 Batch 37）与本改动无关，未新增
+
+### 向后兼容
+
+- 老客户端（v1.3.1 及更早）**只找 `app.asar`**，看到 release 里只有 `.gz` 会
+  走 `downloadUrl=null` 兜底（提示"请从 GitHub Release 下载完整安装包"），
+  不会崩。**过渡策略：发 v1.3.2 时 release 同时上传 `app.asar` + `app.asar.gz`
+  两个资产**，让老客户端升到 v1.3.2 后后续就能吃 gzip。一次完整升级周期
+  （估计 1-2 个版本）后可以只上传 `.gz`
+
+### 已知坑 / 下一步
+
+- ⚠️ 纯 gzip 每次仍要下全量 asar（压完 45-60 MB）。**下下批可考虑 bsdiff
+  delta**（典型 10-50× 再缩，真改动 3 MB 可能只下 1-2 MB）。但 bsdiff 需要：
+  (a) 原端 asar hash 对齐（否则 patch 不能 apply）(b) 带 bspatch 原生二进制或
+  WASM 实现。实装复杂度远高于 gzip，按需再做
+- compress-asar.mjs 现在只跑 level 9；如果发现 CPU 占用太高，可加个 `--level`
+  参数。实测 1.27 MB 用时 0.1s，214 MB 估计 15-20s，一次发版压一次，完全够用
+- **没做**：release pipeline 自动化（比如 GitHub Action 触发 `npm run dist &&
+  npm run compress-asar && gh release upload`）。目前仍是手工三步。留 idle
+
+### 积压（承前批次）
+
+- [ ] 注释 context-aware 锚点（Batch 40 回滚的 filterSupersededMarks 要做正确
+      版本：mark 加 prefix/suffix 约 20 char 上下文，匹配时 fuzzy 对齐，避开
+      "同短语第二次出现"误伤）
+- [ ] OCR 状态图标（Batch 39 遗留）：FileTree entry 右侧加 running / complete /
+      failed 小图标；LibraryEntry.ocrStatus 加 'running' 态
+- [ ] 统一 OCR + 翻译的后台任务状态模型（考虑合 useBackgroundJobsStore 或
+      UI 徽章组件复用）
+- [ ] 听课 / 沉浸阅读 Batch 38 放出来后还没端到端跑
+- [ ] Batch 38 P4 撤回后的"名字旁加 hover 注释"方案（召唤 ⓘ、学徒 ⓘ、Hermes ⓘ）
+
+---
+
 ## 2026-04-22 · Batch 41 · v1.3.1 发布
 
 主题：**注释栏优化 / 阅读位置记录 / 大文件加载优化**

@@ -6,6 +6,7 @@ import { spawn } from 'child_process'
 import os from 'os'
 import https from 'https'
 import http from 'http'
+import zlib from 'zlib'
 
 const GITHUB_REPO = 'lickswan-lab/shijuan'
 const GITHUB_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`
@@ -17,6 +18,7 @@ interface UpdateInfo {
   downloadUrl: string | null
   releaseNotes: string
   asarSize: number
+  compressed: boolean
 }
 
 // Fetch latest release info from GitHub
@@ -83,16 +85,17 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
     const release = await fetchLatestRelease()
     const latestVersion = release.tagName.replace(/^v/, '')
 
-    // Hot-patch updates require an `app.asar` (or patch `*.asar`) asset in the release.
-    // If none is uploaded, downloadUrl stays null and the UI falls back to "please
-    // download the full installer from GitHub Release".
+    // Prefer gzip-compressed asar if available (~3-5x smaller than raw).
+    // Fall back to uncompressed `app.asar` or any `*patch*.asar` variant.
+    const asarGzAsset = release.assets.find(a => a.name === 'app.asar.gz')
     const asarAsset = release.assets.find(a =>
       a.name === 'app.asar' ||
       (a.name.includes('patch') && a.name.endsWith('.asar'))
     )
 
     const hasUpdate = isNewer(latestVersion, currentVersion)
-    const downloadAsset = asarAsset || null
+    const downloadAsset = asarGzAsset || asarAsset || null
+    const compressed = !!asarGzAsset && downloadAsset === asarGzAsset
 
     return {
       hasUpdate,
@@ -101,6 +104,7 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
       downloadUrl: downloadAsset?.browser_download_url || null,
       releaseNotes: release.body,
       asarSize: downloadAsset?.size || 0,
+      compressed,
     }
   } catch (err: any) {
     return {
@@ -110,12 +114,20 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
       downloadUrl: null,
       releaseNotes: '',
       asarSize: 0,
+      compressed: false,
     }
   }
 }
 
-// Download file with progress reporting
-function downloadFile(url: string, destPath: string, onProgress: (pct: number) => void): Promise<void> {
+// Download file with progress reporting. When `decompress` is true, the
+// response body is piped through gunzip on the fly — the file on disk ends up
+// as the decompressed payload, ready to be swapped in place of app.asar.
+function downloadFile(
+  url: string,
+  destPath: string,
+  onProgress: (pct: number) => void,
+  decompress: boolean
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const doRequest = (requestUrl: string, redirectCount: number) => {
       if (redirectCount > 5) { reject(new Error('Too many redirects')); return }
@@ -138,23 +150,37 @@ function downloadFile(url: string, destPath: string, onProgress: (pct: number) =
         const totalSize = parseInt(res.headers['content-length'] || '0', 10)
         let downloaded = 0
         const file = createWriteStream(destPath)
+        let settled = false
+        const fail = (err: Error) => {
+          if (settled) return
+          settled = true
+          file.destroy()
+          reject(err)
+        }
 
+        // Progress is tracked against the raw (possibly gzipped) bytes off the
+        // wire — that matches content-length and gives accurate download %.
         res.on('data', (chunk: Buffer) => {
           downloaded += chunk.length
-          file.write(chunk)
           if (totalSize > 0) {
             onProgress(Math.round((downloaded / totalSize) * 100))
           }
         })
 
-        res.on('end', () => {
-          file.end()
-          file.on('finish', () => resolve())
-        })
+        if (decompress) {
+          const gunzip = zlib.createGunzip()
+          res.pipe(gunzip).pipe(file)
+          gunzip.on('error', fail)
+        } else {
+          res.pipe(file)
+        }
 
-        res.on('error', (err) => {
-          file.destroy()
-          reject(err)
+        res.on('error', fail)
+        file.on('error', fail)
+        file.on('finish', () => {
+          if (settled) return
+          settled = true
+          resolve()
         })
       })
 
@@ -185,10 +211,13 @@ export function registerUpdaterIpc() {
     return await checkForUpdate()
   })
 
-  // Download update
+  // Download update. If the URL points at an `app.asar.gz` asset the response
+  // body is gunzipped in-flight; the file that lands on disk is always the raw
+  // asar ready for the swap step.
   ipcMain.handle('download-update', async (_event, downloadUrl: string) => {
     const asarPath = getAsarPath()
     const tempPath = asarPath + '.update'
+    const decompress = /\.asar\.gz(\?|$)/i.test(downloadUrl)
 
     try {
       // Send progress via the focused window
@@ -197,12 +226,12 @@ export function registerUpdaterIpc() {
         win?.webContents.send('update-progress', pct)
       }
 
-      await downloadFile(downloadUrl, tempPath, sendProgress)
+      await downloadFile(downloadUrl, tempPath, sendProgress, decompress)
 
-      // Verify the file was downloaded
+      // Verify the file was downloaded. After gunzip the file is the raw asar
+      // (typically >100MB), so the 1MB floor still catches HTML error pages.
       const s = await stat(tempPath)
       if (s.size < 1000000) {
-        // File too small, probably an error page
         await unlink(tempPath).catch(() => {})
         return { success: false, error: '下载的文件太小，可能下载失败' }
       }

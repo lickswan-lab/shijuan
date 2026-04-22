@@ -272,6 +272,7 @@ const electronAPI = {
   checkUpdate: (): Promise<{
     hasUpdate: boolean; currentVersion: string; latestVersion: string;
     downloadUrl: string | null; releaseNotes: string; asarSize: number;
+    compressed: boolean;
   }> => ipcRenderer.invoke('check-update'),
   downloadUpdate: (downloadUrl: string): Promise<{ success: boolean; tempPath?: string; error?: string }> =>
     ipcRenderer.invoke('download-update', downloadUrl),

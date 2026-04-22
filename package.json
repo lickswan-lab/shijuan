@@ -10,6 +10,7 @@
     "pack": "electron-vite build && electron-builder --dir",
     "dist": "electron-vite build && electron-builder",
     "pack-portable": "electron-vite build && node scripts/pack-portable.mjs",
+    "compress-asar": "node scripts/compress-asar.mjs",
     "postinstall": "electron-builder install-app-deps"
   },
   "build": {
