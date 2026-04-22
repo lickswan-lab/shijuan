@@ -59,11 +59,18 @@ export interface PdfMeta {
   marks?: TextMark[]       // 划线/加重标记（无历史链）
   createdAt: string
   updatedAt: string
-  // Resume position — persists across app restarts. Different shape per format:
-  //   lastReadScrollTop: px scroll offset in .pdf-scroll-area (PDF / OCR /
-  //     DOCX / HTML / TXT / MD)
-  //   lastReadCfi: epub.js CFI string (EPUB only)
-  // Either may be present; viewers decide which to use based on format.
+  // Resume position — persists across app restarts.
+  //   lastReadScrollTopByMode: per-viewMode scroll offset. PDF view and OCR
+  //     view have different layouts, same scrollTop maps to different
+  //     content; storing per-mode lets each remember its own position.
+  //   lastReadViewMode: which view the user was last in. On reopen the
+  //     viewer switches back so the saved scrollTop applies to the right
+  //     layout.
+  //   lastReadScrollTop (legacy): single value — kept for backwards compat
+  //     with old saves. New saves go to lastReadScrollTopByMode.
+  //   lastReadCfi: epub.js CFI string (EPUB only).
+  lastReadScrollTopByMode?: { pdf?: number; ocr?: number }
+  lastReadViewMode?: 'pdf' | 'ocr'
   lastReadScrollTop?: number
   lastReadCfi?: string
 }

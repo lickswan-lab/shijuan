@@ -1284,12 +1284,6 @@ function EpubViewer({
       const r = renditionRef.current
       const el = containerRef.current
       if (!r) return
-      // Preserve reading position across resize: remember current CFI, call
-      // resize with the actual container dims (explicit values are more
-      // reliable than the no-arg overload on epub.js's part), then jump
-      // back via display(cfi).
-      let cfi: string | undefined
-      try { cfi = r.currentLocation()?.start?.cfi } catch {}
       try {
         if (el?.clientWidth && el?.clientHeight) {
           r.resize(el.clientWidth, el.clientHeight)
@@ -1297,13 +1291,38 @@ function EpubViewer({
           r.resize()
         }
       } catch (err) { console.warn('[epub] resize failed', err) }
-      // epub.js has internal window-resize listeners; firing this nudges any
-      // viewers/managers we didn't touch directly to re-measure their iframes.
+      // Nudge epub.js internal window-resize listeners. overflow-anchor on
+      // the container keeps reading position pinned, so we no longer need
+      // the heavy display(cfi) round-trip.
       try { window.dispatchEvent(new Event('resize')) } catch {}
-      if (cfi) { try { r.display(cfi) } catch {} }
-    }, 350)
+    }, 200)
     return () => clearTimeout(t)
   }, [annotationPanelCollapsed, sidebarCollapsed, rightPanel])
+
+  // Container-width ResizeObserver: catches user dragging the annotation
+  // panel divider (which doesn't change uiStore state, so the effect above
+  // doesn't fire). Long debounce (500ms after movement stops) so the
+  // expensive epub.js resize doesn't run mid-drag.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    let lastW = el.clientWidth
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const ro = new ResizeObserver(() => {
+      const w = el.clientWidth
+      if (Math.abs(w - lastW) < 5) return  // ignore tiny noise
+      lastW = w
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        const r = renditionRef.current
+        if (!r) return
+        try { r.resize(el.clientWidth, el.clientHeight) } catch {}
+        try { window.dispatchEvent(new Event('resize')) } catch {}
+      }, 500)
+    })
+    ro.observe(el)
+    return () => { ro.disconnect(); if (timer) clearTimeout(timer) }
+  }, [])
 
   // Keyboard: ← previous chapter · → next chapter. Attached at the wrapper
   // level so focus inside the iframe doesn't need to bubble for it to work
@@ -2101,6 +2120,14 @@ export default function PdfViewer() {
   const [rereadingReminder, setRereadingReminder] = useState<{ annCount: number; lastTime: string; aiVoice: string | null; aiLoading: boolean } | null>(null)
   const [ocrProgress, setOcrProgress] = useState<{ status: string } | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('pdf')
+  // When a doc opens, switch to whatever view the user was last in (so the
+  // saved scrollTop applies to the right layout). Only auto-switches once
+  // per doc-open — user can still toggle freely.
+  useEffect(() => {
+    const saved = useLibraryStore.getState().currentPdfMeta?.lastReadViewMode
+    if (saved && saved !== viewMode) setViewMode(saved)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentEntry?.id, currentPdfMeta?.entryId])
   const [ocrFullText, setOcrFullText] = useState<string | null>(null)
   const [ocrFilePath, setOcrFilePath] = useState<string | null>(null)
   const [editMode, setEditMode] = useState(false)
@@ -2145,17 +2172,22 @@ export default function PdfViewer() {
     const el = scrollRef.current
     if (!el) return
     let raf: number | null = null
-    // Debounced save of scrollTop to PdfMeta for resume-on-reopen.
+    // Debounced save of scrollTop AND viewMode to PdfMeta for resume-on-reopen.
+    // Stored per-viewMode so PDF view scroll doesn't override OCR view
+    // position (and vice versa). Also remembers which view the user was
+    // last in so the next session opens that view automatically.
     let saveTimer: ReturnType<typeof setTimeout> | null = null
     const scheduleSave = () => {
       if (saveTimer) clearTimeout(saveTimer)
       saveTimer = setTimeout(() => {
         const top = Math.round(el.scrollTop)
-        // Only persist if non-trivial (avoid writing on every initial mount
-        // before anyone scrolled).
-        if (top > 10) {
-          useLibraryStore.getState().updatePdfMeta(meta => ({ ...meta, lastReadScrollTop: top })).catch(() => {})
-        }
+        if (top <= 10) return
+        const modeKey: 'pdf' | 'ocr' = viewMode === 'ocr' ? 'ocr' : 'pdf'
+        useLibraryStore.getState().updatePdfMeta(meta => ({
+          ...meta,
+          lastReadScrollTopByMode: { ...(meta.lastReadScrollTopByMode || {}), [modeKey]: top },
+          lastReadViewMode: modeKey,
+        })).catch(() => {})
       }, 1500)
     }
     const recompute = () => {
@@ -2193,9 +2225,14 @@ export default function PdfViewer() {
       raf = requestAnimationFrame(recompute)
     }
     // Restore last reading position once layout settles (after pages mount).
+    // Prefer per-mode value (new format); fall back to legacy single-value
+    // field for old saves.
     const restoreTimer = setTimeout(() => {
       const meta = useLibraryStore.getState().currentPdfMeta
-      const saved = meta?.lastReadScrollTop
+      const modeKey: 'pdf' | 'ocr' = viewMode === 'ocr' ? 'ocr' : 'pdf'
+      const perMode = meta?.lastReadScrollTopByMode?.[modeKey]
+      const saved = (typeof perMode === 'number' ? perMode : undefined)
+        ?? (meta?.lastReadViewMode === modeKey ? meta?.lastReadScrollTop : undefined)
       if (typeof saved === 'number' && saved > 10 && el.scrollTop < 10) {
         el.scrollTop = saved
       }
@@ -2217,6 +2254,8 @@ export default function PdfViewer() {
       clearTimeout(settleTimer2)
       clearTimeout(restoreTimer)
     }
+    // viewMode is in deps so switching PDF↔OCR rebinds the listener AND
+    // re-runs the restore (each mode reads its own saved scrollTop).
   }, [numPages, viewMode, currentEntry?.id])
 
   // Translate modal — opened either from the floating toolbar ("选中" preset)
