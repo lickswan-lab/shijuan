@@ -59,6 +59,13 @@ export interface PdfMeta {
   marks?: TextMark[]       // 划线/加重标记（无历史链）
   createdAt: string
   updatedAt: string
+  // Resume position — persists across app restarts. Different shape per format:
+  //   lastReadScrollTop: px scroll offset in .pdf-scroll-area (PDF / OCR /
+  //     DOCX / HTML / TXT / MD)
+  //   lastReadCfi: epub.js CFI string (EPUB only)
+  // Either may be present; viewers decide which to use based on format.
+  lastReadScrollTop?: number
+  lastReadCfi?: string
 }
 
 export interface PageData {

@@ -1171,6 +1171,15 @@ function EpubViewer({
         }
       })
 
+      // Debounced save of current CFI so reopening the book resumes here.
+      let cfiSaveTimer: ReturnType<typeof setTimeout> | null = null
+      const scheduleCfiSave = (cfi: string) => {
+        if (cfiSaveTimer) clearTimeout(cfiSaveTimer)
+        cfiSaveTimer = setTimeout(() => {
+          useLibraryStore.getState().updatePdfMeta(meta => ({ ...meta, lastReadCfi: cfi })).catch(() => {})
+        }, 1500)
+      }
+
       // Track reading progress + chapter label + current "page" (= TOC idx)
       // on every relocate.
       //
@@ -1180,6 +1189,9 @@ function EpubViewer({
       // current href against the flat TOC gives the user-visible numbering.
       rendition.on('relocated', (location: any) => {
         try {
+          // Persist CFI for resume-on-reopen
+          const curCfi = location?.start?.cfi
+          if (typeof curCfi === 'string' && curCfi) scheduleCfiSave(curCfi)
           if (location?.start?.percentage !== undefined) {
             setProgressPct(Math.round(location.start.percentage * 100))
           }
@@ -1207,7 +1219,14 @@ function EpubViewer({
         } catch {}
       })
 
-      await rendition.display()
+      // Resume from last saved CFI if any (set by relocated handler last
+      // session). Falls back to opening at the spine's first item.
+      const savedCfi = useLibraryStore.getState().currentPdfMeta?.lastReadCfi
+      try {
+        await rendition.display(savedCfi || undefined)
+      } catch {
+        await rendition.display()
+      }
 
       // Load table of contents for the nav dropdown. book.loaded.navigation
       // resolves once the NCX / nav.xhtml is parsed.
@@ -2126,6 +2145,19 @@ export default function PdfViewer() {
     const el = scrollRef.current
     if (!el) return
     let raf: number | null = null
+    // Debounced save of scrollTop to PdfMeta for resume-on-reopen.
+    let saveTimer: ReturnType<typeof setTimeout> | null = null
+    const scheduleSave = () => {
+      if (saveTimer) clearTimeout(saveTimer)
+      saveTimer = setTimeout(() => {
+        const top = Math.round(el.scrollTop)
+        // Only persist if non-trivial (avoid writing on every initial mount
+        // before anyone scrolled).
+        if (top > 10) {
+          useLibraryStore.getState().updatePdfMeta(meta => ({ ...meta, lastReadScrollTop: top })).catch(() => {})
+        }
+      }, 1500)
+    }
     const recompute = () => {
       raf = null
       const rect = el.getBoundingClientRect()
@@ -2156,9 +2188,18 @@ export default function PdfViewer() {
       useUiStore.getState().setCurrentVisiblePage(virtualPage)
     }
     const onScroll = () => {
+      scheduleSave()
       if (raf !== null) return
       raf = requestAnimationFrame(recompute)
     }
+    // Restore last reading position once layout settles (after pages mount).
+    const restoreTimer = setTimeout(() => {
+      const meta = useLibraryStore.getState().currentPdfMeta
+      const saved = meta?.lastReadScrollTop
+      if (typeof saved === 'number' && saved > 10 && el.scrollTop < 10) {
+        el.scrollTop = saved
+      }
+    }, 600)
     el.addEventListener('scroll', onScroll, { passive: true })
     // Also recompute when the container resizes (panel toggle, etc.) so the
     // midpoint stays accurate.
@@ -2171,8 +2212,10 @@ export default function PdfViewer() {
       el.removeEventListener('scroll', onScroll)
       ro.disconnect()
       if (raf !== null) cancelAnimationFrame(raf)
+      if (saveTimer) clearTimeout(saveTimer)
       clearTimeout(settleTimer)
       clearTimeout(settleTimer2)
+      clearTimeout(restoreTimer)
     }
   }, [numPages, viewMode, currentEntry?.id])
 
