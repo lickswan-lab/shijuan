@@ -2236,17 +2236,28 @@ export default function PdfViewer() {
       ?? (meta0?.lastReadViewMode === modeKey ? meta0?.lastReadScrollTop : undefined)
     const restoreTimers: ReturnType<typeof setTimeout>[] = []
     if (typeof saved === 'number' && saved > 10) {
+      // Hide content during restore so the user doesn't see a "jump from
+      // top". Visibility:hidden keeps layout flowing (so scrollHeight grows
+      // normally) but no flash of unscrolled-content.
+      el.style.visibility = 'hidden'
+      let placed = false
+      const showAgain = () => { el.style.visibility = '' }
       const tryRestore = () => {
-        // Skip if the user has already scrolled away themselves.
-        if (el.scrollTop > 10) return true
+        if (placed) return true
+        if (el.scrollTop > 10) { placed = true; showAgain(); return true }
         const maxScroll = el.scrollHeight - el.clientHeight
         if (maxScroll < saved - 50) return false  // not yet enough content
         el.scrollTop = saved
-        return Math.abs(el.scrollTop - saved) < 30
+        if (Math.abs(el.scrollTop - saved) < 30) {
+          placed = true; showAgain(); return true
+        }
+        return false
       }
-      ;[300, 800, 2000].forEach(delay => {
+      ;[80, 200, 500, 1000, 2000].forEach(delay => {
         restoreTimers.push(setTimeout(() => { tryRestore() }, delay))
       })
+      // Safety net: show after 2.5s even if restore failed (avoid stuck blank)
+      restoreTimers.push(setTimeout(showAgain, 2500))
     }
     el.addEventListener('scroll', onScroll, { passive: true })
     // Also recompute when the container resizes (panel toggle, etc.) so the
