@@ -1135,6 +1135,13 @@ function EpubViewer({
       // After each section renders (or re-renders), cache its Contents object
       // and paint annotation highlights. For scrolled-doc flow, multiple
       // sections may be live at once — getContents() returns them all.
+      // Track min rendered spine idx + scroll height so we can detect prepend
+      // (upward continuous load) and compensate scrollTop. Without this, when
+      // the user scrolls up past a section boundary, epub.js prepends the
+      // previous chapter and scrollTop stays at its small value — so the
+      // content the user was reading jumps downward = "闪回下来".
+      let minRenderedIdx = Infinity
+      let lastContainerHeight = 0
       rendition.on('rendered', (section: any) => {
         try {
           const list = rendition.getContents() as any[]
@@ -1146,6 +1153,18 @@ function EpubViewer({
           if (section?.href) {
             const match = book.navigation?.get(section.href)
             if (match?.label) setCurrentChapter(match.label.trim())
+          }
+          // Prepend compensation
+          const scrollEl = containerRef.current
+          if (scrollEl && typeof section?.index === 'number') {
+            const newHeight = scrollEl.scrollHeight
+            const prepended = section.index < minRenderedIdx && lastContainerHeight > 0
+            if (prepended) {
+              const delta = newHeight - lastContainerHeight
+              if (delta > 0) scrollEl.scrollTop += delta
+            }
+            if (section.index < minRenderedIdx) minRenderedIdx = section.index
+            lastContainerHeight = newHeight
           }
         } catch (err) {
           console.error('[epub] highlight pass failed', err)
