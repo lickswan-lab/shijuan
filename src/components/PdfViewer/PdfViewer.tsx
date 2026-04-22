@@ -2177,13 +2177,16 @@ export default function PdfViewer() {
     // position (and vice versa). Also remembers which view the user was
     // last in so the next session opens that view automatically.
     let saveTimer: ReturnType<typeof setTimeout> | null = null
+    // Capture the entry id at effect-bind time so debounced writes go to the
+    // right doc even if the user already started navigating to a new entry.
+    const lockedEntryId = currentEntry?.id
     const scheduleSave = () => {
       if (saveTimer) clearTimeout(saveTimer)
       saveTimer = setTimeout(() => {
         const top = Math.round(el.scrollTop)
-        if (top <= 10) return
+        if (top <= 10 || !lockedEntryId) return
         const modeKey: 'pdf' | 'ocr' = viewMode === 'ocr' ? 'ocr' : 'pdf'
-        useLibraryStore.getState().updatePdfMeta(meta => ({
+        useLibraryStore.getState().updatePdfMetaByEntryId(lockedEntryId, meta => ({
           ...meta,
           lastReadScrollTopByMode: { ...(meta.lastReadScrollTopByMode || {}), [modeKey]: top },
           lastReadViewMode: modeKey,
@@ -2275,6 +2278,21 @@ export default function PdfViewer() {
       clearTimeout(settleTimer)
       clearTimeout(settleTimer2)
       restoreTimers.forEach(clearTimeout)
+      // FLUSH on unmount / dep change: if the user scrolled within the last
+      // 1.5s and we're now switching docs / view, the debounced save would
+      // be lost. CRITICAL: use updatePdfMetaByEntryId locked to the entry
+      // that was open when this effect fired — otherwise we'd write into
+      // the meta of whatever doc the user just opened (overwriting *its*
+      // saved position with our outgoing-doc scrollTop).
+      const top = Math.round(el.scrollTop)
+      if (top > 10 && lockedEntryId) {
+        const modeKey: 'pdf' | 'ocr' = viewMode === 'ocr' ? 'ocr' : 'pdf'
+        useLibraryStore.getState().updatePdfMetaByEntryId(lockedEntryId, meta => ({
+          ...meta,
+          lastReadScrollTopByMode: { ...(meta.lastReadScrollTopByMode || {}), [modeKey]: top },
+          lastReadViewMode: modeKey,
+        })).catch(() => {})
+      }
     }
     // viewMode is in deps so switching PDF↔OCR rebinds the listener AND
     // re-runs the restore (each mode reads its own saved scrollTop).
