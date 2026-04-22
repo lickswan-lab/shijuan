@@ -552,11 +552,17 @@ function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, onDo
 function PagedAnnotationList({
   annotations,
   renderItem,
+  autoOpenCurrent = true,
 }: {
   annotations: Annotation[]
   renderItem: (ann: Annotation) => React.ReactNode
+  // When true (current doc), the page matching uiStore.currentVisiblePage
+  // opens by default. When false (other doc, where "current page" has no
+  // meaning), all pages start collapsed.
+  autoOpenCurrent?: boolean
 }) {
-  const currentPage = useUiStore(s => s.currentVisiblePage)
+  const storeCurrent = useUiStore(s => s.currentVisiblePage)
+  const currentPage = autoOpenCurrent ? storeCurrent : -1
 
   // Bucket annotations by page number, keep pages sorted ascending.
   const pageMap = new Map<number, Annotation[]>()
@@ -622,6 +628,70 @@ function PagedAnnotationList({
           </div>
         )
       })}
+    </div>
+  )
+}
+
+// Three-level nesting for cross-document annotations:
+//   文献名 (collapsed by default)
+//     → 第 N 页 (PagedAnnotationList, all collapsed since "current page"
+//                has no meaning for a doc the user isn't reading)
+//         → individual annotation cards
+// User has to explicitly expand the literature → page → see annotations,
+// which keeps the "other annotations" section quiet by default.
+function OtherEntryGroup({
+  entryTitle,
+  annotations,
+  renderItem,
+}: {
+  entryId: string
+  entryTitle: string
+  annotations: Annotation[]
+  renderItem: (ann: Annotation) => React.ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div style={{ marginBottom: 6 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+          padding: '8px 10px', border: 'none',
+          background: open ? 'rgba(200,149,108,0.06)' : 'transparent',
+          borderRadius: 4, cursor: 'pointer',
+          fontSize: 12, fontWeight: 600, color: 'var(--accent)',
+          textAlign: 'left',
+        }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
+        onMouseLeave={e => (e.currentTarget.style.background = open ? 'rgba(200,149,108,0.06)' : 'transparent')}
+      >
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
+          style={{ transform: open ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s', flexShrink: 0 }}>
+          <polyline points="9 6 15 12 9 18"/>
+        </svg>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+          style={{ flexShrink: 0, opacity: 0.75 }}>
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+        </svg>
+        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {entryTitle}
+        </span>
+        <span style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 400 }}>
+          {annotations.length} 条
+        </span>
+      </button>
+      {open && (
+        <div style={{ marginTop: 4, marginLeft: 12 }}>
+          <PagedAnnotationList
+            annotations={annotations}
+            renderItem={renderItem}
+            autoOpenCurrent={false}
+          />
+        </div>
+      )}
     </div>
   )
 }
@@ -1691,24 +1761,19 @@ export default function AnnotationPanel() {
                     其他文献的注释 ({q ? `${filteredOtherTotal}/${totalOtherAnnotations}` : totalOtherAnnotations})
                   </div>
                   {filteredOtherAnns.map(other => (
-                    <div key={other.entryId}>
-                      <div style={{
-                        fontSize: 10, color: 'var(--accent)', fontWeight: 600,
-                        padding: '6px 4px 4px', opacity: 0.7,
-                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      }}>
-                        📄 {other.entryTitle}
-                      </div>
-                      {other.annotations.map(ann =>
-                        renderAnnotationItem(
-                          ann,
-                          () => handleJumpToOtherAnnotation(other.entryId, ann.id),
-                          other.entryTitle,
-                          other.entryId,
-                          other.entryTitle,
-                        )
+                    <OtherEntryGroup
+                      key={other.entryId}
+                      entryId={other.entryId}
+                      entryTitle={other.entryTitle}
+                      annotations={other.annotations}
+                      renderItem={(ann) => renderAnnotationItem(
+                        ann,
+                        () => handleJumpToOtherAnnotation(other.entryId, ann.id),
+                        other.entryTitle,
+                        other.entryId,
+                        other.entryTitle,
                       )}
-                    </div>
+                    />
                   ))}
                 </>
               )}
