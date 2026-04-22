@@ -2083,14 +2083,21 @@ export default function PdfViewer() {
       raf = requestAnimationFrame(recompute)
     }
     el.addEventListener('scroll', onScroll, { passive: true })
-    // Initial compute once layout settles
-    const settleTimer = setTimeout(recompute, 150)
+    // Also recompute when the container resizes (panel toggle, etc.) so the
+    // midpoint stays accurate.
+    const ro = new ResizeObserver(() => { if (raf === null) raf = requestAnimationFrame(recompute) })
+    ro.observe(el)
+    // Initial compute — wait a beat so Document's pages have mounted.
+    const settleTimer = setTimeout(recompute, 300)
+    const settleTimer2 = setTimeout(recompute, 1200)  // second pass for slow PDFs
     return () => {
       el.removeEventListener('scroll', onScroll)
+      ro.disconnect()
       if (raf !== null) cancelAnimationFrame(raf)
       clearTimeout(settleTimer)
+      clearTimeout(settleTimer2)
     }
-  }, [])
+  }, [numPages, viewMode, currentEntry?.id])
 
   // Translate modal — opened either from the floating toolbar ("选中" preset)
   // or from the main toolbar ("全文/按页" preset). Modal reads selected text,
