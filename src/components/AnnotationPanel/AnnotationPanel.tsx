@@ -274,26 +274,71 @@ function HistoryEntryItem({
   return (
     <div className={`history-entry ${display.bgClass}`}>
       <div className="history-entry-header">
-        <span style={{ fontSize: 11, fontWeight: 500, color: entry.author === 'user' ? 'var(--accent)' : 'var(--success)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ fontSize: 11, fontWeight: 500, color: entry.author === 'user' ? 'var(--accent)' : 'var(--success)', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
           {entry.author === 'user' ? '我' : (entry.modelLabel || 'AI')}
-          {/* AI job status badge: spinner while running, ✓/! once terminal.
-              Completed / failed badge shows regardless of viewed flag here —
-              this is inside the opened annotation, user is already "looking"
-              at it; the annotation-list badge is the one that auto-clears. */}
+          {/* AI job status chip: icon-in-circle + small label. Status chip
+              uses 1px soft border + faint tinted bg — reads as a proper
+              badge rather than a bare unicode symbol. */}
           {effectiveStatus === 'running' && (
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--accent)', fontWeight: 400, fontSize: 10 }}>
-              <span className="loading-spinner" style={{ width: 10, height: 10 }} />
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 5,
+              padding: '2px 8px 2px 5px', borderRadius: 10,
+              background: 'rgba(74,144,226,0.08)',
+              border: '1px solid rgba(74,144,226,0.3)',
+              color: '#4a90e2', fontWeight: 500, fontSize: 10,
+            }}>
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
+                style={{ animation: 'annList-spin 1.2s linear infinite', transformOrigin: 'center' }}>
+                <path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+              </svg>
               正在生成 · {(job?.streamingText.length || 0)} 字
             </span>
           )}
           {effectiveStatus === 'completed' && entry.author === 'ai' && (
-            <span style={{ color: 'var(--success)', fontSize: 11, fontWeight: 400 }} title="AI 已完成">✓</span>
+            <span title="AI 已完成" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              padding: '2px 7px 2px 4px', borderRadius: 10,
+              background: 'rgba(139,177,116,0.12)',
+              border: '1px solid rgba(139,177,116,0.4)',
+              color: 'var(--success)', fontWeight: 500, fontSize: 10,
+            }}>
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="4 12 10 18 20 6"/>
+              </svg>
+              已完成
+            </span>
           )}
           {effectiveStatus === 'failed' && (
-            <span style={{ color: '#C97070', fontSize: 11, fontWeight: 400 }} title={entry.aiError || '失败'}>! 失败</span>
+            <span title={entry.aiError || '失败'} style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              padding: '2px 7px 2px 4px', borderRadius: 10,
+              background: 'rgba(201,112,112,0.12)',
+              border: '1px solid rgba(201,112,112,0.4)',
+              color: '#C97070', fontWeight: 500, fontSize: 10,
+            }}>
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="9.5"/><line x1="12" y1="7" x2="12" y2="13"/><circle cx="12" cy="16.5" r="0.5" fill="currentColor"/>
+              </svg>
+              失败
+            </span>
           )}
           {effectiveStatus === 'aborted' && (
-            <span style={{ color: '#D4A84B', fontSize: 11, fontWeight: 400 }} title="已取消">⊘ 已取消</span>
+            <span title="已取消" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              padding: '2px 7px 2px 4px', borderRadius: 10,
+              background: 'rgba(212,168,75,0.12)',
+              border: '1px solid rgba(212,168,75,0.4)',
+              color: '#B48A3B', fontWeight: 500, fontSize: 10,
+            }}>
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="9.5"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/>
+              </svg>
+              已取消
+            </span>
           )}
         </span>
         <div className="history-entry-actions">
@@ -1389,22 +1434,44 @@ export default function AnnotationPanel() {
               {sourceLabel}
             </div>
           )}
-          <div style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 28, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 28, display: 'flex', alignItems: 'center', gap: 7 }}>
             {badgeState === 'running' && (
-              <span
-                title="AI 正在生成回答"
-                style={{
-                  flexShrink: 0, width: 9, height: 9, borderRadius: '50%',
-                  background: '#4a90e2', boxShadow: '0 0 0 0 rgba(74,144,226,0.5)',
-                  animation: 'annList-running-pulse 1.4s infinite',
-                }}
-              />
+              <span title="AI 正在生成回答" style={{
+                flexShrink: 0, width: 14, height: 14, borderRadius: '50%',
+                background: 'rgba(74,144,226,0.12)', border: '1px solid rgba(74,144,226,0.4)',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                animation: 'annList-running-pulse 1.8s ease-in-out infinite',
+              }}>
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="#4a90e2"
+                  strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
+                  style={{ animation: 'annList-spin 1.2s linear infinite', transformOrigin: 'center' }}>
+                  <path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+                </svg>
+              </span>
             )}
             {badgeState === 'completed' && (
-              <span title="AI 已完成（点击查看后隐藏）" style={{ flexShrink: 0, color: 'var(--success)', fontSize: 11, fontWeight: 700 }}>✓</span>
+              <span title="AI 已完成（点击查看后隐藏）" style={{
+                flexShrink: 0, width: 14, height: 14, borderRadius: '50%',
+                background: 'rgba(139,177,116,0.14)', border: '1px solid rgba(139,177,116,0.5)',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="var(--success)"
+                  strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="4 12 10 18 20 6"/>
+                </svg>
+              </span>
             )}
             {badgeState === 'failed' && (
-              <span title="AI 回答失败（点击查看后隐藏）" style={{ flexShrink: 0, color: '#C97070', fontSize: 11, fontWeight: 700 }}>!</span>
+              <span title="AI 回答失败（点击查看后隐藏）" style={{
+                flexShrink: 0, width: 14, height: 14, borderRadius: '50%',
+                background: 'rgba(201,112,112,0.14)', border: '1px solid rgba(201,112,112,0.5)',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="#C97070"
+                  strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
+                </svg>
+              </span>
             )}
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
               「{ann.anchor.selectedText.substring(0, 40)}{ann.anchor.selectedText.length > 40 ? '...' : ''}」
@@ -1416,9 +1483,13 @@ export default function AnnotationPanel() {
         </div>
         <style>{`
           @keyframes annList-running-pulse {
-            0% { box-shadow: 0 0 0 0 rgba(74,144,226,0.5); }
-            70% { box-shadow: 0 0 0 5px rgba(74,144,226,0); }
+            0%   { box-shadow: 0 0 0 0 rgba(74,144,226,0.35); }
+            70%  { box-shadow: 0 0 0 4px rgba(74,144,226,0); }
             100% { box-shadow: 0 0 0 0 rgba(74,144,226,0); }
+          }
+          @keyframes annList-spin {
+            from { transform: rotate(0deg); }
+            to   { transform: rotate(360deg); }
           }
         `}</style>
         {/* Delete button only for current entry's annotations */}
