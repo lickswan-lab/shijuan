@@ -2069,14 +2069,20 @@ export default function PdfViewer() {
       let best: { page: number; dist: number } | null = null
       for (const w of wrappers) {
         const r = w.getBoundingClientRect()
-        // pick the wrapper whose center is closest to the scroll-area's vertical midpoint
         const wCenter = r.top + r.height / 2
         const dist = Math.abs(wCenter - mid)
         const pageAttr = w.getAttribute('data-page-number')
         const p = pageAttr ? Number(pageAttr) : 0
         if (p > 0 && (!best || dist < best.dist)) best = { page: p, dist }
       }
-      if (best) useUiStore.getState().setCurrentVisiblePage(best.page)
+      // Dev-only diagnostic: if wrappers is empty, something's wrong with
+      // the selector or the effect wired up too early.
+      if (wrappers.length === 0) {
+        console.log('[currentPage] no .pdf-page-wrapper found under scrollRef', el)
+      }
+      if (best) {
+        useUiStore.getState().setCurrentVisiblePage(best.page)
+      }
     }
     const onScroll = () => {
       if (raf !== null) return
