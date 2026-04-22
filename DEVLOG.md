@@ -4,6 +4,47 @@
 
 ---
 
+## 2026-04-22 · Batch 41 · v1.3.1 发布
+
+主题：**注释栏优化 / 阅读位置记录 / 大文件加载优化**
+
+- AI 任务从 AnnotationPanel local state 提升到 annotationAiJobsStore：
+  提问立即创建 placeholder entry（aiStatus: running），用户可切走，
+  job 后台继续，回来读 store 显示流式内容；终态 entry 落入注释 chain
+- 注释 entry 行内 / annotation 列表头都加 SVG + 暖色 pill 状态徽章
+- 注释列表按 pageNumber 分组（PdfViewer scroll listener 推 currentVisiblePage）
+  - PDF / OCR：[data-page-number] 真实页
+  - EPUB：location.start.href → TOC idx 匹配（实际章节，非 spine）
+  - 其他：scrollTop / clientHeight 虚拟段
+- 其他文献注释三层嵌套（文献 → 页 → 注释），都默认折叠
+- PdfMeta 加 lastReadScrollTopByMode + lastReadViewMode + lastReadCfi
+  - PDF / OCR / DOCX / HTML / TXT / MD 用 scrollTop（按 viewMode 分存）
+  - EPUB 用 cfi
+  - mount 隐藏内容直到 restore 成功（避免肉眼可见跳转）
+  - 三次 retry (80/200/500/1000/2000ms) 解决 OCR 异步 mount 时机问题
+  - cleanup 时 lockedEntryId 强制写到原文献（修"切走再回来停在旧位置"）
+- 大 PDF 懒加载：LazyPdfPage 包 react-pdf Page，IntersectionObserver
+  视口外用 placeholder div，500 页 PDF 不再挂载 500 个 canvas；scale
+  120ms 防抖
+- EPUB 多项修复：
+  - flow scrolled-doc → scrolled + manager continuous（修封面外不显示）
+  - locations.generate(1500) 让 progressPct 工作（修 0% 进度）
+  - overflow-anchor:auto 修向上翻闪回
+  - ResizeObserver 监听 container width，拖注释栏宽度时 reflow
+  - rendition.resize() 显式传 width/height + cfi 恢复
+  - 章节导航栏（上/下章 + 目录下拉）+ ←/→ 键盘
+- HtmlViewer 接排版 props + 划词工具栏桥接
+- AI idle timeout 60s hard → 180s idle（chunk 来就重置）
+- max_tokens 16384（修 GLM 默认 1024 截断）
+- 注释面板按钮防换行 + 编辑框透明化 + 字号加大
+- 标记重叠时新覆盖旧的尝试 → 误删问题回滚（context-aware 待做）
+
+热更新机制 (electron/updater.ts) 已工作：客户端检测 GitHub release →
+下载 app.asar → 替换 → 重启。**已知短板：上传的 asar 未压缩 214MB**，
+比 setup 还大。下批做 gzip / bsdiff 优化。
+
+---
+
 ## 2026-04-21 · Batch 40 · v1.3.0 正式版发布
 
 主题：**翻译功能 / EPUB 格式文本优化**
