@@ -72,6 +72,11 @@ interface UiState {
   darkMode: boolean
   dualPageMode: boolean  // true = dual-page spread in immersive; false = single-page + side annotation
 
+  // Currently visible PDF page — tracked by the PdfViewer IntersectionObserver.
+  // AnnotationPanel reads this to auto-expand the "current page" group in
+  // its page-grouped annotation list.
+  currentVisiblePage: number
+
   // Quick open modal (Ctrl+P)
   showQuickOpen: boolean
 
@@ -116,6 +121,7 @@ interface UiState {
   setImmersiveMode: (on: boolean) => void
   toggleDarkMode: () => void
   setDualPageMode: (on: boolean) => void
+  setCurrentVisiblePage: (page: number) => void
   setShowQuickOpen: (show: boolean) => void
   setSearchHighlight: (h: { query: string; pageNumber?: number; targetEntryId: string } | null) => void
   // Batch OCR
@@ -129,7 +135,7 @@ interface UiState {
   setForceFeatureTour: (on: boolean) => void
 }
 
-export const useUiStore = create<UiState>((set) => ({
+export const useUiStore = create<UiState>((set, get) => ({
   sidebarCollapsed: false,
   annotationPanelCollapsed: true,
   textSelection: null,
@@ -151,6 +157,7 @@ export const useUiStore = create<UiState>((set) => ({
   immersiveMode: false,
   darkMode: (() => { try { return localStorage.getItem('sj-darkMode') === 'true' } catch { return false } })(),
   dualPageMode: (() => { try { const v = localStorage.getItem('sj-dualPageMode'); return v !== null ? v === 'true' : true } catch { return true } })(),
+  currentVisiblePage: 1,
   showQuickOpen: false,
   searchHighlight: null,
   ocrQueue: {
@@ -208,6 +215,10 @@ export const useUiStore = create<UiState>((set) => ({
     }
   },
   setDualPageMode: (on) => { set({ dualPageMode: on }); try { localStorage.setItem('sj-dualPageMode', String(on)) } catch {} },
+  setCurrentVisiblePage: (page) => {
+    const cur = get().currentVisiblePage
+    if (cur !== page) set({ currentVisiblePage: page })
+  },
   setShowQuickOpen: (show) => set({ showQuickOpen: show }),
   setSearchHighlight: (h) => set({ searchHighlight: h }),
   startOcrQueue: (items) => set({

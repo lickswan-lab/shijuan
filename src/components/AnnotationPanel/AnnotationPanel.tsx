@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { v4 as uuid } from 'uuid'
 import Markdown from 'react-markdown'
 import { useLibraryStore } from '../../store/libraryStore'
@@ -538,6 +538,90 @@ function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, onDo
           {m.title}
         </div>
       ))}
+    </div>
+  )
+}
+
+// Page-grouped annotation list: one collapsible section per page number.
+// Only pages with annotations render a section; the section matching the
+// current reader page opens by default, others collapse. User can toggle any.
+//
+// Why useState (not <details>): we need to programmatically re-open when the
+// user scrolls to a different page, while leaving manually-toggled pages
+// alone. A map of pageNumber → boolean gives that granularity.
+function PagedAnnotationList({
+  annotations,
+  renderItem,
+}: {
+  annotations: Annotation[]
+  renderItem: (ann: Annotation) => React.ReactNode
+}) {
+  const currentPage = useUiStore(s => s.currentVisiblePage)
+
+  // Bucket annotations by page number, keep pages sorted ascending.
+  const pageMap = new Map<number, Annotation[]>()
+  for (const a of annotations) {
+    const p = a.anchor.pageNumber || 1
+    if (!pageMap.has(p)) pageMap.set(p, [])
+    pageMap.get(p)!.push(a)
+  }
+  const pages = [...pageMap.keys()].sort((a, b) => a - b)
+
+  // open state: pageNumber → boolean. Defaults keep currentPage open; when
+  // currentPage changes we open the new one without closing whatever the
+  // user had already opened themselves.
+  const [openPages, setOpenPages] = useState<Record<number, boolean>>({})
+  useEffect(() => {
+    setOpenPages(prev => {
+      if (prev[currentPage]) return prev
+      return { ...prev, [currentPage]: true }
+    })
+  }, [currentPage])
+
+  return (
+    <div>
+      {pages.map(page => {
+        const list = pageMap.get(page)!
+        // The current reader page is open by default unless user toggled it shut.
+        const isOpen = openPages[page] ?? (page === currentPage)
+        const isCurrent = page === currentPage
+        return (
+          <div key={page} style={{ marginBottom: 6 }}>
+            <button
+              onClick={() => setOpenPages(prev => ({ ...prev, [page]: !isOpen }))}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                padding: '6px 10px', border: 'none',
+                background: isCurrent ? 'rgba(200,149,108,0.10)' : 'transparent',
+                borderLeft: isCurrent ? '2px solid var(--accent)' : '2px solid transparent',
+                borderRadius: 4, cursor: 'pointer',
+                fontSize: 12, fontWeight: 500, color: 'var(--text)',
+                textAlign: 'left',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
+              onMouseLeave={e => (e.currentTarget.style.background = isCurrent ? 'rgba(200,149,108,0.10)' : 'transparent')}
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
+                style={{ transform: isOpen ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s', flexShrink: 0, color: 'var(--text-muted)' }}>
+                <polyline points="9 6 15 12 9 18"/>
+              </svg>
+              <span>第 {page} 页</span>
+              {isCurrent && (
+                <span style={{ fontSize: 10, color: 'var(--accent)', fontWeight: 400 }}>· 当前</span>
+              )}
+              <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)', fontWeight: 400 }}>
+                {list.length} 条
+              </span>
+            </button>
+            {isOpen && (
+              <div style={{ marginTop: 4, marginLeft: 4 }}>
+                {list.map(ann => <React.Fragment key={ann.id}>{renderItem(ann)}</React.Fragment>)}
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -1580,15 +1664,19 @@ export default function AnnotationPanel() {
               </div>
             )}
             <div style={{ flex: 1, overflow: 'auto', padding: 10 }}>
-              {/* Current entry's annotations */}
+              {/* Current entry's annotations — grouped by page number. Only
+                  pages with at least one annotation render a group. The page
+                  matching uiStore.currentVisiblePage opens by default; all
+                  others collapse. User can click any header to toggle. */}
               {filteredCurrentAnns.length > 0 && (
                 <>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 4px 10px', fontWeight: 500 }}>
                     本文献的注释 ({q ? `${filteredCurrentAnns.length}/${currentPdfMeta!.annotations.length}` : currentPdfMeta!.annotations.length})
                   </div>
-                  {filteredCurrentAnns.map(ann =>
-                    renderAnnotationItem(ann, () => setActiveAnnotation(ann.id))
-                  )}
+                  <PagedAnnotationList
+                    annotations={filteredCurrentAnns}
+                    renderItem={ann => renderAnnotationItem(ann, () => setActiveAnnotation(ann.id))}
+                  />
                 </>
               )}
 

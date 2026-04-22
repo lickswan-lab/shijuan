@@ -1926,16 +1926,30 @@ function LazyPdfPage({
   onVisible: (pageNum: number) => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
+  // Two observers with different purposes:
+  //   wideIo: 400px rootMargin → expand render range (preload nearby pages)
+  //   strictIo: ~50% intersection → report "dominant visible page" to uiStore
+  //             for AnnotationPanel's page-grouped list auto-expansion.
+  // Separating them keeps render preload aggressive while the "visible page"
+  // signal stays tight (doesn't flicker to page+1 just because it peeks in).
   useEffect(() => {
     const el = ref.current
     if (!el) return
-    const io = new IntersectionObserver((entries) => {
+    const wideIo = new IntersectionObserver((entries) => {
       for (const entry of entries) {
         if (entry.isIntersecting) onVisible(pageNum)
       }
-    }, { rootMargin: '400px 0px' })  // preload when 400px away from viewport
-    io.observe(el)
-    return () => io.disconnect()
+    }, { rootMargin: '400px 0px' })
+    wideIo.observe(el)
+    const strictIo = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.intersectionRatio >= 0.5) {
+          useUiStore.getState().setCurrentVisiblePage(pageNum)
+        }
+      }
+    }, { threshold: [0.5] })
+    strictIo.observe(el)
+    return () => { wideIo.disconnect(); strictIo.disconnect() }
   }, [pageNum, onVisible])
 
   // Placeholder keeps roughly the same height as a real page so scrollbar
