@@ -1926,12 +1926,11 @@ function LazyPdfPage({
   onVisible: (pageNum: number) => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
-  // Two observers with different purposes:
-  //   wideIo: 400px rootMargin → expand render range (preload nearby pages)
-  //   strictIo: ~50% intersection → report "dominant visible page" to uiStore
-  //             for AnnotationPanel's page-grouped list auto-expansion.
-  // Separating them keeps render preload aggressive while the "visible page"
-  // signal stays tight (doesn't flicker to page+1 just because it peeks in).
+  // Widen-mounted observer: 400px rootMargin expands the preload range as the
+  // user scrolls close. Note: "current page" for AnnotationPanel's page-group
+  // auto-expansion is tracked by a separate scroll listener on the PdfViewer's
+  // scroll container (see useCurrentVisiblePage hook) because a 0.5-threshold
+  // observer fails for pages taller than the viewport.
   useEffect(() => {
     const el = ref.current
     if (!el) return
@@ -1941,15 +1940,7 @@ function LazyPdfPage({
       }
     }, { rootMargin: '400px 0px' })
     wideIo.observe(el)
-    const strictIo = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        if (entry.intersectionRatio >= 0.5) {
-          useUiStore.getState().setCurrentVisiblePage(pageNum)
-        }
-      }
-    }, { threshold: [0.5] })
-    strictIo.observe(el)
-    return () => { wideIo.disconnect(); strictIo.disconnect() }
+    return () => wideIo.disconnect()
   }, [pageNum, onVisible])
 
   // Placeholder keeps roughly the same height as a real page so scrollbar
@@ -2056,6 +2047,50 @@ export default function PdfViewer() {
   // doubles as a stop control while a stream is in flight.
   const [reviewing, setReviewing] = useState(false)
   const reviewStreamIdRef = useRef<string | null>(null)
+
+  // Track the "dominant visible page" inside the PDF scroll container so the
+  // annotation panel's page-grouped list can auto-expand the right page.
+  //
+  // Why a scroll listener (not IntersectionObserver 0.5-threshold): when a
+  // PDF page is taller than the viewport — the common case for A4 / book
+  // scans on a 1080p screen — intersectionRatio never reaches 0.5 and the
+  // observer never fires. The scroll-listener geometry check picks whichever
+  // page's wrapper contains the viewport's vertical midpoint, which works
+  // regardless of page-vs-viewport size ratio.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    let raf: number | null = null
+    const recompute = () => {
+      raf = null
+      const rect = el.getBoundingClientRect()
+      const mid = rect.top + rect.height / 2
+      const wrappers = el.querySelectorAll<HTMLElement>('.pdf-page-wrapper')
+      let best: { page: number; dist: number } | null = null
+      for (const w of wrappers) {
+        const r = w.getBoundingClientRect()
+        // pick the wrapper whose center is closest to the scroll-area's vertical midpoint
+        const wCenter = r.top + r.height / 2
+        const dist = Math.abs(wCenter - mid)
+        const pageAttr = w.getAttribute('data-page-number')
+        const p = pageAttr ? Number(pageAttr) : 0
+        if (p > 0 && (!best || dist < best.dist)) best = { page: p, dist }
+      }
+      if (best) useUiStore.getState().setCurrentVisiblePage(best.page)
+    }
+    const onScroll = () => {
+      if (raf !== null) return
+      raf = requestAnimationFrame(recompute)
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    // Initial compute once layout settles
+    const settleTimer = setTimeout(recompute, 150)
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      if (raf !== null) cancelAnimationFrame(raf)
+      clearTimeout(settleTimer)
+    }
+  }, [])
 
   // Translate modal — opened either from the floating toolbar ("选中" preset)
   // or from the main toolbar ("全文/按页" preset). Modal reads selected text,
