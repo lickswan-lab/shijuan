@@ -76,6 +76,11 @@ interface UiState {
   // AnnotationPanel reads this to auto-expand the "current page" group in
   // its page-grouped annotation list.
   currentVisiblePage: number
+  // For EPUBs: flat TOC labels indexed by "page number" (which equals TOC idx+1).
+  // Set by EpubViewer when book loads; cleared on doc switch. null for non-EPUB.
+  // AnnotationPanel uses this to label annotation groups with actual chapter
+  // names ("第一章 好吃嘴") instead of a raw spine index.
+  currentDocTocLabels: string[] | null
 
   // Quick open modal (Ctrl+P)
   showQuickOpen: boolean
@@ -122,6 +127,7 @@ interface UiState {
   toggleDarkMode: () => void
   setDualPageMode: (on: boolean) => void
   setCurrentVisiblePage: (page: number) => void
+  setCurrentDocTocLabels: (labels: string[] | null) => void
   setShowQuickOpen: (show: boolean) => void
   setSearchHighlight: (h: { query: string; pageNumber?: number; targetEntryId: string } | null) => void
   // Batch OCR
@@ -158,6 +164,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   darkMode: (() => { try { return localStorage.getItem('sj-darkMode') === 'true' } catch { return false } })(),
   dualPageMode: (() => { try { const v = localStorage.getItem('sj-dualPageMode'); return v !== null ? v === 'true' : true } catch { return true } })(),
   currentVisiblePage: 1,
+  currentDocTocLabels: null,
   showQuickOpen: false,
   searchHighlight: null,
   ocrQueue: {
@@ -219,6 +226,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     const cur = get().currentVisiblePage
     if (cur !== page) set({ currentVisiblePage: page })
   },
+  setCurrentDocTocLabels: (labels) => set({ currentDocTocLabels: labels }),
   setShowQuickOpen: (show) => set({ showQuickOpen: show }),
   setSearchHighlight: (h) => set({ searchHighlight: h }),
   startOcrQueue: (items) => set({

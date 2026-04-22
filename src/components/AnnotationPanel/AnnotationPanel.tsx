@@ -542,6 +542,26 @@ function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, onDo
   )
 }
 
+// Choose a label-formatter for PagedAnnotationList based on file format.
+// EPUB: tocLabels[idx-1] when available (real chapter names from the book's
+//       navigation), fallback to "第 N 章".
+// Continuous (DOCX/HTML/TXT/MD): "第 N 段" since "page" is a virtual slice.
+// PDF / OCR: default "第 N 页".
+function makeLabelFor(absPath: string | undefined, tocLabels: string[] | null): ((p: number) => string) | undefined {
+  if (!absPath) return undefined
+  const ext = (absPath.split('.').pop() || '').toLowerCase()
+  if (ext === 'epub') {
+    return (p: number) => {
+      const label = tocLabels?.[p - 1]
+      return label ? label : `第 ${p} 章`
+    }
+  }
+  if (['docx', 'doc', 'html', 'htm', 'txt', 'md'].includes(ext)) {
+    return (p: number) => `第 ${p} 段`
+  }
+  return undefined
+}
+
 // Page-grouped annotation list: one collapsible section per page number.
 // Only pages with annotations render a section; the section matching the
 // current reader page opens by default, others collapse. User can toggle any.
@@ -708,6 +728,9 @@ export default function AnnotationPanel() {
   // Subscribe to the full AI jobs map so list-item status badges re-render
   // when jobs transition. Cheap — jobs map rarely has more than a few entries.
   const aiJobs = useAnnotationAiJobsStore(s => s.jobs)
+  // Flat TOC labels (EPUB only) — null for other formats. AnnotationPanel
+  // uses these to title page groups with actual chapter names.
+  const tocLabels = useUiStore(s => s.currentDocTocLabels)
   const [panelWidth, _setPanelWidth] = useState(() => { try { const v = localStorage.getItem('sj-annPanelWidth'); return v ? Number(v) : 380 } catch { return 380 } })
   const setPanelWidth = (w: number) => { _setPanelWidth(w); try { localStorage.setItem('sj-annPanelWidth', String(w)) } catch {} }
   const resizingRef = useRef(false)
@@ -1751,13 +1774,7 @@ export default function AnnotationPanel() {
                   <PagedAnnotationList
                     annotations={filteredCurrentAnns}
                     renderItem={ann => renderAnnotationItem(ann, () => setActiveAnnotation(ann.id))}
-                    labelFor={(() => {
-                      const ext = (currentEntry?.absPath.split('.').pop() || '').toLowerCase()
-                      if (ext === 'epub') return (p: number) => `第 ${p} 章`
-                      // Continuous formats: virtual page from scroll position.
-                      if (['docx', 'doc', 'html', 'htm', 'txt', 'md'].includes(ext)) return (p: number) => `第 ${p} 段`
-                      return undefined
-                    })()}
+                    labelFor={makeLabelFor(currentEntry?.absPath, tocLabels)}
                   />
                 </>
               )}

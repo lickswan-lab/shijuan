@@ -844,6 +844,8 @@ function EpubViewer({
   const contentsMapRef = useRef<Map<string, any>>(new Map())
   // Navigation state: TOC (chapter list) + current chapter label for the bar.
   const [toc, setToc] = useState<Array<{ label: string; href: string }>>([])
+  const tocRef = useRef<Array<{ label: string; href: string }>>([])
+  tocRef.current = toc
   const [currentChapter, setCurrentChapter] = useState<string>('')
   const [progressPct, setProgressPct] = useState<number>(0)
   // Track load state so we can show a clear message if the epub failed to load
@@ -1150,19 +1152,35 @@ function EpubViewer({
         }
       })
 
-      // Track reading progress + update chapter label on relocate
+      // Track reading progress + chapter label + current "page" (= TOC idx)
+      // on every relocate.
+      //
+      // Why TOC idx and not spine idx: books have cover / copyright /
+      // preface entries in their spine before "第一章", so using spine
+      // index would label real chapter 1 as "第 4 章" or so. Matching
+      // current href against the flat TOC gives the user-visible numbering.
       rendition.on('relocated', (location: any) => {
         try {
           if (location?.start?.percentage !== undefined) {
             setProgressPct(Math.round(location.start.percentage * 100))
           }
-          const href = location?.start?.href
-          if (href) {
-            const match = book.navigation?.get(href)
-            if (match?.label) setCurrentChapter(match.label.trim())
+          const href: string | undefined = location?.start?.href
+          if (!href) return
+          const match = book.navigation?.get(href)
+          if (match?.label) setCurrentChapter(match.label.trim())
+
+          const flat = tocRef.current
+          // Normalize: drop #fragment so "ch3.xhtml#s2" matches "ch3.xhtml".
+          const cur = href.split('#')[0]
+          let idx = flat.findIndex(t => t.href.split('#')[0] === cur)
+          // Fallback: prefix match (some EPUBs have nested paths that
+          // startWith the TOC base).
+          if (idx < 0) idx = flat.findIndex(t => cur.endsWith(t.href.split('#')[0]) || t.href.endsWith(cur))
+          if (idx >= 0) {
+            useUiStore.getState().setCurrentVisiblePage(idx + 1)
+            return
           }
-          // Feed spine-index+1 as "current page" into uiStore so the
-          // AnnotationPanel's page-grouped list groups annotations by chapter.
+          // Still no match: fall back to spine idx (better than nothing)
           const spineIdx = location?.start?.index
           if (typeof spineIdx === 'number' && spineIdx >= 0) {
             useUiStore.getState().setCurrentVisiblePage(spineIdx + 1)
@@ -1184,7 +1202,13 @@ function EpubViewer({
           }
         }
         walk((nav as any)?.toc || [])
-        if (!destroyed) setToc(flat)
+        if (!destroyed) {
+          setToc(flat)
+          // Publish TOC labels to uiStore so AnnotationPanel's group headers
+          // can say "第一章 好吃嘴" instead of "第 3 章" (which was actually
+          // spine idx 3, i.e. raw position including cover/preface).
+          useUiStore.getState().setCurrentDocTocLabels(flat.map(f => f.label))
+        }
       } catch (err) {
         console.warn('[epub] TOC load failed', err)
       }
@@ -1200,6 +1224,9 @@ function EpubViewer({
       contentsMapRef.current.clear()
       if (renditionRef.current) try { renditionRef.current.destroy() } catch {}
       if (bookRef.current) try { bookRef.current.destroy() } catch {}
+      // Clear TOC labels so AnnotationPanel doesn't show stale chapter names
+      // if the user switches to a PDF/DOCX after an EPUB.
+      useUiStore.getState().setCurrentDocTocLabels(null)
     }
   }, [absPath, onTextSelect])
 
