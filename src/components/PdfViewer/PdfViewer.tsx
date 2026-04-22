@@ -1161,6 +1161,12 @@ function EpubViewer({
             const match = book.navigation?.get(href)
             if (match?.label) setCurrentChapter(match.label.trim())
           }
+          // Feed spine-index+1 as "current page" into uiStore so the
+          // AnnotationPanel's page-grouped list groups annotations by chapter.
+          const spineIdx = location?.start?.index
+          if (typeof spineIdx === 'number' && spineIdx >= 0) {
+            useUiStore.getState().setCurrentVisiblePage(spineIdx + 1)
+          }
         } catch {}
       })
 
@@ -2065,9 +2071,12 @@ export default function PdfViewer() {
       raf = null
       const rect = el.getBoundingClientRect()
       const mid = rect.top + rect.height / 2
-      // [data-page-number] covers both the PDF view's .pdf-page-wrapper and
-      // the OCR view's per-page <div data-page-number={n}>. That way the
-      // "current page" signal works for both formats uniformly.
+      // [data-page-number] covers PDF view's .pdf-page-wrapper and OCR view's
+      // per-page <div data-page-number={n}>. For formats without real pages
+      // (EPUB / DOCX / HTML / TXT / MD) we fall back to a "virtual page" =
+      // floor(scrollTop / viewportHeight) + 1. One virtual page per
+      // viewport-scroll-step is coarse but consistent with how users
+      // navigate continuous documents visually.
       const wrappers = el.querySelectorAll<HTMLElement>('[data-page-number]')
       let best: { page: number; dist: number } | null = null
       for (const w of wrappers) {
@@ -2080,7 +2089,12 @@ export default function PdfViewer() {
       }
       if (best) {
         useUiStore.getState().setCurrentVisiblePage(best.page)
+        return
       }
+      // Fallback: virtual page by scroll position
+      const vh = el.clientHeight || 800
+      const virtualPage = Math.max(1, Math.floor(el.scrollTop / vh) + 1)
+      useUiStore.getState().setCurrentVisiblePage(virtualPage)
     }
     const onScroll = () => {
       if (raf !== null) return
@@ -3694,7 +3708,10 @@ export default function PdfViewer() {
             bgSat={ocrBgSat}
             bgLight={ocrBgLight}
             onToolbarShow={(x, y, text) => {
-              setToolbar({ x, y, text, pageNumber: 1 })
+              // Use current "visible page" from uiStore so new annotations
+              // land in the right chapter/page group even for EPUB / HTML /
+              // DOCX / TXT / MD where there's no real pageNumber.
+              setToolbar({ x, y, text, pageNumber: useUiStore.getState().currentVisiblePage })
               setToolbarMode('main')
             }}
           />
@@ -3719,7 +3736,10 @@ export default function PdfViewer() {
             bgSat={ocrBgSat}
             bgLight={ocrBgLight}
             onToolbarShow={(x, y, text) => {
-              setToolbar({ x, y, text, pageNumber: 1 })
+              // Use current "visible page" from uiStore so new annotations
+              // land in the right chapter/page group even for EPUB / HTML /
+              // DOCX / TXT / MD where there's no real pageNumber.
+              setToolbar({ x, y, text, pageNumber: useUiStore.getState().currentVisiblePage })
               setToolbarMode('main')
             }}
           />

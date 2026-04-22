@@ -553,6 +553,7 @@ function PagedAnnotationList({
   annotations,
   renderItem,
   autoOpenCurrent = true,
+  labelFor,
 }: {
   annotations: Annotation[]
   renderItem: (ann: Annotation) => React.ReactNode
@@ -560,7 +561,11 @@ function PagedAnnotationList({
   // opens by default. When false (other doc, where "current page" has no
   // meaning), all pages start collapsed.
   autoOpenCurrent?: boolean
+  // Label formatter for the group header. Defaults to "第 N 页". EPUB uses
+  // "第 N 章"; other continuous formats can pass their own labeling scheme.
+  labelFor?: (page: number) => string
 }) {
+  const formatLabel = labelFor || ((p: number) => `第 ${p} 页`)
   const storeCurrent = useUiStore(s => s.currentVisiblePage)
   const currentPage = autoOpenCurrent ? storeCurrent : -1
 
@@ -612,7 +617,7 @@ function PagedAnnotationList({
                 style={{ transform: isOpen ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s', flexShrink: 0, color: 'var(--text-muted)' }}>
                 <polyline points="9 6 15 12 9 18"/>
               </svg>
-              <span>第 {page} 页</span>
+              <span>{formatLabel(page)}</span>
               {isCurrent && (
                 <span style={{ fontSize: 10, color: 'var(--accent)', fontWeight: 400 }}>· 当前</span>
               )}
@@ -1746,6 +1751,13 @@ export default function AnnotationPanel() {
                   <PagedAnnotationList
                     annotations={filteredCurrentAnns}
                     renderItem={ann => renderAnnotationItem(ann, () => setActiveAnnotation(ann.id))}
+                    labelFor={(() => {
+                      const ext = (currentEntry?.absPath.split('.').pop() || '').toLowerCase()
+                      if (ext === 'epub') return (p: number) => `第 ${p} 章`
+                      // Continuous formats: virtual page from scroll position.
+                      if (['docx', 'doc', 'html', 'htm', 'txt', 'md'].includes(ext)) return (p: number) => `第 ${p} 段`
+                      return undefined
+                    })()}
                   />
                 </>
               )}
