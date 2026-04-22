@@ -2065,7 +2065,10 @@ export default function PdfViewer() {
       raf = null
       const rect = el.getBoundingClientRect()
       const mid = rect.top + rect.height / 2
-      const wrappers = el.querySelectorAll<HTMLElement>('.pdf-page-wrapper')
+      // [data-page-number] covers both the PDF view's .pdf-page-wrapper and
+      // the OCR view's per-page <div data-page-number={n}>. That way the
+      // "current page" signal works for both formats uniformly.
+      const wrappers = el.querySelectorAll<HTMLElement>('[data-page-number]')
       let best: { page: number; dist: number } | null = null
       for (const w of wrappers) {
         const r = w.getBoundingClientRect()
@@ -2074,11 +2077,6 @@ export default function PdfViewer() {
         const pageAttr = w.getAttribute('data-page-number')
         const p = pageAttr ? Number(pageAttr) : 0
         if (p > 0 && (!best || dist < best.dist)) best = { page: p, dist }
-      }
-      // Dev-only diagnostic: if wrappers is empty, something's wrong with
-      // the selector or the effect wired up too early.
-      if (wrappers.length === 0) {
-        console.log('[currentPage] no .pdf-page-wrapper found under scrollRef', el)
       }
       if (best) {
         useUiStore.getState().setCurrentVisiblePage(best.page)
