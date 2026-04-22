@@ -2224,19 +2224,30 @@ export default function PdfViewer() {
       if (raf !== null) return
       raf = requestAnimationFrame(recompute)
     }
-    // Restore last reading position once layout settles (after pages mount).
-    // Prefer per-mode value (new format); fall back to legacy single-value
-    // field for old saves.
-    const restoreTimer = setTimeout(() => {
-      const meta = useLibraryStore.getState().currentPdfMeta
-      const modeKey: 'pdf' | 'ocr' = viewMode === 'ocr' ? 'ocr' : 'pdf'
-      const perMode = meta?.lastReadScrollTopByMode?.[modeKey]
-      const saved = (typeof perMode === 'number' ? perMode : undefined)
-        ?? (meta?.lastReadViewMode === modeKey ? meta?.lastReadScrollTop : undefined)
-      if (typeof saved === 'number' && saved > 10 && el.scrollTop < 10) {
+    // Restore last reading position. Layout / OCR text mount is async — a
+    // single 600ms attempt can fire before scrollHeight is large enough to
+    // accept the saved value (browser silently clamps to max). We retry at
+    // 300 / 800 / 2000 ms; once we've successfully placed scrollTop within
+    // a small tolerance of the target we stop.
+    const modeKey: 'pdf' | 'ocr' = viewMode === 'ocr' ? 'ocr' : 'pdf'
+    const meta0 = useLibraryStore.getState().currentPdfMeta
+    const perMode = meta0?.lastReadScrollTopByMode?.[modeKey]
+    const saved = (typeof perMode === 'number' ? perMode : undefined)
+      ?? (meta0?.lastReadViewMode === modeKey ? meta0?.lastReadScrollTop : undefined)
+    const restoreTimers: ReturnType<typeof setTimeout>[] = []
+    if (typeof saved === 'number' && saved > 10) {
+      const tryRestore = () => {
+        // Skip if the user has already scrolled away themselves.
+        if (el.scrollTop > 10) return true
+        const maxScroll = el.scrollHeight - el.clientHeight
+        if (maxScroll < saved - 50) return false  // not yet enough content
         el.scrollTop = saved
+        return Math.abs(el.scrollTop - saved) < 30
       }
-    }, 600)
+      ;[300, 800, 2000].forEach(delay => {
+        restoreTimers.push(setTimeout(() => { tryRestore() }, delay))
+      })
+    }
     el.addEventListener('scroll', onScroll, { passive: true })
     // Also recompute when the container resizes (panel toggle, etc.) so the
     // midpoint stays accurate.
@@ -2252,7 +2263,7 @@ export default function PdfViewer() {
       if (saveTimer) clearTimeout(saveTimer)
       clearTimeout(settleTimer)
       clearTimeout(settleTimer2)
-      clearTimeout(restoreTimer)
+      restoreTimers.forEach(clearTimeout)
     }
     // viewMode is in deps so switching PDF↔OCR rebinds the listener AND
     // re-runs the restore (each mode reads its own saved scrollTop).
