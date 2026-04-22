@@ -76,6 +76,12 @@ interface LibraryState {
   updateEntry: (id: string, updates: Partial<LibraryEntry>) => Promise<void>
   savePdfMeta: (meta: PdfMeta) => Promise<void>
   updatePdfMeta: (updater: (meta: PdfMeta) => PdfMeta) => Promise<void>
+  // Update a PdfMeta by explicit entryId — use when the target entry may not
+  // be the currently-open one (e.g. async AI jobs whose user has navigated
+  // away). If id === currentEntry.id we route through updatePdfMeta so the
+  // in-memory state + disk both update; otherwise we load-modify-save on
+  // disk only and leave in-memory alone.
+  updatePdfMetaByEntryId: (targetEntryId: string, updater: (meta: PdfMeta) => PdfMeta) => Promise<void>
 
   // Folder actions
   createFolder: (name: string) => Promise<VirtualFolder>
@@ -510,6 +516,18 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (!currentPdfMeta) return
     const updated = updater({ ...currentPdfMeta })
     await get().savePdfMeta(updated)
+  },
+
+  updatePdfMetaByEntryId: async (targetEntryId: string, updater: (meta: PdfMeta) => PdfMeta) => {
+    const { currentEntry, currentPdfMeta } = get()
+    if (currentEntry?.id === targetEntryId && currentPdfMeta) {
+      await get().updatePdfMeta(updater)
+      return
+    }
+    const meta = await window.electronAPI.loadPdfMeta(targetEntryId)
+    if (!meta) return
+    const updated = updater({ ...meta })
+    await window.electronAPI.savePdfMeta(targetEntryId, updated)
   },
 
   createFolder: async (name: string) => {

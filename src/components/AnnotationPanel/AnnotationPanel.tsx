@@ -5,6 +5,7 @@ import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
 import { openEntryById } from '../../utils/openEntryById'
 import type { Annotation, HistoryEntry, BlockRef } from '../../types/library'
+import { useAnnotationAiJobsStore, jobKey } from '../../store/annotationAiJobsStore'
 
 // ===== Hermes background learning =====
 // Silently appends annotation events to agent memory for behavior learning
@@ -238,14 +239,30 @@ function HistoryEntryItem({
   onEdit,
   onDelete,
   onCite,
+  entryDocId,
+  annotationId,
 }: {
   entry: HistoryEntry
   onEdit: (id: string, content: string) => void
   onDelete: (id: string) => void
   onCite?: (entry: HistoryEntry) => void
+  // Needed to look up the in-flight AI job in the global store.
+  entryDocId?: string
+  annotationId?: string
 }) {
   const [editing, setEditing] = useState(false)
   const [editText, setEditText] = useState(entry.content)
+
+  // Subscribe to the global AI-job store by this entry's key. If a running
+  // job exists, its streamingText takes precedence over entry.content
+  // (persisted content is debounced-lagging by ~200ms behind the live chunks).
+  const job = useAnnotationAiJobsStore(s =>
+    entryDocId && annotationId ? s.jobs[jobKey(entryDocId, annotationId, entry.id)] : undefined
+  )
+
+  const effectiveStatus: HistoryEntry['aiStatus'] = job?.status ?? entry.aiStatus
+  const effectiveContent = (job?.status === 'running' ? job.streamingText : '') || entry.content
+  const isRunning = effectiveStatus === 'running'
 
   const display = getTypeDisplay(entry.type)
 
@@ -257,19 +274,46 @@ function HistoryEntryItem({
   return (
     <div className={`history-entry ${display.bgClass}`}>
       <div className="history-entry-header">
-        <span style={{ fontSize: 11, fontWeight: 500, color: entry.author === 'user' ? 'var(--accent)' : 'var(--success)' }}>
+        <span style={{ fontSize: 11, fontWeight: 500, color: entry.author === 'user' ? 'var(--accent)' : 'var(--success)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           {entry.author === 'user' ? '我' : (entry.modelLabel || 'AI')}
+          {/* AI job status badge: spinner while running, ✓/! once terminal.
+              Completed / failed badge shows regardless of viewed flag here —
+              this is inside the opened annotation, user is already "looking"
+              at it; the annotation-list badge is the one that auto-clears. */}
+          {effectiveStatus === 'running' && (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--accent)', fontWeight: 400, fontSize: 10 }}>
+              <span className="loading-spinner" style={{ width: 10, height: 10 }} />
+              正在生成 · {(job?.streamingText.length || 0)} 字
+            </span>
+          )}
+          {effectiveStatus === 'completed' && entry.author === 'ai' && (
+            <span style={{ color: 'var(--success)', fontSize: 11, fontWeight: 400 }} title="AI 已完成">✓</span>
+          )}
+          {effectiveStatus === 'failed' && (
+            <span style={{ color: '#C97070', fontSize: 11, fontWeight: 400 }} title={entry.aiError || '失败'}>! 失败</span>
+          )}
+          {effectiveStatus === 'aborted' && (
+            <span style={{ color: '#D4A84B', fontSize: 11, fontWeight: 400 }} title="已取消">⊘ 已取消</span>
+          )}
         </span>
         <div className="history-entry-actions">
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             {new Date(entry.createdAt).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
           </span>
-          {!editing && (
+          {!editing && !isRunning && (
             <>
               {onCite && <button className="btn btn-sm btn-icon" onClick={() => onCite(entry)} title="引用此块">引用</button>}
               <button className="btn btn-sm btn-icon" onClick={() => { setEditText(entry.content); setEditing(true) }}>编辑</button>
               <button className="btn btn-sm btn-icon" onClick={() => onDelete(entry.id)}>删除</button>
             </>
+          )}
+          {isRunning && entryDocId && annotationId && (
+            <button
+              className="btn btn-sm btn-icon"
+              onClick={() => useAnnotationAiJobsStore.getState().abortJob(entryDocId, annotationId, entry.id)}
+              title="中止"
+              style={{ color: '#C97070' }}
+            >停止</button>
           )}
         </div>
       </div>
@@ -327,7 +371,18 @@ function HistoryEntryItem({
           </div>
         </div>
       ) : entry.author === 'ai' ? (
-        <div className="annotation-markdown"><Markdown>{entry.content}</Markdown></div>
+        <div className="annotation-markdown">
+          {isRunning && !effectiveContent ? (
+            <div style={{ color: 'var(--text-muted)', fontSize: 12, fontStyle: 'italic' }}>
+              AI 正在思考...（首 token 返回前可能需要几秒）
+            </div>
+          ) : (
+            <>
+              <Markdown>{effectiveContent}</Markdown>
+              {isRunning && <span className="streaming-cursor" />}
+            </>
+          )}
+        </div>
       ) : (
         <div style={{ whiteSpace: 'pre-wrap' }}>{entry.content}</div>
       )}
@@ -446,6 +501,9 @@ function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, onDo
 export default function AnnotationPanel() {
   const { currentEntry, currentPdfMeta, updatePdfMeta, library } = useLibraryStore()
   const { textSelection, activeAnnotationId, setTextSelection, setActiveAnnotation } = useUiStore()
+  // Subscribe to the full AI jobs map so list-item status badges re-render
+  // when jobs transition. Cheap — jobs map rarely has more than a few entries.
+  const aiJobs = useAnnotationAiJobsStore(s => s.jobs)
   const [panelWidth, _setPanelWidth] = useState(() => { try { const v = localStorage.getItem('sj-annPanelWidth'); return v ? Number(v) : 380 } catch { return 380 } })
   const setPanelWidth = (w: number) => { _setPanelWidth(w); try { localStorage.setItem('sj-annPanelWidth', String(w)) } catch {} }
   const resizingRef = useRef(false)
@@ -558,6 +616,36 @@ export default function AnnotationPanel() {
       )
     : null
   const displayAnnotation = activeAnnotation || selectionAnnotation
+
+  // When the user opens an annotation, mark any terminal-state AI entries
+  // as viewed — this clears the list-item badge (✓ / !) so it doesn't nag
+  // forever. Running entries are skipped so the live spinner still shows
+  // in the list until the job completes.
+  useEffect(() => {
+    if (!displayAnnotation || !currentEntry) return
+    const needsMark = displayAnnotation.historyChain.filter(h =>
+      h.author === 'ai'
+      && h.aiStatus
+      && h.aiStatus !== 'running'
+      && !h.aiViewed
+    )
+    if (needsMark.length === 0) return
+    const ids = new Set(needsMark.map(h => h.id))
+    const annId = displayAnnotation.id
+    void updatePdfMeta(meta => ({
+      ...meta,
+      annotations: meta.annotations.map(a =>
+        a.id === annId
+          ? { ...a, historyChain: a.historyChain.map(h => ids.has(h.id) ? { ...h, aiViewed: true } : h) }
+          : a
+      ),
+    }))
+    // Also clear the in-memory job slot so the store doesn't resurrect it.
+    for (const h of needsMark) {
+      useAnnotationAiJobsStore.getState().markJobViewed(currentEntry.id, annId, h.id)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayAnnotation?.id, displayAnnotation?.historyChain.length, currentEntry?.id])
 
   // Detect if user selected NEW text while viewing an existing annotation
   const hasNewContext = !!(
@@ -970,58 +1058,19 @@ export default function AnnotationPanel() {
     }
     messages.push({ role: 'user', content: text.trim() })
 
-    const streamId = uuid()
-    let fullText = ''
-
-    // Idle timeout: reset every time a chunk arrives. A long-running task
-    // (e.g. 梳理几页脉络) can legitimately take minutes to finish — we don't
-    // want a hard 60s cap, but we DO want to fail fast if the stream stalls.
-    // 180s of complete silence = treat as dead connection.
-    const IDLE_LIMIT_MS = 180_000
-    let idleTimer: ReturnType<typeof setTimeout> | null = null
-    let resolveTimeout: ((v: { success: false; error: string }) => void) | null = null
-    const armIdle = () => {
-      if (idleTimer) clearTimeout(idleTimer)
-      idleTimer = setTimeout(() => {
-        resolveTimeout?.({ success: false, error: 'AI 超时（180 秒未收到新内容，可能网络卡住）' })
-      }, IDLE_LIMIT_MS)
-    }
-
-    const cleanupChunk = window.electronAPI.onAiStreamChunk((sid, chunk) => {
-      if (sid !== streamId) return
-      fullText += chunk
-      setStreamingText(fullText)
-      armIdle()  // reset countdown on any progress
-    })
-    armIdle()
-
-    try {
-      const result = await Promise.race([
-        window.electronAPI.aiChatStream(streamId, aiModel, messages),
-        new Promise<{ success: false; error: string }>((resolve) => { resolveTimeout = resolve }),
-      ])
-      if (!result.success) fullText = fullText || `错误：${result.error}`
-    } catch (err: any) {
-      fullText = fullText || `错误：${err.message}`
-    } finally {
-      if (idleTimer) clearTimeout(idleTimer)
-      cleanupChunk()
-    }
-
-    setStreamingText('')
-
-    // Feed to Hermes: record AI dialogue
-    const entryTitle = useLibraryStore.getState().currentEntry?.title || '未知文献'
-    feedHermes(`在「${entryTitle}」中向AI提问：${text.trim().slice(0, 50)}`)
-
-    const entry: HistoryEntry = {
-      id: uuid(),
+    // === Build placeholder entry and persist BEFORE starting AI stream ===
+    // User can now navigate away; the entry stays in the annotation's
+    // historyChain with aiStatus='running' and updates as chunks arrive.
+    const historyEntryId = uuid()
+    const placeholder: HistoryEntry = {
+      id: historyEntryId,
       type: 'ai_qa',
-      content: fullText,
+      content: '',
       userQuery: text.trim(),
       author: 'ai',
       modelLabel: getModelLabel(aiModel),
       createdAt: new Date().toISOString(),
+      aiStatus: 'running',
       ...(newContextText ? { contextText: newContextText } : {}),
     }
 
@@ -1029,14 +1078,19 @@ export default function AnnotationPanel() {
       ? currentPdfMeta?.annotations.find(a => a.anchor.selectedText === textSelection.text)
       : null)
 
+    const currentEntryId = useLibraryStore.getState().currentEntry?.id
+    if (!currentEntryId) { setAiLoading(false); return }
+
+    let targetAnnotationId: string
     if (existingAnn) {
+      targetAnnotationId = existingAnn.id
       await updatePdfMeta(meta => ({
         ...meta,
         annotations: meta.annotations.map(a =>
           a.id === existingAnn.id
-            ? { ...a, historyChain: [...a.historyChain, entry], updatedAt: new Date().toISOString() }
+            ? { ...a, historyChain: [...a.historyChain, placeholder], updatedAt: new Date().toISOString() }
             : a
-        )
+        ),
       }))
       if (!activeAnnotationId) setActiveAnnotation(existingAnn.id)
     } else if (textSelection) {
@@ -1048,20 +1102,63 @@ export default function AnnotationPanel() {
           endOffset: textSelection.endOffset,
           selectedText: textSelection.text,
         },
-        historyChain: [entry],
+        historyChain: [placeholder],
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       }
+      targetAnnotationId = newAnnotation.id
       await updatePdfMeta(meta => ({
         ...meta,
-        annotations: [...meta.annotations, newAnnotation]
+        annotations: [...meta.annotations, newAnnotation],
       }))
       setActiveAnnotation(newAnnotation.id)
+    } else {
+      setAiLoading(false)
+      return
     }
 
+    // Clear input immediately + release the submit button. The AI job runs
+    // in the background via the store; the placeholder entry shows the
+    // spinner + streaming text, and the annotation list gains a running
+    // badge. User can navigate wherever they want.
     setNoteInput('')
     setAiLoading(false)
-  }, [displayAnnotation, textSelection, newContextText, aiModel, updatePdfMeta, setActiveAnnotation])
+    setStreamingText('')
+
+    // Feed to Hermes now (not waiting for completion — the submission
+    // itself is the Hermes-observable event).
+    const entryTitle = useLibraryStore.getState().currentEntry?.title || '未知文献'
+    feedHermes(`在「${entryTitle}」中向AI提问：${text.trim().slice(0, 50)}`)
+
+    // Launch the background job. The store writes chunks back into the
+    // placeholder entry via updatePdfMetaByEntryId (works even if user
+    // switches to a different literature).
+    const updateStore = useLibraryStore.getState()
+    useAnnotationAiJobsStore.getState().startJob({
+      entryId: currentEntryId,
+      annotationId: targetAnnotationId,
+      historyEntryId,
+      model: aiModel,
+      modelLabel: getModelLabel(aiModel),
+      messages,
+      updater: async (eid, aid, hid, patch) => {
+        await updateStore.updatePdfMetaByEntryId(eid, (meta) => ({
+          ...meta,
+          annotations: meta.annotations.map(a =>
+            a.id === aid
+              ? {
+                  ...a,
+                  historyChain: a.historyChain.map(h =>
+                    h.id === hid ? { ...h, ...patch } : h
+                  ),
+                  updatedAt: new Date().toISOString(),
+                }
+              : a
+          ),
+        }))
+      },
+    })
+  }, [displayAnnotation, textSelection, newContextText, aiModel, activeAnnotationId, currentPdfMeta, updatePdfMeta, setActiveAnnotation])
 
   // Convenience wrapper
   const handleAskQuestion = useCallback(() => {
@@ -1236,6 +1333,28 @@ export default function AnnotationPanel() {
   const renderAnnotationItem = (ann: Annotation, onClick: () => void, sourceLabel?: string, entryId?: string, entryTitle?: string) => {
     const lastEntry = ann.historyChain[ann.historyChain.length - 1]
     const display = lastEntry ? getTypeDisplay(lastEntry.type) : null
+    // Aggregate AI-job status for this annotation: any running job wins;
+    // else show failed (unviewed); else completed (unviewed); else nothing.
+    // Runtime store status takes precedence over persisted entry.aiStatus
+    // (store may be slightly ahead of the debounced disk write).
+    const docIdForBadge = entryId || currentEntry?.id
+    let badgeState: 'running' | 'completed' | 'failed' | null = null
+    if (docIdForBadge) {
+      for (const h of ann.historyChain) {
+        if (h.author !== 'ai') continue
+        const k = jobKey(docIdForBadge, ann.id, h.id)
+        const st = aiJobs[k]?.status ?? h.aiStatus
+        if (st === 'running') { badgeState = 'running'; break }
+      }
+      if (!badgeState) {
+        for (const h of ann.historyChain) {
+          if (h.author !== 'ai') continue
+          const st = h.aiStatus
+          if (st === 'failed' && !h.aiViewed) { badgeState = 'failed'; break }
+          if (st === 'completed' && !h.aiViewed && badgeState !== 'failed') badgeState = 'completed'
+        }
+      }
+    }
     return (
       <div
         key={ann.id}
@@ -1270,13 +1389,38 @@ export default function AnnotationPanel() {
               {sourceLabel}
             </div>
           )}
-          <div style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 28 }}>
-            「{ann.anchor.selectedText.substring(0, 40)}{ann.anchor.selectedText.length > 40 ? '...' : ''}」
+          <div style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 28, display: 'flex', alignItems: 'center', gap: 6 }}>
+            {badgeState === 'running' && (
+              <span
+                title="AI 正在生成回答"
+                style={{
+                  flexShrink: 0, width: 9, height: 9, borderRadius: '50%',
+                  background: '#4a90e2', boxShadow: '0 0 0 0 rgba(74,144,226,0.5)',
+                  animation: 'annList-running-pulse 1.4s infinite',
+                }}
+              />
+            )}
+            {badgeState === 'completed' && (
+              <span title="AI 已完成（点击查看后隐藏）" style={{ flexShrink: 0, color: 'var(--success)', fontSize: 11, fontWeight: 700 }}>✓</span>
+            )}
+            {badgeState === 'failed' && (
+              <span title="AI 回答失败（点击查看后隐藏）" style={{ flexShrink: 0, color: '#C97070', fontSize: 11, fontWeight: 700 }}>!</span>
+            )}
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+              「{ann.anchor.selectedText.substring(0, 40)}{ann.anchor.selectedText.length > 40 ? '...' : ''}」
+            </span>
           </div>
           <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
             p.{ann.anchor.pageNumber} · {ann.historyChain.length} 条记录
           </div>
         </div>
+        <style>{`
+          @keyframes annList-running-pulse {
+            0% { box-shadow: 0 0 0 0 rgba(74,144,226,0.5); }
+            70% { box-shadow: 0 0 0 5px rgba(74,144,226,0); }
+            100% { box-shadow: 0 0 0 0 rgba(74,144,226,0); }
+          }
+        `}</style>
         {/* Delete button only for current entry's annotations */}
         {!sourceLabel && (
           <div className="annotation-list-actions" style={{
@@ -1509,39 +1653,14 @@ export default function AnnotationPanel() {
             onEdit={handleEdit}
             onDelete={handleDelete}
             onCite={displayAnnotation ? (he) => setCitingEntry({ historyEntry: he, annotation: displayAnnotation }) : undefined}
+            entryDocId={currentEntry?.id}
+            annotationId={displayAnnotation?.id}
           />
         ))}
-        {/* AI streaming / loading indicator */}
-        {aiLoading && (
-          <div className="history-entry ai-response">
-            {streamingText ? (
-              <>
-                <div style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  fontSize: 10, color: 'var(--accent)', fontWeight: 500,
-                  marginBottom: 6, letterSpacing: 0.3,
-                }}>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span className="loading-spinner" style={{ width: 10, height: 10 }} />
-                    正在生成
-                  </span>
-                  <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>
-                    {streamingText.length} 字
-                  </span>
-                </div>
-                <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', whiteSpace: 'pre-wrap' }}>
-                  {streamingText}
-                  <span className="streaming-cursor" />
-                </div>
-              </>
-            ) : (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-muted)' }}>
-                <span className="loading-spinner" />
-                AI 正在思考...（首 token 返回前可能需要几秒）
-              </div>
-            )}
-          </div>
-        )}
+        {/* Note: per-entry AI streaming lives INSIDE the entry block now
+            (via store subscription). The legacy "floating AI streaming
+            indicator" at the bottom of the chain was removed to avoid the
+            "ghost indicator after navigating away" bug. */}
         <div ref={historyEndRef} />
 
         {/* Block cite dropdown */}

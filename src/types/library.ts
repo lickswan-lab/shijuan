@@ -114,6 +114,16 @@ export interface HistoryEntry {
   editedAt?: string
   originalContent?: string
   createdAt: string
+  // Async AI job status — only relevant for AI-authored entries (ai_qa /
+  // ai_persona / ai_interpretation). Persisted to library.json so that
+  // closing and reopening the app preserves "running / failed" state.
+  // undefined = legacy entries (treat as completed).
+  aiStatus?: 'running' | 'completed' | 'failed' | 'aborted'
+  aiError?: string
+  // Set true once the user has viewed the terminal-state badge on the
+  // annotation list. Used to auto-hide "completed ✓" / "failed !" markers
+  // after the user has seen them (same pattern as translation badges).
+  aiViewed?: boolean
 }
 
 // ===== BlockRef: address for any piece of thinking =====
