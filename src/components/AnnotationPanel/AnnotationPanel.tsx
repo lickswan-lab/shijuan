@@ -283,9 +283,9 @@ function HistoryEntryItem({
             <span style={{
               display: 'inline-flex', alignItems: 'center', gap: 5,
               padding: '2px 8px 2px 5px', borderRadius: 10,
-              background: 'rgba(74,144,226,0.08)',
-              border: '1px solid rgba(74,144,226,0.3)',
-              color: '#4a90e2', fontWeight: 500, fontSize: 10,
+              background: 'rgba(200,149,108,0.10)',
+              border: '1px solid rgba(200,149,108,0.4)',
+              color: 'var(--accent)', fontWeight: 500, fontSize: 10,
             }}>
               <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                 strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
@@ -1438,11 +1438,11 @@ export default function AnnotationPanel() {
             {badgeState === 'running' && (
               <span title="AI 正在生成回答" style={{
                 flexShrink: 0, width: 14, height: 14, borderRadius: '50%',
-                background: 'rgba(74,144,226,0.12)', border: '1px solid rgba(74,144,226,0.4)',
+                background: 'rgba(200,149,108,0.14)', border: '1px solid rgba(200,149,108,0.5)',
                 display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                 animation: 'annList-running-pulse 1.8s ease-in-out infinite',
               }}>
-                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="#4a90e2"
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="var(--accent)"
                   strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
                   style={{ animation: 'annList-spin 1.2s linear infinite', transformOrigin: 'center' }}>
                   <path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
@@ -1483,9 +1483,9 @@ export default function AnnotationPanel() {
         </div>
         <style>{`
           @keyframes annList-running-pulse {
-            0%   { box-shadow: 0 0 0 0 rgba(74,144,226,0.35); }
-            70%  { box-shadow: 0 0 0 4px rgba(74,144,226,0); }
-            100% { box-shadow: 0 0 0 0 rgba(74,144,226,0); }
+            0%   { box-shadow: 0 0 0 0 rgba(200,149,108,0.35); }
+            70%  { box-shadow: 0 0 0 4px rgba(200,149,108,0); }
+            100% { box-shadow: 0 0 0 0 rgba(200,149,108,0); }
           }
           @keyframes annList-spin {
             from { transform: rotate(0deg); }
