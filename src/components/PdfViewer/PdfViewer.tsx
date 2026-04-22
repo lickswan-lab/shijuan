@@ -1263,13 +1263,24 @@ function EpubViewer({
   useEffect(() => {
     const t = setTimeout(() => {
       const r = renditionRef.current
+      const el = containerRef.current
       if (!r) return
-      // Preserve reading position across resize. Without this, resize resets
-      // the scroll/currentLocation and the user "jumps back" when they scroll
-      // up past the newly reflowed section.
+      // Preserve reading position across resize: remember current CFI, call
+      // resize with the actual container dims (explicit values are more
+      // reliable than the no-arg overload on epub.js's part), then jump
+      // back via display(cfi).
       let cfi: string | undefined
       try { cfi = r.currentLocation()?.start?.cfi } catch {}
-      try { r.resize() } catch (err) { console.warn('[epub] resize failed', err) }
+      try {
+        if (el?.clientWidth && el?.clientHeight) {
+          r.resize(el.clientWidth, el.clientHeight)
+        } else {
+          r.resize()
+        }
+      } catch (err) { console.warn('[epub] resize failed', err) }
+      // epub.js has internal window-resize listeners; firing this nudges any
+      // viewers/managers we didn't touch directly to re-measure their iframes.
+      try { window.dispatchEvent(new Event('resize')) } catch {}
       if (cfi) { try { r.display(cfi) } catch {} }
     }, 350)
     return () => clearTimeout(t)
@@ -1331,8 +1342,10 @@ function EpubViewer({
         </span>
         <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{progressPct}%</span>
       </div>
-      {/* Book content */}
-      <div ref={containerRef} style={{ flex: 1, width: '100%', overflow: 'auto', background: 'var(--bg)' }} />
+      {/* Book content. overflow-anchor:auto lets the browser keep the
+          currently-visible content pinned when epub.js prepends a previous
+          section above (fixes "向上翻闪回下来"). */}
+      <div ref={containerRef} style={{ flex: 1, width: '100%', overflow: 'auto', overflowAnchor: 'auto', background: 'var(--bg)' }} />
       {/* Mark remove menu — floats at translated cursor position */}
       {markMenu && (
         <div style={{
