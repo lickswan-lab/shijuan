@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-04-28 · Batch 52 · 夜间值守 Round 8 #9 · UX · HistorySessions 乐观缓存
+
+主题：**UX · _UX_AUDIT_TODO P2-10 落地 — 切回 persona detail 不再看到 '加载中…' 闪烁**
+
+### 修了什么(R8#9)
+
+`src/components/Agent/PersonasTab.tsx HistorySessionsSection`:
+
+1. 新增模块级 `historySessionsCache: Map<personaId, SummonSessionSummary[]>`
+2. 初始 state 直接读 cache(同步),没 cache 才 `loading=true`
+3. useEffect 里:有 cache → 后台静默刷新(loading 保持 false 不闪);无 cache → 走原来的 loading 路径
+4. 删除时清掉对应 personaId 的 cache 后增 refreshTick → 下次 effect 重 fetch 拿到最新
+
+### 触发场景
+
+用户工作流是"在多个 persona 之间来回切看历史对话"。每次切回都看到一段加载 placeholder,体验割裂。改完后:
+- 第一次进 detail:正常 loading → list 渲染 → cache 写入
+- 第二次重进 detail:list 立刻渲染(从 cache),后台 fetch 一次刷新最新
+
+边缘 case: 在 summon 里跑了一段对话回到 detail → cache 是 stale,但 useEffect 重 fetch 会在一帧后 setSessions 拿到最新。从用户视角是 "瞬间看到旧 list → 看到新增的对话",比 "加载中… → list" 顺滑。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 34.67s 通过
+
+### 后续
+
+下轮 Round 8 #10 必须 Bug 或 PERF。R2 观察项剩 1 条:App.tsx:301 setTimeout(openEntry,300) 清理。值得做完彻底清空 R1+R2 观察项欠款。
+
+---
+
 ## 2026-04-28 · Batch 51 · 夜间值守 Round 8 #8 · Bug · localStorage NaN 防御 sweep
 
 主题：**bug fix · R2 观察项第 4 条延伸 — 全 app localStorage 数字读 NaN 防御**

@@ -519,6 +519,11 @@ function SourcesSection({ refs }: { refs: string[] }) {
 // History sessions (Pain point #1) — list past summon conversations for this
 // persona. Clicking one resumes that conversation.
 // ============================================================================
+// UX-R8#9 · P2-10 · 模块级乐观 cache,免每次重进 detail 看到 "加载中…" 闪烁。
+// SWR 风格:有 cache → 立刻渲染 + 后台 revalidate;无 cache → 显示 loading。
+// 删除 / 用户后续 invalidate 时清掉这个 personaId 的 entry。
+const historySessionsCache = new Map<string, SummonSessionSummary[]>()
+
 function HistorySessionsSection({
   personaId, onOpenSession,
 }: {
@@ -527,19 +532,23 @@ function HistorySessionsSection({
 }) {
   // Batch 43: 替换 window.confirm
   const { ask: askConfirm, dialog: confirmDialog } = useConfirmDialog()
-  const [sessions, setSessions] = useState<SummonSessionSummary[]>([])
-  const [loading, setLoading] = useState(true)
+  // UX-R8#9 · 初始 state 直接读 cache(同步),没 cache 才走 loading
+  const cachedInitial = historySessionsCache.get(personaId)
+  const [sessions, setSessions] = useState<SummonSessionSummary[]>(cachedInitial || [])
+  const [loading, setLoading] = useState(!cachedInitial)
   const [refreshTick, setRefreshTick] = useState(0)
 
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       try {
-        setLoading(true)
+        // 没 cache 时显示 loading;有 cache 静默后台刷新,UI 不闪
+        if (!historySessionsCache.has(personaId)) setLoading(true)
         const r = await window.electronAPI.summonSessionList?.(personaId)
         if (cancelled) return
-        if (r?.success) setSessions(r.sessions || [])
-        else setSessions([])
+        const list = r?.success ? (r.sessions || []) : []
+        setSessions(list)
+        historySessionsCache.set(personaId, list)
       } finally { if (!cancelled) setLoading(false) }
     })()
     return () => { cancelled = true }
@@ -554,6 +563,8 @@ function HistorySessionsSection({
       danger: true,
       onConfirm: async () => {
         await window.electronAPI.summonSessionDelete?.(personaId, sessionId)
+        // UX-R8#9 · 删完清 cache,下次 effect 重 fetch 拿到最新
+        historySessionsCache.delete(personaId)
         setRefreshTick(t => t + 1)
       },
     })

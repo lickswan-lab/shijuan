@@ -65,10 +65,9 @@ personaList 为空时没有引导按钮，用户要手动切到 Agent 面板召�
 - 位置：`AnnotationPanel.tsx` 召唤按钮附近
 - 修法建议：空态时在 popover 里放 "去 Agent 面板导入" 按钮，点击触发 `useUiStore().setRightPanel('agent')` + 可能还要一个 tab state 让 AgentPanel 自动打开 personas tab。
 
-### P2-10 · HistorySessionsSection 每次打开 detail 都 fetch，没有乐观缓存
+### ~~P2-10 · HistorySessionsSection 每次打开 detail 都 fetch，没有乐观缓存~~ → **R8#9 已修**
 切回 detail 会看到 "加载中…" 闪烁。
-- 位置：`PersonasTab.tsx:485-499`
-- 修法建议：用 SWR 风格，上次数据先渲染，后台 revalidate。
+→ 模块级 `historySessionsCache: Map<personaId, SummonSessionSummary[]>` SWR 风格。有 cache 立即渲染 + 后台 revalidate(loading=false 不闪);无 cache 走原来的 loading 路径。删除时清该 personaId 的 cache,下次 effect 重 fetch。
 
 ---
 
