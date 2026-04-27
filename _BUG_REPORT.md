@@ -491,6 +491,23 @@
 
 **注释标签**：`// BUG-FIX R8#1 · char class 里 ~~ 是重复(R1 观察项),清成 ~`
 
+### BUG-FIX R8#12 · QuickOpen / BatchOcr · 静态 sweep · setTimeout 泄漏 + IPC sub 抖动
+**新扫区**：QuickOpen / BatchOcr / common 三个目录(R1-R7 没扫过)。
+
+**A · src/components/QuickOpen/QuickOpenModal.tsx:55 · setTimeout(focus) 无 cleanup**
+- 30ms 后调 `inputRef.current?.focus()`,但 modal 在 30ms 内 unmount(狂按 toggle 快捷键)会
+  fire 到已卸载 input,React 警告 + orphaned timer。
+- 修:`const t = setTimeout(...)` + `return () => clearTimeout(t)` cleanup。
+
+**B · src/components/BatchOcr/BatchOcrRunner.tsx:28-43 · onOcrProgress 订阅每次 advance 都 resub**
+- 原 deps `[ocrQueue.items, ocrQueue.currentIndex, setOcrChunkProgress]` → 每个 OCR PDF
+  完成时 advance,items / currentIndex 变 → effect cleanup unsub + 重 sub。
+  大批量(数十文件)时 IPC 来回浪费,事件桥也有几毫秒延迟可能错过 chunk-progress。
+- 修:`ocrQueueRef = useRef(ocrQueue); ocrQueueRef.current = ocrQueue` 模式。effect deps
+  仅 `[setOcrChunkProgress]`,callback 通过 ref 访问最新 ocrQueue。subscribe 一次到底。
+
+**注释标签**：`// BUG-FIX R8#12 · ...`
+
 ### BUG-FIX R8#10 · src/App.tsx · auto-restore setTimeout cleanup + race 防御
 **原问题**：R2 观察项第 2 条。`initLibrary().then(...)` 里 `setTimeout(openEntry, 300)` 无 timer handle 跟踪 + 不防 race:
 1. 组件 unmount(Ctrl+Shift+R reload 之间瞬间)→ orphaned timer

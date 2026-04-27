@@ -25,22 +25,26 @@ export default function BatchOcrRunner() {
 
   // Subscribe to per-chunk OCR progress from the main process. Filtered by entryId
   // so stale events from a previously-running OCR don't bleed in.
+  // BUG-FIX R8#12 · 原 deps 包含 ocrQueue.items / currentIndex → 每次 advance 都
+  //   unsub + resub onOcrProgress(每 PDF 一次,大批量时浪费)。改成 ref 模式:
+  //   subscribe 一次,callback 内通过 ref 访问最新 ocrQueue。
+  const ocrQueueRef = useRef(ocrQueue)
+  ocrQueueRef.current = ocrQueue
   useEffect(() => {
     const api = window.electronAPI
     if (!api?.onOcrProgress) return
-    const cleanup = api.onOcrProgress((payload) => {
-      const currentItem = ocrQueue.items[ocrQueue.currentIndex]
+    return api.onOcrProgress((payload) => {
+      const q = ocrQueueRef.current
+      const currentItem = q.items[q.currentIndex]
       if (!currentItem) return
       if (payload.entryId && payload.entryId !== currentItem.entryId) return
-      // Show (chunkIndex+1)/total at "start"; reset on final "done" of last chunk
       if (payload.phase === 'start') {
         setOcrChunkProgress({ chunkIndex: payload.chunkIndex, totalChunks: payload.totalChunks })
       } else if (payload.phase === 'done' && payload.chunkIndex >= payload.totalChunks - 1) {
         setOcrChunkProgress(null)
       }
     })
-    return cleanup
-  }, [ocrQueue.items, ocrQueue.currentIndex, setOcrChunkProgress])
+  }, [setOcrChunkProgress])
 
   useEffect(() => {
     if (ocrQueue.status !== 'running') return

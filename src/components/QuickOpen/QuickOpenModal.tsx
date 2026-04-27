@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
 import type { LibraryEntry, Memo } from '../../types/library'
+import ImeInput from '../common/ImeInput'
 
 // ===== Fuzzy match =====
 // Returns a score (higher = better match) or -1 if no match. Case-insensitive.
@@ -34,20 +35,27 @@ type QuickItem =
   | { kind: 'memo'; memo: Memo; score: number }
 
 export default function QuickOpenModal() {
-  const { library, openEntry } = useLibraryStore()
-  const { showQuickOpen, setShowQuickOpen, setActiveMemo, setActiveReadingLogDate } = useUiStore()
+  // 2026-04-25 PERF · 选择性订阅
+  const library = useLibraryStore(s => s.library)
+  const openEntry = useLibraryStore(s => s.openEntry)
+  const showQuickOpen = useUiStore(s => s.showQuickOpen)
+  const setShowQuickOpen = useUiStore(s => s.setShowQuickOpen)
+  const setActiveMemo = useUiStore(s => s.setActiveMemo)
+  const setActiveReadingLogDate = useUiStore(s => s.setActiveReadingLogDate)
   const [query, setQuery] = useState('')
   const [activeIdx, setActiveIdx] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
   // Reset when opened
+  // BUG-FIX R8#12 · 原 setTimeout 无 handle 跟踪,modal 在 30ms 内 unmount(用户狂按 quick open
+  //   开关)会留 orphaned focus 调用碰到已卸载 input。加 cleanup。
   useEffect(() => {
-    if (showQuickOpen) {
-      setQuery('')
-      setActiveIdx(0)
-      setTimeout(() => inputRef.current?.focus(), 30)
-    }
+    if (!showQuickOpen) return
+    setQuery('')
+    setActiveIdx(0)
+    const t = setTimeout(() => inputRef.current?.focus(), 30)
+    return () => clearTimeout(t)
   }, [showQuickOpen])
 
   // Build ranked results
@@ -146,12 +154,12 @@ export default function QuickOpenModal() {
         }}
       >
         <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border-light)' }}>
-          <input
+          {/* 2026-04-25 PERF · IME-aware：拼音中间态不重做 useMemo filter */}
+          <ImeInput
             ref={inputRef}
-            type="text"
             placeholder="搜索文献或笔记... (↑↓ 选择, Enter 打开, Esc 关闭)"
             value={query}
-            onChange={e => setQuery(e.target.value)}
+            onChange={setQuery}
             onKeyDown={handleKeyDown}
             style={{
               width: '100%', padding: '8px 12px', border: '1px solid var(--border)',

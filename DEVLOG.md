@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-04-28 · Batch 55 · 夜间值守 Round 8 #12 · Bug · QuickOpen / BatchOcr 静态 sweep
+
+主题：**bug fix · 新扫 QuickOpen + BatchOcr 目录(R1-R7 未扫),抓两个 timer/sub 泄漏**
+
+### 修了什么(R8#12)
+
+**A · QuickOpenModal.tsx · setTimeout(focus) 无 cleanup**
+30ms focus timer 之前没存 handle,modal 在 30ms 内被关闭(用户狂按 quick open 快捷键)会 fire 到已卸载 input + 留 orphaned timer。`const t = setTimeout(...); return () => clearTimeout(t)`。
+
+**B · BatchOcrRunner.tsx · onOcrProgress 订阅每次 advance 都 resub**
+原 effect deps 含 `ocrQueue.items / currentIndex` → 每个 OCR PDF advance 时 effect cleanup unsub + 重 sub onOcrProgress。大批量(几十文件)时 IPC 来回浪费,加上事件桥几毫秒延迟可能错过 chunk-progress 信号。改成 `ocrQueueRef = useRef(ocrQueue); ocrQueueRef.current = ocrQueue` 模式,effect deps 只 `[setOcrChunkProgress]`(stable),subscribe 一次到底,callback 通过 ref 拿最新 queue。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 31.79s 通过
+
+### 后续
+
+下轮 Round 8 #13 必须 PERF 或 UX。本轮已开始扫新区,可继续在 common (ConfirmDialog/ImeInput/ModelSelector) 或 Lecture / OcrRangeModal 做 sweep,但 #13 不能再选 Bug 了。
+
+---
+
 ## 2026-04-28 · Batch 54 · 夜间值守 Round 8 #11 · PERF · personaListCache 共享缓存
 
 主题：**perf · 仿 aiConfigCache 模式新建 personaListCache,免重复 IPC**
