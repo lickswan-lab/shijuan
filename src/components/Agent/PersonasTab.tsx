@@ -30,6 +30,8 @@ import {
 import { CitationBadge } from './CitationBadge'
 import { humanizeAiError } from '../../utils/humanizeAiError'
 import { useConfirmDialog } from '../common/ConfirmDialog'
+// PERF-R8#11 · 共享 persona list cache,改/删 persona 后 invalidate 让 AnnotationPanel 等订阅者刷新
+import { invalidatePersonaListCache } from '../../utils/personaListCache'
 
 // ============================================================================
 // Palette · 暖金衬线
@@ -1587,6 +1589,8 @@ export default function PersonasTab() {
         await window.electronAPI.personaDelete?.(id)
         if (current?.id === id) { setCurrent(null); setStage('gallery') }
         await loadListRef.current()
+        // PERF-R8#11 · 通知共享 cache 失效,AnnotationPanel 召唤 dropdown 自动刷新
+        invalidatePersonaListCache()
       },
     })
   }, [current, askConfirm])
@@ -1627,6 +1631,8 @@ export default function PersonasTab() {
     if (!importPreview) return
     // personaImportSkill already wrote the persona; this is just the confirmation gate.
     await loadListRef.current()
+    // PERF-R8#11 · 通知共享 cache 失效
+    invalidatePersonaListCache()
     setCurrent(importPreview.persona)
     setImportPreview(null)
     setStage('detail')
@@ -1637,6 +1643,8 @@ export default function PersonasTab() {
       // Roll back the write that personaImportSkill performed.
       await window.electronAPI.personaDelete?.(importPreview.persona.id).catch(() => {})
       await loadListRef.current()
+      // PERF-R8#11 · 回滚后也要 invalidate
+      invalidatePersonaListCache()
     }
     setImportPreview(null); setStage('gallery')
   }, [importPreview])

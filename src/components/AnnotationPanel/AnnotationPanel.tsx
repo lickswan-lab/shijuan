@@ -10,6 +10,8 @@ import { fetchAiConfig, subscribeAiConfig } from '../../utils/aiConfigCache'
 import { fetchAgentMemory, invalidateAgentMemoryCache } from '../../utils/agentMemoryCache'
 import { humanizeAiError } from '../../utils/humanizeAiError'
 import { readNumber } from '../../utils/safeStorageRead'
+// PERF-R8#11 · persona list 共享 cache,免每次 AnnotationPanel mount 都 IPC
+import { fetchPersonaList, subscribePersonaList } from '../../utils/personaListCache'
 import ImeInput from '../common/ImeInput'
 
 // ===== Hermes background learning =====
@@ -816,16 +818,18 @@ export default function AnnotationPanel() {
   // Load configured AI providers + personas
   // 2026-04-25 PERF · aiGetConfigured 走共享 cache
   // Batch 43 · 订阅 cache 变化：用户改 Settings API key 后这里自动重 fetch
+  // PERF-R8#11 · persona list 也走共享 cache + subscribe(导入/删除 persona 后自动刷新)
   useEffect(() => {
     let cancelled = false
     fetchAiConfig().then(r => { if (!cancelled) setConfiguredProviders(r) })
-    const unsub = subscribeAiConfig(latest => {
+    const unsubAi = subscribeAiConfig(latest => {
       if (!cancelled) setConfiguredProviders(latest)
     })
-    if (window.electronAPI?.personaList) {
-      window.electronAPI.personaList().then(r => { if (!cancelled && r.success) setPersonaListAnno(r.entries) }).catch(() => {})
-    }
-    return () => { cancelled = true; unsub() }
+    fetchPersonaList().then(r => { if (!cancelled) setPersonaListAnno(r) })
+    const unsubPersona = subscribePersonaList(latest => {
+      if (!cancelled) setPersonaListAnno(latest)
+    })
+    return () => { cancelled = true; unsubAi(); unsubPersona() }
   }, [])
 
   // P0-2: 点击 popover 外关闭 / Esc 关闭 — 只在 popover 打开时挂监听，卸载即自清

@@ -4,6 +4,41 @@
 
 ---
 
+## 2026-04-28 · Batch 54 · 夜间值守 Round 8 #11 · PERF · personaListCache 共享缓存
+
+主题：**perf · 仿 aiConfigCache 模式新建 personaListCache,免重复 IPC**
+
+### 修了什么(R8#11)
+
+1. **新建** `src/utils/personaListCache.ts`(单 export):
+   - `fetchPersonaList()` 命中即同步,首次 dedupe inflight Promise
+   - `subscribePersonaList(listener)` 订阅 invalidate 通知
+   - `invalidatePersonaListCache()` 清缓存 + re-fetch + 广播订阅者
+   - `usePersonaList()` React hook(内部自动订阅)
+2. **AnnotationPanel.tsx** mount-time 拉 personaList 改成 `fetchPersonaList()` + `subscribePersonaList()`
+3. **PersonasTab.tsx** persona 增删改 3 处都加 `invalidatePersonaListCache()` 调用,通知 AnnotationPanel 召唤 dropdown 自动刷新
+
+### 预期收益
+
+- 用户切面板时(PdfViewer ↔ AgentPanel ↔ etc) AnnotationPanel mount 不再每次都 IPC + 文件读
+- PersonasTab 改 persona 后 AnnotationPanel 召唤 dropdown 自动响应,不需要刷新 / 切面板触发 mount 才更新
+- 模式与 aiConfigCache / agentMemoryCache 一致,基础设施统一
+
+### 留作后续(本轮范围之外)
+
+PersonasTab 自己的 `loadList()` 仍走原 IPC(它需要全字段)。后续可以让 PersonasTab 也走 cache(可能要扩展 cache 字段)。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 31.86s 通过
+
+### 后续
+
+下轮 Round 8 #12 必须 Bug 或 UX。bug 池欠款已清空,要么从 night-shift 入口 3 (静态 sweep · 找新 bug · Lecture / BatchOcr / QuickOpen / common 等未扫目录)开始,要么转 UX。
+
+---
+
 ## 2026-04-28 · Batch 53 · 夜间值守 Round 8 #10 · Bug · App.tsx setTimeout cleanup + race
 
 主题：**bug fix · 清空 R1+R2 观察项最后一条欠款**
