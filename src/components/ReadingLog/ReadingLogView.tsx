@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { v4 as uuid } from 'uuid'
 import ReactMarkdown from 'react-markdown'
 import remarkMath from 'remark-math'
@@ -9,6 +9,7 @@ import { openEntryById } from '../../utils/openEntryById'
 import type { ReadingLogEvent, ReadingLog } from '../../types/library'
 import ReadingLogList from './ReadingLogList'
 import { READING_LOG_SYSTEM_PROMPT, buildReadingLogUserMessage } from './readingLogPrompt'
+import { humanizeAiError } from '../../utils/humanizeAiError'
 
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 
@@ -48,7 +49,7 @@ const EVENT_ICONS: Record<ReadingLogEvent['type'], string> = {
 
 // ===== Learning Profile: reading overview with annotation heatmap =====
 function LearningProfile() {
-  const { library } = useLibraryStore()
+  const library = useLibraryStore(s => s.library)
   const [profileData, setProfileData] = useState<Array<{
     id: string; title: string; annCount: number; noteCount: number; lastOpened: string
   }>>([])
@@ -88,11 +89,19 @@ function LearningProfile() {
     return () => { cancelled = true }
   }, [library])
 
-  const maxAnn = Math.max(...profileData.map(d => d.annCount), 1)
-  const totalAnnotations = profileData.reduce((s, d) => s + d.annCount, 0)
-  const totalNotes = profileData.reduce((s, d) => s + d.noteCount, 0)
+  // 2026-04-25 PERF · 这几行原本每次 render 都遍历 profileData 4 遍，合并成一遍
+  const { maxAnn, totalAnnotations, totalNotes, readEntries, deepReadCount, hasReadEntries } = useMemo(() => {
+    let maxA = 1, totalA = 0, totalN = 0, read = 0, deep = 0
+    for (const d of profileData) {
+      if (d.annCount > maxA) maxA = d.annCount
+      totalA += d.annCount
+      totalN += d.noteCount
+      if (d.annCount > 0) read++
+      if (d.annCount >= 5) deep++
+    }
+    return { maxAnn: maxA, totalAnnotations: totalA, totalNotes: totalN, readEntries: read, deepReadCount: deep, hasReadEntries: read > 0 }
+  }, [profileData])
   const totalEntries = library?.entries.length || 0
-  const readEntries = profileData.filter(d => d.annCount > 0).length
 
   if (loading) {
     return (
@@ -117,7 +126,7 @@ function LearningProfile() {
         {[
           { label: '注释', value: totalAnnotations, color: 'var(--accent)' },
           { label: '笔记', value: totalNotes, color: 'var(--success)' },
-          { label: '深度阅读', value: profileData.filter(d => d.annCount >= 5).length, color: 'var(--warning)' },
+          { label: '深度阅读', value: deepReadCount, color: 'var(--warning)' },
         ].map(s => (
           <div key={s.label} style={{
             padding: '12px 14px', borderRadius: 8,
@@ -131,7 +140,7 @@ function LearningProfile() {
       </div>
 
       {/* Annotation depth bars */}
-      {profileData.filter(d => d.annCount > 0).length > 0 && (
+      {hasReadEntries && (
         <div>
           <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 10 }}>阅读深度</div>
           {profileData.filter(d => d.annCount > 0).slice(0, 12).map(d => {
@@ -173,7 +182,7 @@ function LearningProfile() {
         </div>
       )}
 
-      {profileData.filter(d => d.annCount > 0).length === 0 && (
+      {!hasReadEntries && (
         <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
           还没有阅读标注，开始阅读并标注吧
         </div>
@@ -187,10 +196,42 @@ function LearningProfile() {
 }
 
 export default function ReadingLogView() {
-  const { library, saveReadingLog, openEntry } = useLibraryStore()
-  const { activeReadingLogDate, selectedAiModel, setActiveReadingLogDate, setActiveMemo } = useUiStore()
+  // 2026-04-25 PERF · 选择性订阅
+  const library = useLibraryStore(s => s.library)
+  const saveReadingLog = useLibraryStore(s => s.saveReadingLog)
+  const openEntry = useLibraryStore(s => s.openEntry)
+  const activeReadingLogDate = useUiStore(s => s.activeReadingLogDate)
+  const selectedAiModel = useUiStore(s => s.selectedAiModel)
+  const setActiveReadingLogDate = useUiStore(s => s.setActiveReadingLogDate)
+  const setActiveMemo = useUiStore(s => s.setActiveMemo)
   const [generatingSummary, setGeneratingSummary] = useState(false)
   const [streamingText, setStreamingText] = useState('')
+  // UX · in-app toast 替代 alert()，5s 自消失，点击立即关
+  // UX-R8#17 · 同 R8#13 模式 · key/quota/model 类错误时 toast 多挂"去设置"按钮
+  const [errorToast, setErrorToast] = useState<{ message: string; ctaSettings?: boolean } | null>(null)
+  useEffect(() => {
+    if (!errorToast) return
+    const t = setTimeout(() => setErrorToast(null), 5000)
+    return () => clearTimeout(t)
+  }, [errorToast])
+
+  // BUG-FIX READLOG#1 · mount guard + active stream id so a long-running
+  // summary stream gets aborted on unmount (stop burning tokens) and
+  // setStreamingText / setGeneratingSummary don't fire on unmounted component.
+  // Same pattern as LectureMode R2#α.
+  const mountedRef = useRef(true)
+  const activeStreamIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      const sid = activeStreamIdRef.current
+      if (sid) {
+        window.electronAPI.aiAbortStream(sid).catch(() => { /* ignore */ })
+        activeStreamIdRef.current = null
+      }
+    }
+  }, [])
 
   const log = activeReadingLogDate
     ? library?.readingLogs?.find(l => l.date === activeReadingLogDate)
@@ -217,10 +258,12 @@ export default function ReadingLogView() {
       })
 
       const streamId = uuid()
+      activeStreamIdRef.current = streamId
       let fullText = ''
 
       const cleanupChunk = window.electronAPI.onAiStreamChunk((sid, chunk) => {
         if (sid !== streamId) return
+        if (!mountedRef.current) return   // drop chunks arriving after unmount
         fullText += chunk
         setStreamingText(fullText)
       })
@@ -230,10 +273,17 @@ export default function ReadingLogView() {
           { role: 'system', content: READING_LOG_SYSTEM_PROMPT },
           { role: 'user', content: userMsg },
         ])
-        if (!result.success) fullText = `错误：${result.error}`
+        if (!result.success && mountedRef.current) {
+          // Batch 43: humanize raw error
+          const h = humanizeAiError(result.error)
+          fullText = h.silent ? '错误：已中断' : `错误：${h.message}${h.hint ? `（${h.hint}）` : ''}`
+        }
       } finally {
         cleanupChunk()
+        activeStreamIdRef.current = null
       }
+
+      if (!mountedRef.current) return
 
       setStreamingText('')
 
@@ -244,20 +294,77 @@ export default function ReadingLogView() {
           aiModel: selectedAiModel,
         }
         await window.electronAPI.readingLogSave(updated)
+        if (!mountedRef.current) return
         saveReadingLog(updated)
       } else if (fullText.startsWith('错误：')) {
-        alert(`AI 总结生成失败：${fullText}`)
+        // UX-R8#17 · 这里 errText 已是 humanize 过的字符串(line 278),
+        // 但 ctaSettings 标志在 result.error 路径就丢了。重跑一次 humanize 拿 flag。
+        // 简化:用 errText 包含 'API Key' / '余额' / 'Model' 关键词时也认为该挂 CTA。
+        const errText = fullText.replace(/^错误：/, '')
+        const cta = /api key|余额|额度|model/i.test(errText)
+        setErrorToast({ message: `AI 总结生成失败：${errText}`, ctaSettings: cta })
       }
     } catch (err: any) {
-      alert(`AI 总结生成失败：${err.message}`)
+      if (mountedRef.current) {
+        // Batch 43: humanize raw error
+        const h = humanizeAiError(err)
+        if (!h.silent) {
+          setErrorToast({
+            message: h.hint ? `AI 总结生成失败：${h.message}（${h.hint}）` : `AI 总结生成失败：${h.message}`,
+            ctaSettings: h.ctaSettings,
+          })
+        }
+      }
     } finally {
-      setGeneratingSummary(false)
+      if (mountedRef.current) setGeneratingSummary(false)
     }
   }
 
   const events = log?.events || []
 
-  return (
+  return (<>
+    {/* UX · alert() → in-app toast; fixed bottom-center, 5s 自消失
+        UX-R8#17 · 同 R8#13 模式,ctaSettings=true 时多挂"去设置"按钮 */}
+    {errorToast && (
+      <div
+        onClick={() => setErrorToast(null)}
+        style={{
+          position: 'fixed', left: '50%', bottom: 32, zIndex: 9999,
+          transform: 'translateX(-50%)',
+          padding: '10px 18px', borderRadius: 6,
+          background: 'rgba(181,90,79,0.96)', color: '#fff',
+          fontSize: 12.5, lineHeight: 1.5, maxWidth: 420,
+          boxShadow: '0 6px 22px rgba(60,40,20,0.28)',
+          cursor: 'pointer',
+          animation: 'sj-anno-toast-in 0.18s cubic-bezier(.2,.9,.3,1.2)',
+          display: 'flex', alignItems: 'center', gap: 12,
+        }}
+        title="点击关闭"
+      >
+        <span style={{ flex: 1 }}>{errorToast.message}</span>
+        {errorToast.ctaSettings && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              useUiStore.getState().setShowSettings(true)
+              setErrorToast(null)
+            }}
+            style={{
+              flexShrink: 0,
+              fontSize: 11.5,
+              padding: '4px 10px',
+              background: 'rgba(255,255,255,0.18)',
+              border: '1px solid rgba(255,255,255,0.45)',
+              borderRadius: 4,
+              color: '#fff',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+              fontWeight: 500,
+            }}
+          >去设置</button>
+        )}
+      </div>
+    )}
     <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
       {/* Left: log list */}
       <div style={{
@@ -478,5 +585,5 @@ export default function ReadingLogView() {
         </div>
       )}
     </div>
-  )
+  </>)
 }

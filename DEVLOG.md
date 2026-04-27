@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-04-28 · Batch 60 · 夜间值守 Round 8 #17 · UX · ReadingLog 错误 toast 接 CTA(R8#13 扩散)
+
+主题：**UX · 把 R8#13 的"toast 加去设置按钮"模式扩散到 ReadingLogView**
+
+### 修了什么(R8#17)
+
+`ReadingLogView.tsx` `errorToast` state(AI 总结生成失败的提示):
+1. 类型从 `string | null` 升级为 `{ message: string; ctaSettings?: boolean } | null`
+2. 两处 setErrorToast 调用改传结构对象,`ctaSettings` 来自 humanizeAiError(catch 路径)或文本关键词检测(stream result 路径,因为这条 path 拿到的是 humanize 过的字符串没保留 flag)
+3. toast 渲染加 "去设置" 按钮(stopPropagation),click → `useUiStore.getState().setShowSettings(true)` + 关 toast
+
+### 已扩散覆盖
+
+| 触点 | 状态 |
+|---|---|
+| AnnotationPanel summonErr | ✅ R8#13 |
+| ReadingLogView errorToast | ✅ R8#17 |
+| AgentPanel(在 chat bubble 里渲染错误) | ⏭ 不适用(不是 toast,是 chat 消息) |
+| PersonasTab(召唤场景内 errorMsg) | 待后续 round |
+| LectureMode 总结失败 | 待后续 round |
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 32.16s 通过
+
+### 后续
+
+下轮 Round 8 #18 必须 Bug 或 PERF。
+
+---
+
 ## 2026-04-28 · Batch 59 · 夜间值守 Round 8 #16 · Bug · apprentice weekCode 路径清洗
 
 主题：**bug fix · 静态 sweep apprentice.ts · path traversal defense-in-depth(同 R2#γ 模式)**
