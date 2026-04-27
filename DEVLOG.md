@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-04-28 · Batch 58 · 夜间值守 Round 8 #15 · UX · SummonView 发送按钮尺寸对齐
+
+主题：**UX / UI polish · _UX_AUDIT_TODO P1-6 落地 · _UI_POLISH_LOG Change #50**
+
+### 修了什么(R8#15)
+
+`src/components/Agent/PersonasTab.tsx:1371` SummonView 发送按钮 padding `'10px 22px'` → `'12px 18px'`,对齐 ActionBtn variant=primary 的 padding(line 321)。
+
+### 为什么有用
+
+SummonView 顶部和右侧有"返回 / 新对话 / 召唤对话→"等 ActionBtn,用户挨着按总能看到发送按钮比别的按钮矮 1-2px、宽 4px。这次纯 padding 对齐就解决,符合 UI polish 的硬约束(单行视觉属性改动,不动 JSX 结构 / className / state / 事件)。
+
+### 留作后续
+
+audit 原方案是把发送按钮重构成 `<ActionBtn variant="primary">` 包装,但 ActionBtn 不支持 `disabled` prop。未来要做完整重构需要扩 ActionBtn,单独 round。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 32.70s 通过
+
+---
+
 ## 2026-04-28 · Batch 57 · 夜间值守 Round 8 #14 · PERF · AgentPanel 头像缓存模块化
 
 主题：**perf · AgentPanel 头像 useState cache → 模块级共享 cache**

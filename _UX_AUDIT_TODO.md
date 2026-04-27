@@ -18,10 +18,9 @@
 
 ## 待处理 P1 / P2
 
-### P1-6 · 按钮尺寸微不一致（视觉）
-`SummonView` 底部发送按钮 padding `10px 20px` vs `ActionBtn primary` `12px 18px`。外观接近但行高/宽度会差 1-2px。
-- 位置：`src/components/Agent/PersonasTab.tsx` 的 SummonView
-- 修法建议：把发送按钮改用 `ActionBtn variant="primary"` 封装，或抽一份 shared `.btn-summon-primary` 样式。
+### ~~P1-6 · 按钮尺寸微不一致（视觉）~~ → **R8#15 已修(padding 对齐)**
+`SummonView` 底部发送按钮 padding `10px 22px` vs `ActionBtn primary` `12px 18px`。外观接近但行高/宽度会差 1-2px。
+→ 直接对齐 padding 到 12px 18px(单行改动符合 UI polish 约束)。完整重构成 `ActionBtn` 封装的方案因为 ActionBtn 不支持 disabled prop 暂搁置,后续要不要扩展 ActionBtn 支持 disabled 单独 round。
 
 ### ~~P1-8 · personaList 为空时 AnnotationPanel 召唤按钮只靠 title 提示~~ → **已修(检查时发现 line 2170-2190 已实现 P1-8/P2-9 空态引导)**
 

@@ -1368,7 +1368,8 @@ function SummonView({
           onClick={handleSend}
           disabled={busy || !input.trim()}
           style={{
-            padding: '10px 22px', fontSize: 13, fontWeight: 500, letterSpacing: '0.8px',
+            // UX-R8#15 · P1-6 · padding 对齐 ActionBtn primary(12px 18px)消除 1-2px 行高差
+            padding: '12px 18px', fontSize: 13, fontWeight: 500, letterSpacing: '0.8px',
             border: 'none', borderRadius: 6,
             background: (busy || !input.trim()) ? C.border : C.text,
             color: (busy || !input.trim()) ? C.textFaint : C.bg,
