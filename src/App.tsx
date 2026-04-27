@@ -16,6 +16,7 @@ import TopBar from './components/TopBar/TopBar'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useLibraryStore } from './store/libraryStore'
 import { useUiStore } from './store/uiStore'
+import { readNumber } from './utils/safeStorageRead'
 import './styles/globals.css'
 // katex CSS moved to components that actually render math (PdfViewer, AnnotationPanel, MemoEditor, ReadingLogView)
 // to avoid eager loading on app startup
@@ -94,8 +95,20 @@ function DraggableToggle({ onClick }: { onClick: () => void }) {
 }
 
 export default function App() {
-  const { library, initLibrary, importByPaths } = useLibraryStore()
-  const { setGlmApiKeyStatus, annotationPanelCollapsed, toggleAnnotationPanel, activeMemoId, activeReadingLogDate, rightPanel, immersiveMode, dualPageMode } = useUiStore()
+  // PERF R7#1 · 选择性订阅 · 原来全量解构 `useUiStore()` 会让任何 ui state 变化
+  // 都 re-render App（全屏树都要过一遍 reconcile），改成每个字段独立 selector，
+  // 只有读到的字段变化才触发 App 层重渲。library 同理。
+  const library = useLibraryStore(s => s.library)
+  const initLibrary = useLibraryStore(s => s.initLibrary)
+  const importByPaths = useLibraryStore(s => s.importByPaths)
+  const setGlmApiKeyStatus = useUiStore(s => s.setGlmApiKeyStatus)
+  const annotationPanelCollapsed = useUiStore(s => s.annotationPanelCollapsed)
+  const toggleAnnotationPanel = useUiStore(s => s.toggleAnnotationPanel)
+  const activeMemoId = useUiStore(s => s.activeMemoId)
+  const activeReadingLogDate = useUiStore(s => s.activeReadingLogDate)
+  const rightPanel = useUiStore(s => s.rightPanel)
+  const immersiveMode = useUiStore(s => s.immersiveMode)
+  const dualPageMode = useUiStore(s => s.dualPageMode)
   const [dropActive, setDropActive] = useState(false)
   const dropCounter = useRef(0)  // track nested drag enter/leave
 
@@ -322,7 +335,8 @@ export default function App() {
       // on every startup). Runs 3s after mount so initial render isn't blocked.
       setTimeout(() => {
         try {
-          const last = Number(localStorage.getItem('sj-lastUpdateCheck') || '0')
+          // BUG-FIX R8#8 · NaN 防御:坏数据时 last=0 → 总是触发检查(预期行为)
+          const last = readNumber('sj-lastUpdateCheck', 0)
           if (Date.now() - last < 24 * 3600 * 1000) return
           if (!window.electronAPI?.checkUpdate) return
           window.electronAPI.checkUpdate().then(res => {
@@ -397,7 +411,7 @@ export default function App() {
               </ErrorBoundary>
             )}
             {!annotationPanelCollapsed && rightPanel === 'agent' && (
-              <ErrorBoundary fallbackLabel="Hermes Agent">
+              <ErrorBoundary fallbackLabel="学徒面板">
                 <AgentPanel />
               </ErrorBoundary>
             )}
@@ -416,7 +430,7 @@ export default function App() {
               </ErrorBoundary>
             )}
             {(!immersiveMode || !dualPageMode) && !annotationPanelCollapsed && rightPanel === 'agent' && (
-              <ErrorBoundary fallbackLabel="Hermes Agent">
+              <ErrorBoundary fallbackLabel="学徒面板">
                 <AgentPanel />
               </ErrorBoundary>
             )}

@@ -16,6 +16,8 @@ import TranslateModal, { type TranslateModalProps } from './TranslateModal'
 import { useTranslationJobsStore } from '../../store/translationJobsStore'
 // PERF-R8#7 · 共享 AI provider 配置 cache,免每个组件 mount 单独 IPC
 import { fetchAiConfig, subscribeAiConfig } from '../../utils/aiConfigCache'
+// BUG-FIX R8#8 · localStorage 数字读 NaN 防御
+import { readNumber } from '../../utils/safeStorageRead'
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 
@@ -2175,7 +2177,8 @@ export default function PdfViewer() {
   const [editContent, setEditContent] = useState('')
   const [editDirty, setEditDirty] = useState(false)
   // Persisted reading preferences
-  const lsGet = (key: string, def: number) => { try { const v = localStorage.getItem(key); return v !== null ? Number(v) : def } catch { return def } }
+  // BUG-FIX R8#8 · 走 readNumber 兜底 NaN(原 lsGet 没防,坏数据时 fontSize: NaN 导致 OCR 文本不可读)
+  const lsGet = (key: string, def: number) => readNumber(key, def)
   const lsSet = (key: string, v: number, setter: (v: number) => void) => { setter(v); try { localStorage.setItem(key, String(v)) } catch {} }
   const [ocrFontSize, _setOcrFontSize] = useState(() => lsGet('sj-fontSize', 16))
   const [ocrFontWeight, _setOcrFontWeight] = useState(() => lsGet('sj-fontWeight', 400))
@@ -2568,8 +2571,8 @@ export default function PdfViewer() {
     // documents keep growing in height as pages/content render in. If we set scrollTop too
     // early, the container is shorter than the target and the jump silently fails.
     let restoreAttempts = 0
-    let savedScroll = 0
-    try { savedScroll = Number(localStorage.getItem(`sj-scroll-${currentEntry.id}`) || 0) } catch {}
+    // BUG-FIX R8#8 · NaN 防御:坏数据时 savedScroll=0 → 不跳(预期行为)
+    const savedScroll = readNumber(`sj-scroll-${currentEntry.id}`, 0)
     if (savedScroll > 0) {
       const tryRestore = () => {
         const el = scrollRef.current

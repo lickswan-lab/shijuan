@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react'
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { v4 as uuid } from 'uuid'
 import Markdown from 'react-markdown'
 import { useLibraryStore } from '../../store/libraryStore'
@@ -6,6 +6,11 @@ import { useUiStore } from '../../store/uiStore'
 import { openEntryById } from '../../utils/openEntryById'
 import type { Annotation, HistoryEntry, BlockRef } from '../../types/library'
 import { useAnnotationAiJobsStore, jobKey } from '../../store/annotationAiJobsStore'
+import { fetchAiConfig, subscribeAiConfig } from '../../utils/aiConfigCache'
+import { fetchAgentMemory, invalidateAgentMemoryCache } from '../../utils/agentMemoryCache'
+import { humanizeAiError } from '../../utils/humanizeAiError'
+import { readNumber } from '../../utils/safeStorageRead'
+import ImeInput from '../common/ImeInput'
 
 // ===== Hermes background learning =====
 // Silently appends annotation events to agent memory for behavior learning
@@ -16,7 +21,8 @@ async function flushHermesQueue() {
   if (hermesEventQueue.length === 0) return
   const batch = hermesEventQueue.splice(0)
   try {
-    const { success, content } = await window.electronAPI.agentLoadMemory()
+    // 这里需要最新内容（write-after-read），用 fetchAgentMemory 也行（cache 命中省 IPC）
+    const { success, content } = await fetchAgentMemory()
     const existing = success && content ? content : ''
     const today = new Date().toLocaleDateString('zh-CN')
     const header = `\n\n## ${today} 阅读行为\n\n`
@@ -25,6 +31,8 @@ async function flushHermesQueue() {
       ? existing + '\n' + batch.join('\n')
       : existing + header + batch.join('\n')
     await window.electronAPI.agentSaveMemory(updated)
+    // 写完失效 cache，下次读到最新
+    invalidateAgentMemoryCache()
   } catch {}
   hermesFlushTimer = null
 }
@@ -44,9 +52,10 @@ function HermesHint({ selectedText, currentTitle }: { selectedText?: string; cur
   useEffect(() => {
     if (!selectedText || selectedText.length < 4) { setHint(null); return }
 
-    // Search agent memory for related mentions
+    // Search agent memory for related mentions —— 2026-04-25 PERF · 走共享 cache
+    // 用户每次选中文本都触发，cache 命中后 0 IPC 开销
     let cancelled = false
-    window.electronAPI.agentLoadMemory().then(({ success, content }) => {
+    fetchAgentMemory().then(({ success, content }) => {
       if (cancelled || !success || !content) return
 
       // Simple keyword matching: find lines in memory mentioning similar terms
@@ -87,7 +96,7 @@ function HermesHint({ selectedText, currentTitle }: { selectedText?: string; cur
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}>
         <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
       </svg>
-      <span>Hermes: 你之前也关注过 — {hint}</span>
+      <span>学徒：你之前也关注过 — {hint}</span>
     </div>
   )
 }
@@ -110,7 +119,7 @@ function GhostReaderCard({ suggestion, onDismiss }: { suggestion: string | null;
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
         </svg>
-        Hermes 发现
+        学徒发现
       </div>
       <div style={{ fontSize: 11, color: 'var(--text)', lineHeight: 1.6 }}>{suggestion}</div>
     </div>
@@ -214,6 +223,7 @@ function getModelLabel(modelSpec: string): string {
     .replace(/^deepseek-/, 'DeepSeek ')
     .replace(/^doubao-/, '豆包 ')
     .replace(/^kimi-/, 'Kimi ')
+    .replace(/^qwen3?\.?6?-?/, 'Qwen ')
     .replace(/-\d{8,}$/, '') // remove date suffixes like -20250414
 }
 
@@ -234,7 +244,9 @@ function getTypeDisplay(type: HistoryEntry['type']) {
 }
 
 // ===== Single history entry =====
-function HistoryEntryItem({
+// 2026-04-25 PERF · memo 包裹 —— 父组件传稳定 callback（handleEdit/handleDelete/handleCite
+// 都是 useCallback），entry 引用在 historyChain 不变时稳定，所以 memo 能跳过未变化项
+const HistoryEntryItem = React.memo(function HistoryEntryItem({
   entry,
   onEdit,
   onDelete,
@@ -436,7 +448,7 @@ function HistoryEntryItem({
       )}
     </div>
   )
-}
+})
 
 // ===== AI Instant Feedback bubble =====
 function FeedbackBubble({ text, loading, onKeep, onDismiss, onExpand }: {
@@ -484,7 +496,8 @@ function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, onDo
   entryTitle: string
   onDone: () => void
 }) {
-  const { library, addBlockToMemo } = useLibraryStore()
+  const library = useLibraryStore(s => s.library)
+  const addBlockToMemo = useLibraryStore(s => s.addBlockToMemo)
   const ref = useRef<HTMLDivElement>(null)
   const memos = library?.memos || []
 
@@ -723,15 +736,23 @@ function OtherEntryGroup({
 
 // ===== Main Panel =====
 export default function AnnotationPanel() {
-  const { currentEntry, currentPdfMeta, updatePdfMeta, library } = useLibraryStore()
-  const { textSelection, activeAnnotationId, setTextSelection, setActiveAnnotation } = useUiStore()
+  // 2026-04-25 PERF · 选择性订阅
+  const currentEntry = useLibraryStore(s => s.currentEntry)
+  const currentPdfMeta = useLibraryStore(s => s.currentPdfMeta)
+  const updatePdfMeta = useLibraryStore(s => s.updatePdfMeta)
+  const library = useLibraryStore(s => s.library)
+  const textSelection = useUiStore(s => s.textSelection)
+  const activeAnnotationId = useUiStore(s => s.activeAnnotationId)
+  const setTextSelection = useUiStore(s => s.setTextSelection)
+  const setActiveAnnotation = useUiStore(s => s.setActiveAnnotation)
   // Subscribe to the full AI jobs map so list-item status badges re-render
   // when jobs transition. Cheap — jobs map rarely has more than a few entries.
   const aiJobs = useAnnotationAiJobsStore(s => s.jobs)
   // Flat TOC labels (EPUB only) — null for other formats. AnnotationPanel
   // uses these to title page groups with actual chapter names.
   const tocLabels = useUiStore(s => s.currentDocTocLabels)
-  const [panelWidth, _setPanelWidth] = useState(() => { try { const v = localStorage.getItem('sj-annPanelWidth'); return v ? Number(v) : 380 } catch { return 380 } })
+  // BUG-FIX R8#8 · NaN 防御 + 最小宽度 80px 兜底,避免 panel 缩到 0 隐身
+  const [panelWidth, _setPanelWidth] = useState(() => readNumber('sj-annPanelWidth', 380, 80))
   const setPanelWidth = (w: number) => { _setPanelWidth(w); try { localStorage.setItem('sj-annPanelWidth', String(w)) } catch {} }
   const resizingRef = useRef(false)
 
@@ -772,21 +793,62 @@ export default function AnnotationPanel() {
   const [socraticMode, setSocraticMode] = useState(() => {
     try { return localStorage.getItem('sj-socraticMode') === 'true' } catch { return false }
   })
-  const { selectedAiModel: aiModel, setSelectedAiModel: setAiModel, annotationColor } = useUiStore()
+  // 2026-04-25 PERF · 选择性订阅
+  const aiModel = useUiStore(s => s.selectedAiModel)
+  const setAiModel = useUiStore(s => s.setSelectedAiModel)
+  const annotationColor = useUiStore(s => s.annotationColor)
   const [configuredProviders, setConfiguredProviders] = useState<Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>>([])
 
   // Persona list for "召唤名家批注" entry — loaded alongside providers below.
   const [personaListAnno, setPersonaListAnno] = useState<Array<{ id: string; name: string; canonicalName?: string; currentFitnessTotal?: number }>>([])
+  // Popover toggle for the 召唤 button — shows persona picker above the button.
+  const [personaPopoverOpen, setPersonaPopoverOpen] = useState(false)
+  // P0-2: popover 外层容器 ref — 用 document click 判断点击在容器外时关闭，替代仅靠再点按钮
+  const summonPopoverRef = useRef<HTMLDivElement | null>(null)
+  // P0-3: 召唤失败用 in-app toast 替代 alert()，5s 自消失
+  const [summonErr, setSummonErr] = useState<string | null>(null)
+  useEffect(() => {
+    if (!summonErr) return
+    const t = setTimeout(() => setSummonErr(null), 5000)
+    return () => clearTimeout(t)
+  }, [summonErr])
 
   // Load configured AI providers + personas
+  // 2026-04-25 PERF · aiGetConfigured 走共享 cache
+  // Batch 43 · 订阅 cache 变化：用户改 Settings API key 后这里自动重 fetch
   useEffect(() => {
-    if (window.electronAPI?.aiGetConfigured) {
-      window.electronAPI.aiGetConfigured().then(setConfiguredProviders).catch(() => {})
-    }
+    let cancelled = false
+    fetchAiConfig().then(r => { if (!cancelled) setConfiguredProviders(r) })
+    const unsub = subscribeAiConfig(latest => {
+      if (!cancelled) setConfiguredProviders(latest)
+    })
     if (window.electronAPI?.personaList) {
-      window.electronAPI.personaList().then(r => { if (r.success) setPersonaListAnno(r.entries) }).catch(() => {})
+      window.electronAPI.personaList().then(r => { if (!cancelled && r.success) setPersonaListAnno(r.entries) }).catch(() => {})
     }
+    return () => { cancelled = true; unsub() }
   }, [])
+
+  // P0-2: 点击 popover 外关闭 / Esc 关闭 — 只在 popover 打开时挂监听，卸载即自清
+  useEffect(() => {
+    if (!personaPopoverOpen) return
+    const onDocClick = (e: MouseEvent) => {
+      if (!summonPopoverRef.current) return
+      if (!summonPopoverRef.current.contains(e.target as Node)) setPersonaPopoverOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPersonaPopoverOpen(false)
+    }
+    // 延迟一帧再挂，避免"打开时点击按钮"这一次事件冒泡到 document 立刻又关掉
+    const raf = requestAnimationFrame(() => {
+      document.addEventListener('mousedown', onDocClick)
+      document.addEventListener('keydown', onKey)
+    })
+    return () => {
+      cancelAnimationFrame(raf)
+      document.removeEventListener('mousedown', onDocClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [personaPopoverOpen])
   const [citingEntry, setCitingEntry] = useState<{ historyEntry: HistoryEntry; annotation: Annotation } | null>(null)
 
   // Instant feedback state
@@ -1108,8 +1170,10 @@ export default function AnnotationPanel() {
     const entryTitle = currentEntry?.title || '未知文献'
     feedHermes(`在「${entryTitle}」中对「${savedText.slice(0, 40)}」添加笔记：${savedNote.slice(0, 60)}`)
 
-    // Trigger instant feedback after saving
-    triggerFeedback(savedNote, targetAnnotationId, savedText)
+    // Batch 43 · AI 即时反馈暂时禁用——prompt 把 OCR 文本（作者写的）当成用户笔记。
+    // feedHermes 保留（学徒后台累积事件，prompt 准确）。
+    // 未来恢复时取消注释下行。
+    // triggerFeedback(savedNote, targetAnnotationId, savedText)
 
     // Ghost Reader: async cross-doc analysis (non-blocking)
     ;(async () => {
@@ -1128,7 +1192,7 @@ export default function AnnotationPanel() {
         const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => { if (sid === streamId) fullText += chunk })
         try {
           await window.electronAPI.aiChatStream(streamId, selectedAiModel, [
-            { role: 'system', content: '你是 Hermes 幽灵读者。用户刚刚在一篇文献上做了注释，你需要在1-2句话内指出一个有价值的跨文献关联。如果没有发现关联，只回复"无"。不要客套，直接说发现。' },
+            { role: 'system', content: '你是学徒——一位在用户背后默默跟读的幽灵读者。用户刚刚在一篇文献上做了注释，你需要在1-2句话内指出一个有价值的跨文献关联。如果没有发现关联，只回复"无"。不要客套，直接说发现。' },
             { role: 'user', content: `用户刚在「${entryTitle}」中对「${savedText.slice(0, 100)}」写了笔记：「${savedNote.slice(0, 150)}」\n\n其他文献的注释概要：\n${data.annotationSummary.slice(0, 2000)}` },
           ])
         } finally { cleanup() }
@@ -1149,10 +1213,22 @@ export default function AnnotationPanel() {
 
     const result = await window.electronAPI.glmInterpret(interpretText, '')
 
+    // Batch 43: 失败时把 raw error 转译；并在 toast 里也提示用户
+    let entryContent: string
+    if (result.success) {
+      entryContent = result.text!
+    } else {
+      const h = humanizeAiError(result.error)
+      entryContent = `错误：${h.message}${h.hint ? `（${h.hint}）` : ''}`
+      if (!h.silent) {
+        setSummonErr(h.hint ? `${h.message}（${h.hint}）` : h.message)
+      }
+    }
+
     const entry: HistoryEntry = {
       id: uuid(),
       type: 'ai_interpretation',
-      content: result.success ? result.text! : `错误：${result.error}`,
+      content: entryContent,
       contextSent: interpretText,
       author: 'ai',
       createdAt: new Date().toISOString(),
@@ -1236,11 +1312,11 @@ export default function AnnotationPanel() {
     // === Hermes 融合: 注入跨文献记忆和关联注释 ===
     let hermesContext = ''
     try {
-      // Load Hermes memory (accumulated reading behavior insights)
-      const memResult = await window.electronAPI.agentLoadMemory?.()
+      // Load Hermes memory (accumulated reading behavior insights) —— 走 cache
+      const memResult = await fetchAgentMemory()
       const memory = memResult?.content || ''
       if (memory.length > 20) {
-        hermesContext += `\n\n[Hermes 记忆 — 用户的阅读偏好和历史洞察]\n${memory.slice(-800)}`
+        hermesContext += `\n\n[学徒记忆 — 用户的阅读偏好和历史洞察]\n${memory.slice(-800)}`
       }
 
       // Gather related annotations from other documents
@@ -1261,8 +1337,8 @@ export default function AnnotationPanel() {
     } catch {}
 
     let systemContent = socraticMode
-      ? `你是 Hermes，拾卷的学术研究助手，正在以苏格拉底式方法辅导学生阅读文献「${docTitle}」。\n\n核心原则：\n- 绝不直接给出答案，而是通过1-2个精准的追问引导学生自己思考\n- 追问要针对学生问题的核心假设、隐含前提或推理漏洞\n- 如果学生说"直接告诉我"，才给出正面回答\n- 可以引用用户在其他文献中的注释来建立关联\n\n用户选中的文本：\n「${contextForAi}」`
-      : `你是 Hermes，拾卷的学术研究助手。你非常熟悉文献「${docTitle}」，并且了解用户在整个文献库中的阅读历史和笔记。请基于文献上下文和跨文献关联回答用户的问题。如果发现用户的问题与其他文献的内容有关联，主动指出。\n\n用户选中的文本：\n「${contextForAi}」`
+      ? `你是拾卷的学徒——一位陪读的学术研究伙伴，正在以苏格拉底式方法辅导学生阅读文献「${docTitle}」。\n\n核心原则：\n- 绝不直接给出答案，而是通过1-2个精准的追问引导学生自己思考\n- 追问要针对学生问题的核心假设、隐含前提或推理漏洞\n- 如果学生说"直接告诉我"，才给出正面回答\n- 可以引用用户在其他文献中的注释来建立关联\n\n用户选中的文本：\n「${contextForAi}」`
+      : `你是拾卷的学徒——一位陪读的学术研究伙伴。你非常熟悉文献「${docTitle}」，并且了解用户在整个文献库中的阅读历史和笔记。请基于文献上下文和跨文献关联回答用户的问题。如果发现用户的问题与其他文献的内容有关联，主动指出。\n\n用户选中的文本：\n「${contextForAi}」`
     if (surroundingContext) {
       systemContent += `\n\n选中文本的前后上下文（来自同一篇文献）：\n${surroundingContext}`
     }
@@ -1400,7 +1476,8 @@ export default function AnnotationPanel() {
   // cross-document linking, no ReAct. Plain chat with persona as narrator.
   // This is the "让名家在这段文字旁批注" affordance.
   const handleSummonAnnotate = useCallback(async (personaId: string, personaName: string) => {
-    if (!displayAnnotation && !textSelection) { alert('请先选中一段文字'); return }
+    // P0-3: 用 in-app toast 替代 alert()，保持暖金美学
+    if (!displayAnnotation && !textSelection) { setSummonErr('请先选中一段文字再召唤'); return }
     const anchorText = displayAnnotation?.anchor.selectedText || textSelection?.text || ''
     if (!anchorText.trim()) return
     setAiLoading(true)
@@ -1500,7 +1577,12 @@ export default function AnnotationPanel() {
       }
       setNoteInput('')
     } catch (err: any) {
-      alert(`召唤批注失败：${err.message}`)
+      // P0-3: 用 in-app toast 替代 alert()
+      // Batch 43: humanizeAiError 把 raw 后端字符串转成中文
+      const h = humanizeAiError(err)
+      if (!h.silent) {
+        setSummonErr(h.hint ? `召唤批注失败：${h.message}（${h.hint}）` : `召唤批注失败：${h.message}`)
+      }
     } finally {
       setAiLoading(false)
     }
@@ -1542,7 +1624,8 @@ export default function AnnotationPanel() {
     }
   }, [displayAnnotation, updatePdfMeta, setActiveAnnotation])
 
-  const { toggleAnnotationPanel, clearAnnotationFocus } = useUiStore()
+  const toggleAnnotationPanel = useUiStore(s => s.toggleAnnotationPanel)
+  const clearAnnotationFocus = useUiStore(s => s.clearAnnotationFocus)
 
   // ===== Delete entire annotation (whole chain) =====
   const [confirmDeleteChain, setConfirmDeleteChain] = useState(false)
@@ -1555,6 +1638,12 @@ export default function AnnotationPanel() {
     clearAnnotationFocus()
     setConfirmDeleteChain(false)
   }, [displayAnnotation, updatePdfMeta, clearAnnotationFocus])
+
+  // 2026-04-25 PERF · onCite 用 useCallback 稳定，让 HistoryEntryItem 的 props
+  // 引用稳定（之前 inline arrow 每次 render 新引用，memo 失效）
+  const handleCite = useCallback((he: HistoryEntry) => {
+    if (displayAnnotation) setCitingEntry({ historyEntry: he, annotation: displayAnnotation })
+  }, [displayAnnotation])
 
   // ===== Annotation list helper =====
   const renderAnnotationItem = (ann: Annotation, onClick: () => void, sourceLabel?: string, entryId?: string, entryTitle?: string) => {
@@ -1702,28 +1791,38 @@ export default function AnnotationPanel() {
     )
   }
 
-  const totalOtherAnnotations = otherEntryAnnotations.reduce((sum, e) => sum + e.annotations.length, 0)
+  // 2026-04-25 PERF · totalOtherAnnotations useMemo
+  const totalOtherAnnotations = useMemo(
+    () => otherEntryAnnotations.reduce((sum, e) => sum + e.annotations.length, 0),
+    [otherEntryAnnotations],
+  )
 
   // ===== Search filtering (match selectedText + history chain contents) =====
-  const annMatchesSearch = (ann: Annotation, q: string): boolean => {
-    if (!q) return true
-    const needle = q.toLowerCase()
-    if ((ann.anchor?.selectedText || '').toLowerCase().includes(needle)) return true
-    for (const h of ann.historyChain || []) {
-      if ((h.content || '').toLowerCase().includes(needle)) return true
-    }
-    return false
-  }
+  // 2026-04-25 PERF · 用 useMemo 缓存 filter 结果，避免每次 render 都重新扫描
+  // annotations 数组（用户长期使用后注释可达数百条，每次 streaming chunk 触发
+  // 父组件 re-render 都会重做 O(n × historyChain) 扫描）
   const q = annSearch.trim()
-  const filteredCurrentAnns = q && currentPdfMeta
-    ? currentPdfMeta.annotations.filter(a => annMatchesSearch(a, q))
-    : (currentPdfMeta?.annotations || [])
-  const filteredOtherAnns = q
-    ? otherEntryAnnotations
-        .map(e => ({ ...e, annotations: e.annotations.filter(a => annMatchesSearch(a, q)) }))
-        .filter(e => e.annotations.length > 0)
-    : otherEntryAnnotations
-  const filteredOtherTotal = filteredOtherAnns.reduce((sum, e) => sum + e.annotations.length, 0)
+  const { filteredCurrentAnns, filteredOtherAnns, filteredOtherTotal } = useMemo(() => {
+    const annMatches = (ann: Annotation): boolean => {
+      if (!q) return true
+      const needle = q.toLowerCase()
+      if ((ann.anchor?.selectedText || '').toLowerCase().includes(needle)) return true
+      for (const h of ann.historyChain || []) {
+        if ((h.content || '').toLowerCase().includes(needle)) return true
+      }
+      return false
+    }
+    const fc = q && currentPdfMeta
+      ? currentPdfMeta.annotations.filter(annMatches)
+      : (currentPdfMeta?.annotations || [])
+    const fo = q
+      ? otherEntryAnnotations
+          .map(e => ({ ...e, annotations: e.annotations.filter(annMatches) }))
+          .filter(e => e.annotations.length > 0)
+      : otherEntryAnnotations
+    const fot = fo.reduce((sum, e) => sum + e.annotations.length, 0)
+    return { filteredCurrentAnns: fc, filteredOtherAnns: fo, filteredOtherTotal: fot }
+  }, [q, currentPdfMeta?.annotations, otherEntryAnnotations])
 
   // ===== Empty state (all annotations list) =====
   if (!textSelection && !activeAnnotationId) {
@@ -1748,11 +1847,11 @@ export default function AnnotationPanel() {
             {/* Search bar (only show when >= 5 annotations exist — avoids clutter for light users) */}
             {(currentPdfMeta!.annotations.length + totalOtherAnnotations) >= 5 && (
               <div style={{ padding: '6px 10px', borderBottom: '1px solid var(--border-light)' }}>
-                <input
-                  type="text"
-                  placeholder="搜索注释内容..."
+                {/* 2026-04-25 PERF · IME-aware，避免拼音中间态触发 useMemo filter */}
+                <ImeInput
                   value={annSearch}
-                  onChange={e => setAnnSearch(e.target.value)}
+                  onChange={setAnnSearch}
+                  placeholder="搜索注释内容..."
                   style={{
                     width: '100%', padding: '5px 9px', border: '1px solid var(--border)',
                     borderRadius: 4, fontSize: 11, outline: 'none',
@@ -1905,7 +2004,7 @@ export default function AnnotationPanel() {
             entry={entry}
             onEdit={handleEdit}
             onDelete={handleDelete}
-            onCite={displayAnnotation ? (he) => setCitingEntry({ historyEntry: he, annotation: displayAnnotation }) : undefined}
+            onCite={displayAnnotation ? handleCite : undefined}
             entryDocId={currentEntry?.id}
             annotationId={displayAnnotation?.id}
           />
@@ -1930,19 +2029,26 @@ export default function AnnotationPanel() {
         )}
       </div>
 
-      {/* AI Instant Feedback bubble */}
-      <FeedbackBubble
-        text={feedbackText}
-        loading={feedbackLoading}
-        onKeep={handleKeepFeedback}
-        onDismiss={() => { setFeedbackText(null); setFeedbackLoading(false) }}
-        onExpand={(fbText) => {
-          // Pre-fill the input with a follow-up question about the feedback
-          setNoteInput(`关于「${fbText.substring(0, 30)}...」，`)
-          setFeedbackText(null)
-          setFeedbackLoading(false)
-        }}
-      />
+      {/* AI Instant Feedback bubble · Batch 43 暂时隐藏
+          原因：prompt 把 OCR 文本（文献作者写的）误识别为用户笔记，
+          反馈"《X》里你写过 Y" 但实际 Y 是文献作者的话。
+          学徒洞察（Hermes 后台学习）保留——它读 hermesEventQueue 累积事件，
+          不会做"这是用户写的"误判。
+          代码保留（FeedbackBubble 组件 / triggerFeedback / glmInstantFeedback IPC）
+          以便未来 prompt 修好后恢复。 */}
+      {false && (
+        <FeedbackBubble
+          text={feedbackText}
+          loading={feedbackLoading}
+          onKeep={handleKeepFeedback}
+          onDismiss={() => { setFeedbackText(null); setFeedbackLoading(false) }}
+          onExpand={(fbText) => {
+            setNoteInput(`关于「${fbText.substring(0, 30)}...」，`)
+            setFeedbackText(null)
+            setFeedbackLoading(false)
+          }}
+        />
+      )}
 
       {/* Ghost Reader suggestion */}
       <GhostReaderCard suggestion={ghostSuggestion} onDismiss={() => setGhostSuggestion(null)} />
@@ -1969,24 +2075,9 @@ export default function AnnotationPanel() {
         />
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, gap: 6 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            {/* Socratic mode toggle */}
-            <button
-              onClick={() => {
-                const next = !socraticMode
-                setSocraticMode(next)
-                try { localStorage.setItem('sj-socraticMode', String(next)) } catch {}
-              }}
-              title={socraticMode ? '苏格拉底模式已开启：AI 用追问引导思考（点击关闭）' : '开启苏格拉底模式：AI 不直接回答，用反问引导你推导'}
-              style={{
-                padding: '3px 6px', fontSize: 10, border: '1px solid var(--border)',
-                borderRadius: 4, cursor: 'pointer',
-                background: socraticMode ? 'var(--accent)' : 'transparent',
-                color: socraticMode ? '#fff' : 'var(--text-muted)',
-                transition: 'all 0.2s',
-              }}
-            >
-              {socraticMode ? '🏛 追问' : '🏛'}
-            </button>
+            {/* 2026-04-24 苏格拉底模式按钮已删（用户决定保留为内置 skill，不单独 UI）。
+                socraticMode state / system prompt 分支暂留——后续港到 skills/socrates/
+                或 skills/socratic-mode/ 作为召唤 skill。 */}
             <select
               value={aiModel}
               onChange={e => setAiModel(e.target.value)}
@@ -2016,28 +2107,95 @@ export default function AnnotationPanel() {
             >
               {aiLoading ? '...' : '发送 AI'}
             </button>
-            {/* 召唤功能跟随 Hermes 面板的「召唤」tab 一起锁住——下个版本一起开放。
-                视觉上保留按钮但置灰 + 加锁标，避免功能"消失"造成困惑。 */}
-            <button
-              className="btn btn-sm"
-              disabled
-              title="召唤功能正在打磨中，敬请期待"
-              style={{
-                fontSize: 12, padding: '6px 10px',
-                opacity: 0.45, cursor: 'not-allowed',
-                display: 'inline-flex', alignItems: 'center', gap: 4,
-                whiteSpace: 'nowrap', flexShrink: 0,
-              }}
-            >
-              🧙 召唤
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" strokeWidth="2.5"
-                strokeLinecap="round" strokeLinejoin="round"
-                style={{ marginLeft: 1 }}>
-                <rect x="3" y="11" width="18" height="11" rx="2" />
-                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-              </svg>
-            </button>
+            {/* 召唤名家在批注旁留言——2026-04 放开。
+                点按钮 → 弹出 persona popover → 选一位 → handleSummonAnnotate。
+                personaListAnno 为空时 title 提示先去 Agent 面板导入 skill。 */}
+            {/* P0-2: ref 挂在外层容器，document mousedown 判定容器外时关闭 popover */}
+            <div ref={summonPopoverRef} style={{ position: 'relative', display: 'inline-flex' }}>
+              <button
+                className="btn btn-sm"
+                // P1-8: 空态不再 disabled —— click 打开空态 popover 引导用户去导入
+                disabled={aiLoading}
+                onClick={() => setPersonaPopoverOpen(v => !v)}
+                title={personaListAnno.length === 0
+                  ? '还没导入思想家，点击查看'
+                  : '召唤一位思想家以其视角对该段落作批注'}
+                style={{
+                  fontSize: 12, padding: '6px 10px',
+                  opacity: personaListAnno.length === 0 ? 0.7 : 1,
+                  cursor: aiLoading ? 'not-allowed' : 'pointer',
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  whiteSpace: 'nowrap', flexShrink: 0,
+                  // P1-1: 启用时图标用 accent 色（暖金星星），跟 AgentPanel 召唤 tab 视觉一致
+                  color: personaListAnno.length === 0 ? 'var(--text-muted)' : 'var(--accent-hover)',
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2l2.39 4.84L20 8l-4 3.9.94 5.55L12 14.77 7.06 17.45 8 11.9 4 8l5.61-1.16L12 2z"/>
+                </svg>
+                召唤
+              </button>
+              {personaPopoverOpen && (
+                <div style={{
+                  position: 'absolute', bottom: '100%', right: 0, marginBottom: 8,
+                  background: 'var(--bg, #FFFDF7)', border: '1px solid var(--border, #E8E0D0)',
+                  borderRadius: 8, boxShadow: '0 10px 28px rgba(58,47,31,0.14), 0 2px 6px rgba(58,47,31,0.06)',
+                  minWidth: 216, maxHeight: 260, overflowY: 'auto', zIndex: 100,
+                  padding: '6px 0',
+                  // P1-7: 淡入动画，消除"瞬间出现"的突兀感；复用 AgentPanel 的 sj-pop-in 关键帧
+                  animation: 'sj-pop-in 0.16s cubic-bezier(.2,.9,.3,1.2)',
+                }}>
+                  {personaListAnno.length > 0 ? (
+                    <>
+                      <div style={{ fontSize: 10, letterSpacing: '1.6px', color: 'var(--text-secondary)', padding: '10px 14px 6px', fontWeight: 500 }}>选择你要召唤的人物</div>
+                      {personaListAnno.map(p => (
+                        <button
+                          key={p.id}
+                          onClick={() => {
+                            setPersonaPopoverOpen(false)
+                            void handleSummonAnnotate(p.id, p.canonicalName || p.name)
+                          }}
+                          style={{
+                            display: 'block', width: '94%', textAlign: 'left',
+                            margin: '0 auto', padding: '9px 12px', fontSize: 13, background: 'transparent',
+                            border: 'none', cursor: 'pointer', color: 'var(--text)',
+                            borderRadius: 5, transition: 'background 180ms cubic-bezier(0.4, 0, 0.2, 1)',
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm, #FBF8F1)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        >
+                          {p.canonicalName || p.name}
+                        </button>
+                      ))}
+                    </>
+                  ) : (
+                    /* P1-8 / P2-9 · 空态引导：说明状况 + 一键跳到 Agent 面板召唤 tab */
+                    <div style={{ padding: '14px 16px' }}>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6, marginBottom: 10 }}>
+                        还没导入思想家 skill。<br />
+                        去 <span style={{ color: 'var(--accent-hover)' }}>召唤社区</span> 挑一位，或导入自己蒸馏的 skill。
+                      </div>
+                      <button
+                        onClick={() => {
+                          setPersonaPopoverOpen(false)
+                          useUiStore.getState().setRightPanel('agent')
+                          // Signal AgentPanel to open personas tab on mount
+                          try { localStorage.setItem('sj-agent-tab-pending', 'personas') } catch {}
+                        }}
+                        style={{
+                          width: '100%', padding: '8px 12px', fontSize: 12, fontWeight: 500,
+                          border: 'none', borderRadius: 5, cursor: 'pointer',
+                          background: 'var(--accent)', color: '#fff',
+                          transition: 'background 180ms cubic-bezier(0.4, 0, 0.2, 1)',
+                        }}
+                      >
+                        去 Agent 面板 · 召唤
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
           <button className="btn btn-sm btn-primary" onClick={handleAddNote} disabled={!noteInput.trim() || (!displayAnnotation && !textSelection)}
             title="保存笔记（Ctrl+Enter）"
@@ -2047,6 +2205,31 @@ export default function AnnotationPanel() {
         </div>
       </div>
     </div>
+    {/* P0-3: 召唤批注错误 toast — 取代 alert()。用 fixed 定位避免依赖祖先 position：relative；
+         底部居中漂浮，5s 自消失，点击立即关闭。 */}
+    {summonErr && (
+      <div
+        onClick={() => setSummonErr(null)}
+        style={{
+          position: 'fixed', left: '50%', bottom: 32, zIndex: 9999,
+          transform: 'translateX(-50%)',
+          padding: '10px 18px', borderRadius: 6,
+          background: 'rgba(181,90,79,0.96)', color: '#fff',
+          fontSize: 12.5, lineHeight: 1.5, maxWidth: 420,
+          boxShadow: '0 6px 22px rgba(60,40,20,0.28)',
+          cursor: 'pointer',
+          animation: 'sj-anno-toast-in 0.18s cubic-bezier(.2,.9,.3,1.2)',
+        }}
+        title="点击关闭"
+      >
+        {summonErr}
+      </div>
+    )}
+    {/* P1-7 / P0-3: 局部关键帧供 popover 淡入 + toast 弹入使用 */}
+    <style>{`
+      @keyframes sj-pop-in { from { opacity: 0; transform: translateY(-4px) scale(0.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
+      @keyframes sj-anno-toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    `}</style>
     </div>
   )
 }

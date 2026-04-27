@@ -210,7 +210,7 @@
 - ~~**electron/ipc/library.ts:326 save-ocr-text**：`absPath.replace(/\.pdf$/i, '.ocr.txt')`——非 .pdf 扩展名时没替换到，返回跟源一样的路径，`.ocr.txt` 结尾生成 `原名.ocr.txt` 最终还是正确（因为是追加）。边缘但不是 bug。~~ → **R8#5 修(其实是真 bug,不是边缘 — 非 PDF 会 atomicWrite 覆盖源文件)**
 - **src/App.tsx:301** `initLibrary().then(...)` 里 `setTimeout(openEntry, 300)` 无清理。如果用户 300ms 内触发了手动 openEntry，会 double-open——但 openEntry 内部检查 currentEntry.id 即可容忍。观察。
 - ~~**electron/ipc/agent.ts:279** `agent-save-conversation` read-modify-write 没走 lock。两个窗口并发写会失一条。但用户几乎不会开俩窗口同时跟 Hermes 对话。~~ → **R8#3 已修**(`withConversationsLock` 包 save + delete 两个 RMW 序列)
-- **src/store/uiStore.ts:158,164,165** `localStorage.getItem` 的数字解析用 `Number(v)` 没防 NaN——如果用户手动改坏 localStorage，aiContextWindow 会变 NaN。下游使用点应该也没崩过（NaN 传给比较器都是 false），但不严谨。
+- ~~**src/store/uiStore.ts:158,164,165** `localStorage.getItem` 的数字解析用 `Number(v)` 没防 NaN——如果用户手动改坏 localStorage，aiContextWindow 会变 NaN。下游使用点应该也没崩过（NaN 传给比较器都是 false），但不严谨。~~ → **R5#3 修过 uiStore.ts;R8#8 把全 app 其它 4 处也清扫(App.tsx / AnnotationPanel / PdfViewer x2,新增 utils/safeStorageRead.readNumber 共享 helper)**
 
 ---
 
@@ -491,6 +491,22 @@
 
 **注释标签**：`// BUG-FIX R8#1 · char class 里 ~~ 是重复(R1 观察项),清成 ~`
 
+### BUG-FIX R8#8 · src/utils/safeStorageRead.ts (新建) + 4 处调用 · localStorage 数字读 NaN 防御 sweep
+**原问题**：R2 观察项第 4 条延伸。R5#3 已修 uiStore 内部,但 grep 发现 4 个文件 5 处其它 `Number(localStorage.getItem(...))` 都没防 NaN:
+- `App.tsx:337` 更新检查时间戳 → NaN 比较全 false → 用户永远不会再被检查更新
+- `AnnotationPanel.tsx:753` 注释面板宽度 → NaN 让 panel 缩到 0 隐身
+- `PdfViewer.tsx:2178` lsGet helper 给 6 个 OCR slider 用(fontSize/fontWeight/colorDepth/bgHue/bgSat/bgLight)→ NaN 让 OCR 文本不可读
+- `PdfViewer.tsx:2572` 滚动位置恢复 → NaN > 0 false → 不恢复(还算软失败)
+
+**修复**：抽 `src/utils/safeStorageRead.readNumber(key, default, minValue?)` 共享 helper:
+- `localStorage.getItem(key) === null` → return default
+- `Number.isFinite(n) === false` → return default(NaN/Infinity 兜底)
+- `minValue` 给定且 `n <= minValue` → return default(panel 宽度等场景的下限保护)
+
+4 处调用点统一走 readNumber。AgentPanel:505 已经有 min/max 检查恰好碰巧防住 NaN(`NaN >= MIN` 是 false 落到 default),保持不动。
+
+**注释标签**：`// BUG-FIX R8#8 · NaN 防御 ...`
+
 ### BUG-FIX R8#5 · electron/ipc/library.ts:326+ · save-ocr-text 非 .pdf 扩展名会覆盖源文件
 **原问题**：R2 观察项第 1 条,但 audit 写的"边缘但不是 bug"低估了。
 - `pdfAbsPath.replace(/\.pdf$/i, '.ocr.txt')` 对 `.epub` / `.docx` / `.txt` 这类不匹配 → ocrPath = pdfAbsPath
@@ -523,6 +539,11 @@
 - `src/components/Agent/personaCitationParse.ts`（R8#1）
 - `electron/ipc/agent.ts`（R8#3）
 - `electron/ipc/library.ts`（R8#5）
+- `src/utils/safeStorageRead.ts`(R8#8 · 新建)
+- `src/App.tsx`(R8#8)
+- `src/components/AnnotationPanel/AnnotationPanel.tsx`(R8#8)
+- `src/components/PdfViewer/PdfViewer.tsx`(R8#7 + R8#8)
 - 用户体验/性能(无 BUG-FIX 编号但同 Round):
   - `src/components/Agent/PersonasTab.tsx`(UX-R8#2)
-  - `src/components/PdfViewer/PdfViewer.tsx`(PERF-R8#4)
+  - `src/components/Agent/personaRagStatus.tsx`(UX-R8#6)
+  - `src/components/PdfViewer/PdfViewer.tsx`(PERF-R8#4 / R8#7)

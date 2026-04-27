@@ -4,6 +4,48 @@
 
 ---
 
+## 2026-04-28 · Batch 51 · 夜间值守 Round 8 #8 · Bug · localStorage NaN 防御 sweep
+
+主题：**bug fix · R2 观察项第 4 条延伸 — 全 app localStorage 数字读 NaN 防御**
+
+### 修了什么(R8#8)
+
+新建 `src/utils/safeStorageRead.ts` · 单 export:
+```ts
+readNumber(key: string, defaultValue: number, minValue?: number): number
+```
+- `null` / 不存在 → default
+- 不是 finite number → default
+- 给了 minValue 且 `n <= minValue` → default(panel 宽度等下限保护)
+
+替换 4 个文件 5 处的裸 `Number(localStorage.getItem(...))`:
+
+| 文件 | 影响 |
+|------|------|
+| `App.tsx:337` 更新检查时间戳 | NaN 比较全 false → 用户永远不会再被检查更新 |
+| `AnnotationPanel.tsx:753` 注释面板宽度 | NaN 让 panel 缩到 0 隐身 |
+| `PdfViewer.tsx:2178` lsGet 给 6 个 slider 用 | NaN 让 OCR fontSize/字重/颜色全坏掉,文本不可读 |
+| `PdfViewer.tsx:2572` 滚动位置恢复 | NaN > 0 false → 不恢复(算软失败) |
+
+`AgentPanel.tsx:505` 已有 min/max 检查恰好碰巧防住 NaN(`NaN >= MIN` 是 false),不动。
+
+### 触发场景
+
+用户从浏览器开发者工具手动改 localStorage / 旧版本 app 写入过非数字值 / extension 写脏数据。罕见但一次中毒就静默坏一堆 UX。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 32.25s 通过
+
+### 后续
+
+R2 观察项剩 1 条:App.tsx:301 setTimeout(openEntry,300) 清理。这是夜间值守开局时点过的最后一个明确欠款。
+
+下轮 Round 8 #9 必须 PERF 或 UX。
+
+---
+
 ## 2026-04-28 · Batch 50 · 夜间值守 Round 8 #7 · PERF · ImmersiveAnnotationBox cache + selector
 
 主题：**perf · ImmersiveAnnotationBox 三处共同优化**
