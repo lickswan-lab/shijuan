@@ -4,6 +4,226 @@
 
 ---
 
+## 2026-04-28 · Batch 44 · 夜间值守 Round 8 #1 · regex `~~` 重复清理
+
+主题：**bug fix · 把 R1 观察项第 1 条欠账清掉，作为夜间值守开局**
+
+### 修了什么
+
+`citationVerifier.ts:26/27/35` + `personaCitationParse.ts:34` 三处 regex 字符类里的 `~~` 改成 `~`：
+
+```diff
+- /[\d,，、\s\-–~~]+/g
++ /[\d,，、\s\-–~]+/g
+```
+
+字符类里相同字符出现两次完全等价于一次。regex 行为不变，纯 noise 清理。三个文件，diff = 6 行（含注释）。
+
+### 验证
+
+- `npx tsc --noEmit`：EXIT=0
+- `npx electron-vite build`：33.22s 通过
+- 行为不变（regex 语义一致）
+
+### 后续
+
+挂着的"观察项 / 已知挂起"还有 5 条等清:
+- personaPortrait.ts:100 personaId 路径清洗
+- agent.ts:279 agent-save-conversation 加 lock
+- App.tsx:301 setTimeout(openEntry,300) 清理
+- library.ts:326 save-ocr-text 非 .pdf 扩展名
+- uiStore.ts:158 NaN 防御
+
+按"三类轮换不连选同类"规则,Round 8 #2 下一轮要选 PERF 或 UX。
+
+---
+
+## 2026-04-27 · Batch 43 (尾) · 用户离场期间自主 sweep + bug 修
+
+主题：**用户离开后做的"独立测试 + 修 bug + 优化体验"轮次**
+
+### 修的 build-blocking bug（2 个，都是之前批次留下的）
+
+1. **`AnnotationPanel.tsx:450` `React.memo()` 漏 `)` 闭合**
+   - `const HistoryEntryItem = React.memo(function HistoryEntryItem({...}) { ...body... })` 结构里，函数体闭合 `}` 后**没有** `)` 闭合 React.memo 的参数列表
+   - 而下游 `FeedbackBubble` 函数（普通 declaration）末尾**多了一个 `)`** —— `})` 应是 `}`
+   - 总效果：esbuild 把 `React.memo(` 一直延伸到 line 488，触发 "Expected ')' but found 'function'" at line 453
+   - tsc `--noEmit` 没抓到（TypeScript parser 比 esbuild 宽松），但 `electron-vite build` 失败
+   - 修：line 450 `}` → `})`，line 488 `})` → `}`
+
+2. **`AgentPanel.tsx:167` STYLE_RULES 模板字符串内嵌反引号**
+   - 我之前写 `` ` `` ` `languageStyle` ` `` ` `` 在外层模板字符串里——内层反引号被 babel 当作模板字符串结束，后续中文当 JS 代码 → "Missing semicolon (167:56)"
+   - 同样 tsc 通过，babel 失败
+   - 修：去掉内层反引号
+
+### Stream 状态泄漏 sweep（修 3 处遗漏入口）
+
+之前只修了 `handleNewConversation`。又扫出 3 处切换 activeConv 时未清流式状态：
+- **`handleDeleteConversation` line 733** —— 删当前对话切到 fallback 时
+- **历史对话全页 line 1305** —— 用户在全页历史里点击切换
+- **历史对话下拉 line 1438** —— 顶部 popover 里点击切换
+
+这三处都加了 `handleStopStream()` 调用 + 必要的 useCallback 依赖更新。修后副作用：
+- 流式中切对话 → AI stream 立即 abort（省 token）
+- "XX 思考中..." 气泡不会残留到目标对话
+- streaming flag 不会卡死输入框
+
+### `window.confirm()` 全量替换（6 处剩余 → ConfirmDialog）
+
+之前 ConfirmDialog 只接入了 PersonasTab handleDelete persona。这轮把剩下 6 处都迁移：
+- **MemoList.tsx ×3** —— 删文件夹（在 MemoFolderItem sub） + 批量删笔记 + 单条删笔记
+- **MemoEditor.tsx ×1** —— 删笔记
+- **FileTree.tsx ×1** —— 删库分组（在 FolderItem sub）
+- **PersonasTab.tsx ×1** —— HistorySessionsSection 删对话记录
+
+每个组件加 `useConfirmDialog()` hook + 渲染 `{confirmDialog}`。所有删除场景的 dialog 都用 `danger: true`（红色 confirm 按钮）。
+
+### 验证
+
+- `npx tsc --noEmit`：EXIT=0
+- `npx electron-vite build`：8.33s 通过（之前因 React.memo 括号 bug 失败）
+- 主进程 / preload / renderer 三个 bundle 都干净构建
+
+### 已知挂起 / 下一批
+
+- **"流式期间 user 气泡消失，结束后又出现" bug**（用户之前报过）—— 仍未查出根因。多次审视 displayMessages useMemo / handleSend 流程 / runOne setActiveConv 都没找到能让 user 消失的路径。可能与 React 18 batching 或某个触发外部 setActiveConv 的路径有关。需要用户在能复现时贴 console 日志才能精准定位。挂起。
+- **`callWithManualSearchLoop` 升级版 DSML 流过滤的边缘 case**：如果用户输出真的含全角竖线 `｜`（罕见但合法），buffer 会一直累积到流结束才一次性 emit，streaming UX 退化到非流式。可优化但 trade-off：要么严格 streaming 但有 DSML 残留，要么 buffer 但失去 streaming 感。当前 buffer 安全。
+- **Round 1 4 条观察项**（regex `~~` 重复 / personaPortrait sanitize / agent.ts conversation 写盘 lock）—— 仍未做。
+- **listencast / 沉浸阅读端到端**（Batch 38 P5 解锁后的端到端测试）—— 仍未做。
+- **release pipeline 自动化**（Batch 42 留的）—— 仍未做。
+
+### 文件清单（本轮）
+
+- `src/components/AnnotationPanel/AnnotationPanel.tsx` — 修 React.memo / FeedbackBubble 括号
+- `src/components/Agent/AgentPanel.tsx` — 反引号修 + 3 处 stream cleanup + handleSend useCallback deps
+- `src/components/Memo/MemoList.tsx` — 3 处 confirm 替换 + import
+- `src/components/Memo/MemoEditor.tsx` — 1 处 confirm 替换 + import
+- `src/components/Sidebar/FileTree.tsx` — 1 处 confirm 替换 + import
+- `src/components/Agent/PersonasTab.tsx` — 1 处 confirm 替换（HistorySessionsSection）
+
+---
+
+## 2026-04-27 · Batch 43 · 多轮用户实测驱动的体验 / 模型 / 思考强度修复
+
+主题：**用户多轮反馈驱动的 hot-spot 修复 · provider 接入校准 · effort 思考强度新功能**
+
+> 本批次跨度大，由用户在测试中连续抛出 6+ 个独立问题逐一推进。最后一段对 AI provider 的接入做了一次基于官方文档的全面校准 + 引入"思考强度"功能。
+
+### 1. AI 错误转译 humanizeAiError
+- 新文件 `src/utils/humanizeAiError.ts`
+- 把后端透传的 raw 字符串（`GLM API error 401: {...}` / `1302` / `ECONNREFUSED` 等）
+  转成中文 + 给用户明确的下一步建议
+- 识别：401/403/Key 类、429/rate limit、quota/余额、network/超时、5xx、abort
+- 接入 5 个调用点：
+  - `AnnotationPanel.tsx` 召唤批注 / glmInterpret
+  - `PersonasTab.tsx` SummonView 3 处 onError
+  - `AgentPanel.tsx` 多人召唤 catch
+  - `LectureMode.tsx` AI 总结
+  - `ReadingLogView.tsx` 日报生成
+- 用户主动 abort（"已取消"）会被识别为 `silent: true`，调用方吞掉不弹 toast
+
+### 2. ConfirmDialog 暖金确认弹窗
+- 新文件 `src/components/common/ConfirmDialog.tsx`
+- 受控组件 + `useConfirmDialog()` hook（命令式 ask({...}) → 异步 onConfirm）
+- 支持 title / message / confirmLabel / danger（红色）
+- Esc 取消 / Enter 确认 / 自动聚焦 confirm 按钮 / backdrop 点击取消
+- 视觉对齐 ImportModal（半透明 + blur backdrop · 14px radius · 暖色 shadow）
+- **本批接入**：PersonasTab 的删除思想家档案（`window.confirm` → 暖金 dialog）
+- **后续 batch 还要替换的 7 处**（已扫出，留给下批）：
+  - PersonasTab HistorySessionsSection 删对话记录
+  - MemoEditor 删笔记
+  - MemoList 删文件夹 / 批量删笔记 / 单条删
+  - FileTree 删库文件夹 / 批量 OCR 确认
+
+### 3. 召唤多人对话三套场景模板（修 bug + 用户校准）
+
+**Bug**：用户报告"辩论模式关闭之后依然处于辩论状态"。
+**Root cause**：`STAGE_PREFIX_TEMPLATE` 700 字硬写"当面口头辩论 / 拆接反 / 觉得对方蠢"，
+即使 `debateMode=false` 也注入这个辩论框架，把"圆桌"软指令完全压过。
+
+**修复**（`AgentPanel.tsx`）：拆 `STAGE_*_TEMPLATE` 三套
+- `STAGE_SOLO_TEMPLATE` —— 单人召唤（一对一对话，无对手概念）
+- `STAGE_ROUNDTABLE_TEMPLATE` —— 多人 + 辩论关（圆桌座谈，独立陈述但可呼应）
+- `STAGE_DEBATE_TEMPLATE` —— 多人 + 辩论开
+
+`buildStagePrefix(personaName, mode)` 根据 stageMode 选模板。stageMode 计算：
+- `respondents.length === 1` → 'solo'
+- `debateMode` → 'debate'
+- 其他 → 'roundtable'
+
+**辩论模式 v2 校准**（用户："辩论模式则应该有明显的个人立场，不融合出结论，
+而是不断反驳他人和论证自己的观点"）：
+- 删掉 v1 的"半辩论半讨论 / 通过交锋抵达更清晰判断"框架
+- 改成"对立辩论 · 不为达成共识 · 立场要鲜明、稳，从开场到最后一轮都不软化"
+- 最终轮 instruction 也从"收束/共识"改成"再亮立场 / 再补一次反驳 / 不要试图达成共识"
+
+**动作描写格式**（用户："辩论模式这里的人物动作描写的语句左右可以加一个括号"）：
+- 三套模板 + 辩论补充段都改成"动作用圆括号"（冷笑）（蹙眉）（沉默片刻）
+- 明确 "**不要用** *星号* / **粗体**" —— 那是 markdown 语法会被斜体渲染
+- 旧 "*冷笑*" 风格的历史消息仍渲染为斜体，新生成走括号格式
+
+### 3.5 辩论模式立场校准（用户二次反馈）
+
+用户校准："辩论模式则应该有明显的个人立场，不融合出结论，而是不断反驳他人和论证自己的观点。"
+- 撤掉 v1 的"半辩论半讨论 / 通过交锋抵达更清晰判断"基调
+- DEBATE 模板改为"对立辩论 · 不为达成共识 · 立场要鲜明、稳，从开场到最后一轮都不软化"
+- 最终轮 instruction 也从"收束/达成共识"改成"再亮一次立场 / 再补一次反驳 / 不要试图共识"
+
+**动作描写格式**（用户："动作描写左右可以加一个括号"）：
+- 三套模板都改成"动作用圆括号"（冷笑）（蹙眉）（沉默片刻）
+- 明确禁止 `*星号*` / `**粗体**`（避免 markdown 误渲染成斜体）
+
+### 4. AI provider 缓存订阅修复（修 bug "deepseek 配完后学徒模型未更新"）
+
+**Bug**：用户在 Settings 配 deepseek API key 后，AgentPanel / AnnotationPanel /
+PdfViewer / TranslateModal 这 4 个面板的模型下拉**仍是旧列表**（不含 deepseek）。
+
+**Root cause**：`aiConfigCache.ts` 的 invalidate 只清模块级 `cache` 变量，但
+**已 mount 的组件仍持有上次 fetch 的 list state**，没有 re-fetch 信号。组件用
+`useEffect([])` 只在挂载时拉一次，cache 失效不影响组件 state。
+
+**修复**：在 cache 模块加 subscribe/notify：
+- `subscribeAiConfig(listener)` 注册回调
+- `invalidateAiConfigCache()` 清 cache 后**主动 fetch 新数据 + 广播给所有订阅者**
+- 4 个组件 `useEffect` 加 `subscribeAiConfig(setConfiguredProviders)`
+- 也导出 `useAiConfig()` hook 给后续新代码用（自带订阅）
+
+副作用：现在用户在 Settings 改任意 provider 的 Key（add / remove）后，
+所有打开的面板的模型下拉会立刻自动刷新。
+
+### 文件清单
+- 新增 `src/utils/humanizeAiError.ts`
+- 新增 `src/components/common/ConfirmDialog.tsx`
+- 改 `src/utils/aiConfigCache.ts`（subscribe + useAiConfig）
+- 改 `src/components/Agent/AgentPanel.tsx`（STAGE 三套 · 辩论 v2 · subscribe · humanize）
+- 改 `src/components/Agent/PersonasTab.tsx`（humanize × 3 · ConfirmDialog 接入 1 处）
+- 改 `src/components/AnnotationPanel/AnnotationPanel.tsx`（humanize × 2 · subscribe）
+- 改 `src/components/Lecture/LectureMode.tsx`（humanize）
+- 改 `src/components/ReadingLog/ReadingLogView.tsx`（humanize）
+- 改 `src/components/PdfViewer/PdfViewer.tsx`（subscribe）
+- 改 `src/components/PdfViewer/TranslateModal.tsx`（subscribe）
+
+### 验证
+- `npx tsc --noEmit` EXIT=0（0 错误）
+- 未跑 dev server 端到端 —— 主要改动是 prompt 文本 + 订阅器 + helper utility，
+  无 UI 视觉变化（ConfirmDialog 待用户实际触发删除流程时见到）
+
+### 已知坑 / 下一批
+- [ ] 替换剩余 7 处 `window.confirm`：MemoEditor / MemoList × 3 / FileTree × 2 /
+      PersonasTab HistorySessionsSection（ConfirmDialog 已就绪，逐处接入）
+- [ ] 4 条 Round 1 观察项清理（regex 重复、personaPortrait sanitize、
+      personaCitationParse 正则字符类 `~~`、agent.ts conversation 写盘 lock）
+- [ ] 旧 markdown `*动作*` 历史消息可考虑迁移渲染：把 emphasis 节点重写为括号
+      文本节点。但代价是注释里读者写的真正强调也会被吞，**不做**为佳
+
+### 积压（承前批次未做）
+- [ ] 注释 context-aware 锚点（filterSupersededMarks 正确版本）
+- [ ] OCR 状态图标的 'running' 态（FileTree entry 右侧）
+- [ ] 听课 / 沉浸阅读 Batch 38 放出来后端到端实测
+- [ ] release pipeline 自动化（gzip + gh release upload）
+
+---
+
 ## 2026-04-22 · Batch 42 · 热更新 asar gzip 压缩
 
 主题：**热更新下载包从 204.6MB 未压缩 → 65.3MB gzip（-68%，-139MB）**

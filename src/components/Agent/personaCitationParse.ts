@@ -31,14 +31,15 @@ export interface ParsedCitation {
 //   [资料 1] [资料1] 【资料 1】 【资料1】 [资料 1, 2] [资料 1、2、3] [资料1-3]
 // Doesn't match (intentional):
 //   bare "资料 1" without brackets — too noisy, would match prose like "这份资料 1 个月后…"
-const CITATION_REGEX = /[\[【]\s*资料\s*([\d,，、\s\-–~~]+)\s*[\]】]/g
+// BUG-FIX R8#1 · char class 里 ~~ 是重复(R1 观察项),清成 ~
+const CITATION_REGEX = /[\[【]\s*资料\s*([\d,，、\s\-–~]+)\s*[\]】]/g
 
 // Expand "1, 2, 3-5" → [1, 2, 3, 4, 5]. Returns deduped sorted ints.
 function expandNumberList(raw: string): number[] {
   const out = new Set<number>()
   const parts = raw.split(/[,，、\s]+/).filter(Boolean)
   for (const p of parts) {
-    const range = p.match(/^(\d+)\s*[\-–~~]\s*(\d+)$/)
+    const range = p.match(/^(\d+)\s*[\-–~]\s*(\d+)$/)
     if (range) {
       const a = parseInt(range[1], 10)
       const b = parseInt(range[2], 10)
