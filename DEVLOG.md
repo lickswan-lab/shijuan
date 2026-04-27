@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-04-28 · Batch 49 · 夜间值守 Round 8 #6 · UX · PersonaRagPill error 详情面板
+
+主题：**UX · _UX_AUDIT_TODO P2-5 落地**
+
+### 修了什么(R8#6)
+
+`src/components/Agent/personaRagStatus.tsx` 的 PersonaRagPill 组件:
+- error 状态下 pill 改为带 ▾/▴ 的可展开按钮(label `失败 ▾` / `失败 ▴`)
+- 点击 error pill → 展开 inline 详情面板,显示 `state.message`(完整失败原因) + "收起" / "重试构建" 两个按钮
+- 详情面板用 `position: absolute` 定位在 pill 下方,不影响外层 Card 布局
+- state.kind 切回非 error 时面板自动收起
+
+### 为什么有用
+
+之前用户看到红色"索引失败"pill 时,失败原因(API 限流/key 失效/余额不足等)只有 hover title 才出现。多数用户根本不会想到去 hover,看到红 pill 直接懵或点击触发重试,如果原因没解决就再次失败死循环。
+
+现在 hover 仍有 tooltip,但 pill 的 ▾ 暗示可展开,点击直接看到完整 message,旁边就是重试按钮,流程完整。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 33.00s 通过
+- 手测路径:用 invalid Key 触发 RAG 失败 → pill 应显示 `失败 ▾` → 点击 → 看到完整 message
+
+### 后续
+
+下轮 Round 8 #7 必须 Bug 或 PERF。bug 池里 R2 观察项剩 2 条:App.tsx:301 setTimeout / uiStore NaN。
+
+---
+
 ## 2026-04-28 · Batch 48 · 夜间值守 Round 8 #5 · Bug · save-ocr-text 非 PDF 覆盖源文件
 
 主题：**bug fix · R2 观察项第 1 条原 audit 标"边缘但不是 bug",实际是真 bug**

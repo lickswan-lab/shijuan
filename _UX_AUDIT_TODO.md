@@ -41,10 +41,9 @@
 - 位置：`PersonasTab.tsx:504, 1299`
 - 修法建议：抽一个 `<ConfirmDialog>` 组件，在两处都用。
 
-### P2-5 · RAG pill tooltip 信息丰富但要 hover 才见
+### ~~P2-5 · RAG pill tooltip 信息丰富但要 hover 才见~~ → **R8#6 已修**
 当前索引失败时 pill 只显示"索引失败"，详细 `message` 要 hover title 才看到。失败原因经常是 API 限流 / Key 失效这种用户需要立刻知道的事。
-- 位置：`personaRagStatus.tsx:369-375`
-- 修法建议：失败时加一个 "?" 小图标，点击展开一个 inline 面板显示 message + "重试"按钮。
+→ pill 改为带 ▾/▴ 的可展开按钮,error 状态点击展开 inline 面板:显示 state.message + "收起"/"重试构建"两个按钮,position: absolute 不影响外层布局。
 
 ### P2-6 · CitationBadge 的 hover tooltip 是 native `title`，信息密度低
 badge 悬浮提示用浏览器 `title` 属性，多行 `\n` 在某些 OS 会被吞。
