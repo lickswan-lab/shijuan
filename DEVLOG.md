@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-04-28 · Batch 57 · 夜间值守 Round 8 #14 · PERF · AgentPanel 头像缓存模块化
+
+主题：**perf · AgentPanel 头像 useState cache → 模块级共享 cache**
+
+### 修了什么(R8#14)
+
+新建 `src/utils/personaPortraitCache.ts`:
+- `getPortraitDataUrl(personaId): Promise<string | null>` 走模块级 Map cache
+- inflight Promise dedup(多组件同时请求同 id 共享同一 Promise)
+- 失败值也 cache(避免反复 fail 重试)
+
+`AgentPanel.tsx`:
+- 之前 `setPortraitCache` 是 useState,每次 AgentPanel mount/unmount(用户切右侧面板)都重新 IPC 拉所有曾经出现过的 persona 肖像。10 个 persona × 切 5 次 = 50 次 IPC + 文件读。
+- 现在 useEffect 内调 `getPortraitDataUrl(id)`,模块 cache 命中直接同步返回,只剩首次 mount 那一波 IPC
+
+### 留作后续
+
+PersonasTab.tsx 自己有一份本地 `portraitMemoryCache` + slug fallback。两个 cache 现在并存(各自独立),功能正确但有重复。下次可以合并(让 PersonasTab 也走新 util,把 slug fallback 作为可选行为参数)。本轮 scope 控制只动 AgentPanel。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 31.80s 通过
+
+### 后续
+
+下轮 Round 8 #15 必须 Bug 或 UX。
+
+---
+
 ## 2026-04-28 · Batch 56 · 夜间值守 Round 8 #13 · UX · API Key 错误 toast 接 CTA "去设置"
 
 主题：**UX · _UX_AUDIT_TODO P2-8 部分完成 — humanizeAiError 的 ctaSettings 标志接入 toast**
