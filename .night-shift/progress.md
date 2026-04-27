@@ -4,7 +4,7 @@
 **起始时间**: 2026-04-28 (lickswan 离场,要求自主跑 bug / 性能 / UX 三类轮换)
 **结束**: 等用户起床中断
 
-## Round 8 总览(17 commits)
+## Round 8 总览(18 commits)
 
 | # | 类别 | Batch | 主题 | 文件 |
 |---|---|---|---|---|
@@ -25,14 +25,15 @@
 | 15 | UX | 58 | SummonView 发送按钮尺寸对齐(P1-6) | PersonasTab.tsx · UI polish #50 |
 | 16 | Bug | 59 | apprentice weekCode 路径清洗 | apprentice.ts |
 | 17 | UX | 60 | ReadingLog 错误 toast CTA(R8#13 扩散) | ReadingLogView.tsx |
+| 18 | PERF | 61 | RAG cosineSim 热路径优化 | personaEmbeddingApi.ts / personas.ts |
 
 ## 类别分布
 
 - **Bug**: 7 轮 (#1, #3, #5, #8, #10, #12, #16)
 - **UX**: 6 轮 (#2, #6, #9, #13, #15, #17)
-- **PERF**: 4 轮 (#4, #7, #11, #14)
+- **PERF**: 5 轮 (#4, #7, #11, #14, #18)
 
-总计 17 轮,严格遵守"三类轮换不连选同类"。
+总计 18 轮,严格遵守"三类轮换不连选同类"。
 
 ## 里程碑
 
