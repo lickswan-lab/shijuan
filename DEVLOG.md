@@ -4,6 +4,42 @@
 
 ---
 
+## 2026-04-28 · Batch 47 · 夜间值守 Round 8 #4 · PERF · PdfViewer zustand 全量解构 → selector
+
+主题：**perf · 对照 PERF-R7#1 (App.tsx) 把 PdfViewer 也改成 selector 订阅**
+
+### 修了什么(R8#4)
+
+`src/components/PdfViewer/PdfViewer.tsx:2108-2110` 之前是:
+```tsx
+const { currentEntry, currentPdfMeta, updatePdfMeta, updateEntry } = useLibraryStore()
+const { textSelection, setTextSelection, setActiveAnnotation, glmApiKeyStatus, immersiveMode, darkMode, dualPageMode, searchHighlight, setSearchHighlight } = useUiStore()
+```
+
+两次全量订阅 — 任何 libraryStore / uiStore 字段变化(比如高频的 `currentVisiblePage`)都把 PdfViewer 整树重渲。改成 13 个独立 `useXxxStore(s => s.field)` selector,只对真正用的字段订阅。
+
+### 预期收益
+
+PdfViewer 是大组件(~5500 行),内部还嵌着 OcrContent / Bilingual / DOCX / EPUB / TextLayer 一堆子树。每次重渲要 reconcile 整树。最直接受益:
+- 用户滚动 PDF 时,uiStore 高频更新 `currentVisiblePage`(每页可见性变都更),旧版让 PdfViewer 整树都进 reconcile;新版只有真用 currentVisiblePage 的子组件订阅它(目前主体不订阅)
+- 用户在 Sidebar 里点击切换主题(darkMode 变),触发的 reconcile 也会窄
+- AI 即时生成 stream 期间频繁 setState,即使是不相关字段也不再波及 PdfViewer
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 35.44s 通过
+
+### 注意
+
+L1843-L1844 还有一个内嵌组件(AnnotationPopover-like)用了 useLibraryStore() 全量解构,scope 较小先放着,下一轮 PERF 再清理。
+
+### 后续
+
+下轮 Round 8 #5 必须 Bug 或 UX(因为 #4 是 PERF)。bug 池里 R2 观察项还剩 3 条:library.ts 非 .pdf 命名 / App.tsx setTimeout 清理 / uiStore NaN 防御。
+
+---
+
 ## 2026-04-28 · Batch 46 · 夜间值守 Round 8 #3 · Bug · agent.ts conversation RMW 加锁
 
 主题：**bug fix · _BUG_REPORT.md R2 观察项第 3 条 — 并发 RMW 覆写**

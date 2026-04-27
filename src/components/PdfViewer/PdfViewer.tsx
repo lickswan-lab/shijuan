@@ -2106,8 +2106,23 @@ function LazyPdfPage({
 }
 
 export default function PdfViewer() {
-  const { currentEntry, currentPdfMeta, updatePdfMeta, updateEntry } = useLibraryStore()
-  const { textSelection, setTextSelection, setActiveAnnotation, glmApiKeyStatus, immersiveMode, darkMode, dualPageMode, searchHighlight, setSearchHighlight } = useUiStore()
+  // PERF-R8#4 · zustand 全量解构 → selector 订阅(对照 PERF-R7#1 在 App.tsx 做的)。
+  //   原:`const { ... 4 fields } = useLibraryStore()` + `const { ... 9 fields } = useUiStore()`
+  //   两次全量订阅,任何 store 字段变化都让 PdfViewer 重渲(currentVisiblePage / scrollPos
+  //   等高频字段会刷得很多次)。改成 13 个独立 selector 后只对真正用到的字段订阅。
+  const currentEntry = useLibraryStore(s => s.currentEntry)
+  const currentPdfMeta = useLibraryStore(s => s.currentPdfMeta)
+  const updatePdfMeta = useLibraryStore(s => s.updatePdfMeta)
+  const updateEntry = useLibraryStore(s => s.updateEntry)
+  const textSelection = useUiStore(s => s.textSelection)
+  const setTextSelection = useUiStore(s => s.setTextSelection)
+  const setActiveAnnotation = useUiStore(s => s.setActiveAnnotation)
+  const glmApiKeyStatus = useUiStore(s => s.glmApiKeyStatus)
+  const immersiveMode = useUiStore(s => s.immersiveMode)
+  const darkMode = useUiStore(s => s.darkMode)
+  const dualPageMode = useUiStore(s => s.dualPageMode)
+  const searchHighlight = useUiStore(s => s.searchHighlight)
+  const setSearchHighlight = useUiStore(s => s.setSearchHighlight)
   const [numPages, setNumPages] = useState(0)
   const [scale, setScale] = useState(1.0)
   // Which pages are currently "in render range" — others render as a fixed-
