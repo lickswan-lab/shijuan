@@ -4,6 +4,42 @@
 
 ---
 
+## 2026-04-28 · Batch 53 · 夜间值守 Round 8 #10 · Bug · App.tsx setTimeout cleanup + race
+
+主题：**bug fix · 清空 R1+R2 观察项最后一条欠款**
+
+### 修了什么(R8#10)
+
+`src/App.tsx` 的 init useEffect 之前裸跑 `setTimeout(openEntry, 300)`:
+- 没跟踪 timer handle → component unmount 时 orphaned
+- 没防 race → 用户在 300ms 内手动 openEntry,这个 timer 又 fire 覆盖用户选择(虽然 openEntry 内部能容忍但还是不该这么粗糙)
+
+顺手扫到同 useEffect 里 `setTimeout(3000)` 触发 update check 的也没 cleanup,一并补上。
+
+修法:
+- 顶部 `let cancelled = false` + 两个 timer handle
+- timer fire 时 check `cancelled` + `currentEntry`(已设就跳过尊重用户)
+- 统一 cleanup 清两 timer + listener + cancelled
+
+### 里程碑
+
+**Round 1 + Round 2 观察项 8 条全部清空** 🎉
+- R1: regex `~~`(R8#1) / aiThrottle 安全(原本就是 OK 备注) / personaPortrait sanitize(uuid 安全 → 暂留) / personas embed RPM(aiThrottle 兜得住 → 暂留)
+- R2: save-ocr-text 命名(R8#5) / App.tsx setTimeout(R8#10) / agent.ts RMW lock(R8#3) / uiStore NaN(R5#3 + R8#8 sweep)
+
+剩 R1 两条都是"安全"备注,不是 bug,正式归档。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 33.38s 通过
+
+### 后续
+
+下轮 Round 8 #11 选 PERF 或 UX。bug 池里没现成清单了,要扫新 bug 的话从 night-shift 入口 3 (静态 sweep · 找新 bug)开始,目标目录:Lecture / BatchOcr / QuickOpen / common / glmApi / aiApi handler。
+
+---
+
 ## 2026-04-28 · Batch 52 · 夜间值守 Round 8 #9 · UX · HistorySessions 乐观缓存
 
 主题：**UX · _UX_AUDIT_TODO P2-10 落地 — 切回 persona detail 不再看到 '加载中…' 闪烁**

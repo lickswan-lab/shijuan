@@ -208,7 +208,7 @@
 ## 🟢 Round 2 观察项（非 bug · 4 条）
 
 - ~~**electron/ipc/library.ts:326 save-ocr-text**：`absPath.replace(/\.pdf$/i, '.ocr.txt')`——非 .pdf 扩展名时没替换到，返回跟源一样的路径，`.ocr.txt` 结尾生成 `原名.ocr.txt` 最终还是正确（因为是追加）。边缘但不是 bug。~~ → **R8#5 修(其实是真 bug,不是边缘 — 非 PDF 会 atomicWrite 覆盖源文件)**
-- **src/App.tsx:301** `initLibrary().then(...)` 里 `setTimeout(openEntry, 300)` 无清理。如果用户 300ms 内触发了手动 openEntry，会 double-open——但 openEntry 内部检查 currentEntry.id 即可容忍。观察。
+- ~~**src/App.tsx:301** `initLibrary().then(...)` 里 `setTimeout(openEntry, 300)` 无清理。如果用户 300ms 内触发了手动 openEntry，会 double-open——但 openEntry 内部检查 currentEntry.id 即可容忍。观察。~~ → **R8#10 修(timer handle 跟踪 + cleanup 取消 + fire 时检查 currentEntry 已设就跳过尊重用户主动选择;顺手把同 effect 内的 update check timer 也补了 cleanup)**
 - ~~**electron/ipc/agent.ts:279** `agent-save-conversation` read-modify-write 没走 lock。两个窗口并发写会失一条。但用户几乎不会开俩窗口同时跟 Hermes 对话。~~ → **R8#3 已修**(`withConversationsLock` 包 save + delete 两个 RMW 序列)
 - ~~**src/store/uiStore.ts:158,164,165** `localStorage.getItem` 的数字解析用 `Number(v)` 没防 NaN——如果用户手动改坏 localStorage，aiContextWindow 会变 NaN。下游使用点应该也没崩过（NaN 传给比较器都是 false），但不严谨。~~ → **R5#3 修过 uiStore.ts;R8#8 把全 app 其它 4 处也清扫(App.tsx / AnnotationPanel / PdfViewer x2,新增 utils/safeStorageRead.readNumber 共享 helper)**
 
@@ -490,6 +490,21 @@
 **修复**：3 处 `~~` → `~`。tsc / build 全绿，无行为变化。
 
 **注释标签**：`// BUG-FIX R8#1 · char class 里 ~~ 是重复(R1 观察项),清成 ~`
+
+### BUG-FIX R8#10 · src/App.tsx · auto-restore setTimeout cleanup + race 防御
+**原问题**：R2 观察项第 2 条。`initLibrary().then(...)` 里 `setTimeout(openEntry, 300)` 无 timer handle 跟踪 + 不防 race:
+1. 组件 unmount(Ctrl+Shift+R reload 之间瞬间)→ orphaned timer
+2. 用户 300ms 内手动 openEntry → 紧接着这个 timer 又 openEntry,覆盖用户主动选择
+
+顺手扫到同 useEffect 里 update check 的 setTimeout(3000) 也是无 cleanup,一并修。
+
+**修复**：
+- 顶部 `let cancelled = false` 闭包标志
+- `restoreTimer` / `updateCheckTimer` handle 跟踪
+- timer fire 时 check `cancelled` 早返,以及 `currentEntry` 已设就跳过(尊重用户)
+- 统一 cleanup 函数清两个 timer + 听众 + cancelled 标志
+
+**注释标签**：`// BUG-FIX R8#10 · timer handle 跟踪 / 用户已开就跳过`
 
 ### BUG-FIX R8#8 · src/utils/safeStorageRead.ts (新建) + 4 处调用 · localStorage 数字读 NaN 防御 sweep
 **原问题**：R2 观察项第 4 条延伸。R5#3 已修 uiStore 内部,但 grep 发现 4 个文件 5 处其它 `Number(localStorage.getItem(...))` 都没防 NaN:

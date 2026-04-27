@@ -290,8 +290,17 @@ export default function App() {
   }, [])
 
   // Init library on mount
+  // BUG-FIX R8#10 · 原 R2 观察项第 2 条:setTimeout(openEntry, 300) 无清理 + 不防 race。
+  //   两个问题:
+  //   1) 组件 unmount 时 timer 未取消 — orphaned timer(单次启动 renderer 通常不卸载,
+  //      但 Ctrl+Shift+R reload 之间瞬间会有);
+  //   2) 用户 300ms 内手动 openEntry,再 fire 这个 timer 会 double-open(覆盖用户主动选择)。
+  //   修法:timer handle 跟踪 + cleanup 取消 + fire 时检查 currentEntry 已设就跳过。
   useEffect(() => {
+    let cancelled = false
+    let restoreTimer: ReturnType<typeof setTimeout> | null = null
     initLibrary().then(() => {
+      if (cancelled) return
       // Auto-restore last-opened entry (if file still exists).
       // Opt-out: user can disable via localStorage sj-noAutoRestore = "true"
       try {
@@ -311,7 +320,11 @@ export default function App() {
       // something the user hasn't touched in months.
       const ageDays = (Date.now() - new Date(mostRecent.lastOpenedAt!).getTime()) / 86400000
       if (ageDays > 14) return
-      setTimeout(() => {
+      restoreTimer = setTimeout(() => {
+        restoreTimer = null
+        if (cancelled) return
+        // 用户 300ms 内已经手动开了文献 → 跳过 auto-restore,尊重用户选择
+        if (useLibraryStore.getState().currentEntry) return
         useLibraryStore.getState().openEntry(mostRecent).catch(() => { /* file gone — fine */ })
       }, 300)
     })
@@ -324,8 +337,10 @@ export default function App() {
     }
 
     // Listen for midnight reading log generation
+    let logListenerCleanup: (() => void) | undefined
+    let updateCheckTimer: ReturnType<typeof setTimeout> | null = null
     if (window.electronAPI?.onReadingLogGenerated) {
-      const cleanup = window.electronAPI.onReadingLogGenerated((log) => {
+      logListenerCleanup = window.electronAPI.onReadingLogGenerated((log) => {
         const { library } = useLibraryStore.getState()
         if (library) {
           useLibraryStore.getState().saveReadingLog(log)
@@ -333,7 +348,10 @@ export default function App() {
       })
       // Background update check: only if ≥ 24h since last check (avoid hitting GitHub
       // on every startup). Runs 3s after mount so initial render isn't blocked.
-      setTimeout(() => {
+      // BUG-FIX R8#10 · 之前 setTimeout handle 没跟踪,renderer reload 时 timer 漏。
+      updateCheckTimer = setTimeout(() => {
+        updateCheckTimer = null
+        if (cancelled) return
         try {
           // BUG-FIX R8#8 · NaN 防御:坏数据时 last=0 → 总是触发检查(预期行为)
           const last = readNumber('sj-lastUpdateCheck', 0)
@@ -351,7 +369,13 @@ export default function App() {
           }).catch(() => { /* silent — don't bother user if network flakes */ })
         } catch { /* ignore localStorage errors */ }
       }, 3000)
-      return cleanup
+    }
+    // BUG-FIX R8#10 · 统一 cleanup:取消 cancelled 标志 + 两个 timer + 听众
+    return () => {
+      cancelled = true
+      if (restoreTimer !== null) clearTimeout(restoreTimer)
+      if (updateCheckTimer !== null) clearTimeout(updateCheckTimer)
+      if (logListenerCleanup) logListenerCleanup()
     }
   }, [])
 
