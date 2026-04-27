@@ -14,6 +14,8 @@ import { cleanOcrText } from './cleanOcrText'
 import { collectTextNodes } from './highlights'
 import TranslateModal, { type TranslateModalProps } from './TranslateModal'
 import { useTranslationJobsStore } from '../../store/translationJobsStore'
+// PERF-R8#7 · 共享 AI provider 配置 cache,免每个组件 mount 单独 IPC
+import { fetchAiConfig, subscribeAiConfig } from '../../utils/aiConfigCache'
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 
@@ -1840,15 +1842,20 @@ function ImmersiveAnnotationBox({ toolbar, textSelection, annotations, onAnnotat
   const [noteText, setNoteText] = useState('')
   const [aiResponse, setAiResponse] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
-  const { updatePdfMeta } = useLibraryStore()
-  const { selectedAiModel, setSelectedAiModel } = useUiStore()
+  // PERF-R8#7 · zustand 全量解构 → selectors,只对实际用的字段订阅
+  const updatePdfMeta = useLibraryStore(s => s.updatePdfMeta)
+  const selectedAiModel = useUiStore(s => s.selectedAiModel)
+  const setSelectedAiModel = useUiStore(s => s.setSelectedAiModel)
   const [configuredProviders, setConfiguredProviders] = useState<Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>>([])
 
   // Load configured AI providers
+  // PERF-R8#7 · 走 fetchAiConfig 共享 cache(对照 AnnotationPanel/AgentPanel 模式),
+  //   并订阅 invalidate 通知 → API key 在 Settings 改了立即响应,不用重开浮动框
   useEffect(() => {
-    if (window.electronAPI?.aiGetConfigured) {
-      window.electronAPI.aiGetConfigured().then(setConfiguredProviders).catch(() => {})
-    }
+    let cancelled = false
+    fetchAiConfig().then(r => { if (!cancelled) setConfiguredProviders(r) })
+    const unsub = subscribeAiConfig(latest => { if (!cancelled) setConfiguredProviders(latest) })
+    return () => { cancelled = true; unsub() }
   }, [])
 
   const existingAnn = annotations.find((a: any) => a.anchor?.selectedText === textSelection.text)
@@ -2494,7 +2501,8 @@ export default function PdfViewer() {
           const lastPage = mostRecent?.pageNumber || 0
 
           // Get an available provider: prefer configured ones, otherwise skip AI
-          const configured = await window.electronAPI.aiGetConfigured()
+          // PERF-R8#7 · 走 fetchAiConfig 共享 cache(命中缓存即同步)
+          const configured = await fetchAiConfig()
           if (!configured || configured.length === 0) {
             // No AI available → keep static reminder
             setRereadingReminder(prev => prev ? { ...prev, aiLoading: false } : null)

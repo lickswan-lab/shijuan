@@ -4,6 +4,45 @@
 
 ---
 
+## 2026-04-28 · Batch 50 · 夜间值守 Round 8 #7 · PERF · ImmersiveAnnotationBox cache + selector
+
+主题：**perf · ImmersiveAnnotationBox 三处共同优化**
+
+### 修了什么(R8#7)
+
+`src/components/PdfViewer/PdfViewer.tsx` 里的 `ImmersiveAnnotationBox` 子组件:
+
+1. **zustand 全量解构 → selectors**(L1843-1844):
+   - `const { updatePdfMeta } = useLibraryStore()` → `useLibraryStore(s => s.updatePdfMeta)`
+   - `const { selectedAiModel, setSelectedAiModel } = useUiStore()` → 拆 2 个 selector
+   - 不相关 store 字段变化不再让浮动批注框重渲
+
+2. **aiGetConfigured raw IPC → fetchAiConfig 共享 cache**(L1848-1852):
+   - 之前每次浮动框 mount 都跑一次 IPC + 文件读
+   - 改成走 `fetchAiConfig` cache(命中即同步)+ `subscribeAiConfig` 订阅 invalidate
+   - 用户在 Settings 改 API key 后浮动框自动响应,不用重开
+
+3. **L2497 一次性 await 也走 fetchAiConfig**:
+   - rereadingReminder 调用点也用同一个 cache,免重复 IPC
+
+### 为什么有用
+
+- ImmersiveAnnotationBox 用户每次进入 immersive 模式后选中文字都会 mount,频繁 IPC 是浪费
+- AnnotationPanel / AgentPanel / TranslateModal 早就走 cache 了,这里是漏的最后一处(grep 验证)
+- selector 模式让浮动框对无关 store 变化(滚动 / 主题切换 / dualPage 等)免疫
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 33.79s 通过
+- 手测路径:进 immersive 选中 → 浮动框出现 → 模型下拉应当瞬间填充(cache hit)而不是空一会儿才出来
+
+### 后续
+
+下轮 Round 8 #8 必须 Bug 或 UX(因为 #7 是 PERF)。bug 池里 R2 观察项剩 2 条:App.tsx setTimeout / uiStore NaN 防御,任意一条都行。
+
+---
+
 ## 2026-04-28 · Batch 49 · 夜间值守 Round 8 #6 · UX · PersonaRagPill error 详情面板
 
 主题：**UX · _UX_AUDIT_TODO P2-5 落地**
