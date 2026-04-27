@@ -4,6 +4,43 @@
 
 ---
 
+## 2026-04-28 · Batch 45 · 夜间值守 Round 8 #2 · UX · SummonView 跨 Ctrl+Shift+R 状态保持
+
+主题：**UX · _UX_AUDIT_TODO P2-1 落地 + 顺手把 P2-3 / P1-8 标已修**
+
+### 修了什么(P2-1)
+
+`PersonasTab.tsx` 加了一对 useEffect 把 `stage / current.id / summonInit.sessionId` 持久化到 sessionStorage(key = `shijuan.personasTab.state.v1`):
+- mount 时读 → 异步 personaLoad + 可选 summonSessionLoad → 还原 detail / summon 阶段
+- stage / current / summonInit 任一变化 → 写入(gallery / import / 没有 current 时清掉)
+
+sessionStorage 在 Electron 渲染器 reload 期间保留(关窗才清),正好适合"误触 Ctrl+Shift+R 不丢上下文"这个场景。
+- 仅恢复 'detail' / 'summon';'gallery' / 'import' 是过渡态,reload 后到 gallery 即可
+- persona 已删/损坏 → 清掉过期 state,自动回 gallery
+- 会话存档丢了 → 用同一个 sessionId 起空会话,后续保存重建
+
+### 顺带核对的过期审计项
+
+读 `_UX_AUDIT_TODO.md` 时发现两条已经做了但没标:
+- **P1-8**(personaList 为空时 AnnotationPanel 召唤按钮空态提示)
+  - 实际 line 2170-2190 已实现 P1-8/P2-9 合并的空态引导(去 Agent 面板召唤),audit 文档写的位置 line 2023-2044 实际是 FeedbackBubble 区域(过期了)
+- **P2-3**(SummonView 没有 Esc 关闭)
+  - 实际 line 1086-1105 已实现两段式 Esc:textarea 焦点先 blur,第二下才 onClose,流式期间不退
+
+两条直接划线归档。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 33.73s 通过
+- 手测路径(下次有时间):打开 Agent 面板召唤 tab → 进 detail 或 summon → Ctrl+Shift+R → 应当回到原 stage
+
+### 下轮预期
+
+按"三类轮换不连选同类"规则,Round 8 #3 必须选 Bug 或 PERF。bug 池里 R1/R2 观察项还剩 5 条欠款,挑一个最像样的(library.ts:326 save-ocr-text 非 .pdf 扩展名 / agent.ts:279 conversation 写盘加 lock)做。
+
+---
+
 ## 2026-04-28 · Batch 44 · 夜间值守 Round 8 #1 · regex `~~` 重复清理
 
 主题：**bug fix · 把 R1 观察项第 1 条欠账清掉，作为夜间值守开局**
