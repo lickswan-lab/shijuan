@@ -808,7 +808,9 @@ export default function AnnotationPanel() {
   // P0-2: popover 外层容器 ref — 用 document click 判断点击在容器外时关闭，替代仅靠再点按钮
   const summonPopoverRef = useRef<HTMLDivElement | null>(null)
   // P0-3: 召唤失败用 in-app toast 替代 alert()，5s 自消失
-  const [summonErr, setSummonErr] = useState<string | null>(null)
+  // UX-R8#13 · P2-8 · 当错误是 API Key / 余额 / 模型 不存在类时,toast 多挂一个"去设置"按钮
+  //   直接打开 Settings 面板。humanizeAiError 已经返回 ctaSettings 标志,只是之前没人用。
+  const [summonErr, setSummonErr] = useState<{ message: string; ctaSettings?: boolean } | null>(null)
   useEffect(() => {
     if (!summonErr) return
     const t = setTimeout(() => setSummonErr(null), 5000)
@@ -1225,7 +1227,10 @@ export default function AnnotationPanel() {
       const h = humanizeAiError(result.error)
       entryContent = `错误：${h.message}${h.hint ? `（${h.hint}）` : ''}`
       if (!h.silent) {
-        setSummonErr(h.hint ? `${h.message}（${h.hint}）` : h.message)
+        setSummonErr({
+          message: h.hint ? `${h.message}（${h.hint}）` : h.message,
+          ctaSettings: h.ctaSettings,
+        })
       }
     }
 
@@ -1481,7 +1486,7 @@ export default function AnnotationPanel() {
   // This is the "让名家在这段文字旁批注" affordance.
   const handleSummonAnnotate = useCallback(async (personaId: string, personaName: string) => {
     // P0-3: 用 in-app toast 替代 alert()，保持暖金美学
-    if (!displayAnnotation && !textSelection) { setSummonErr('请先选中一段文字再召唤'); return }
+    if (!displayAnnotation && !textSelection) { setSummonErr({ message: '请先选中一段文字再召唤' }); return }
     const anchorText = displayAnnotation?.anchor.selectedText || textSelection?.text || ''
     if (!anchorText.trim()) return
     setAiLoading(true)
@@ -1585,7 +1590,10 @@ export default function AnnotationPanel() {
       // Batch 43: humanizeAiError 把 raw 后端字符串转成中文
       const h = humanizeAiError(err)
       if (!h.silent) {
-        setSummonErr(h.hint ? `召唤批注失败：${h.message}（${h.hint}）` : `召唤批注失败：${h.message}`)
+        setSummonErr({
+          message: h.hint ? `召唤批注失败：${h.message}（${h.hint}）` : `召唤批注失败：${h.message}`,
+          ctaSettings: h.ctaSettings,
+        })
       }
     } finally {
       setAiLoading(false)
@@ -2209,8 +2217,10 @@ export default function AnnotationPanel() {
         </div>
       </div>
     </div>
-    {/* P0-3: 召唤批注错误 toast — 取代 alert()。用 fixed 定位避免依赖祖先 position：relative；
-         底部居中漂浮，5s 自消失，点击立即关闭。 */}
+    {/* P0-3: 召唤批注错误 toast — 取代 alert()。用 fixed 定位避免依赖祖先 position：relative;
+         底部居中漂浮，5s 自消失，点击立即关闭。
+         UX-R8#13 · ctaSettings=true 时多挂"去设置"按钮直接打开 Settings 面板,
+         按钮区独立 click handler,不会触发外层关闭。 */}
     {summonErr && (
       <div
         onClick={() => setSummonErr(null)}
@@ -2223,10 +2233,32 @@ export default function AnnotationPanel() {
           boxShadow: '0 6px 22px rgba(60,40,20,0.28)',
           cursor: 'pointer',
           animation: 'sj-anno-toast-in 0.18s cubic-bezier(.2,.9,.3,1.2)',
+          display: 'flex', alignItems: 'center', gap: 12,
         }}
         title="点击关闭"
       >
-        {summonErr}
+        <span style={{ flex: 1 }}>{summonErr.message}</span>
+        {summonErr.ctaSettings && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              useUiStore.getState().setShowSettings(true)
+              setSummonErr(null)
+            }}
+            style={{
+              flexShrink: 0,
+              fontSize: 11.5,
+              padding: '4px 10px',
+              background: 'rgba(255,255,255,0.18)',
+              border: '1px solid rgba(255,255,255,0.45)',
+              borderRadius: 4,
+              color: '#fff',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+              fontWeight: 500,
+            }}
+          >去设置</button>
+        )}
       </div>
     )}
     {/* P1-7 / P0-3: 局部关键帧供 popover 淡入 + toast 弹入使用 */}

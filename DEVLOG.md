@@ -4,6 +4,34 @@
 
 ---
 
+## 2026-04-28 · Batch 56 · 夜间值守 Round 8 #13 · UX · API Key 错误 toast 接 CTA "去设置"
+
+主题：**UX · _UX_AUDIT_TODO P2-8 部分完成 — humanizeAiError 的 ctaSettings 标志接入 toast**
+
+### 修了什么(R8#13)
+
+`AnnotationPanel.tsx` 召唤批注错误 toast(`summonErr` state):
+1. state 类型从 `string | null` 升级为 `{ message: string; ctaSettings?: boolean } | null`
+2. 三处 setSummonErr 改为传结构对象,把 `humanizeAiError().ctaSettings` 一并传进去
+3. toast 渲染:外层 click 关闭照旧;`ctaSettings=true` 时多挂一个"去设置"按钮(stopPropagation 避免冒泡到外层关闭),点击 `useUiStore.getState().setShowSettings(true)` 打开 Settings 面板并关 toast
+
+### 为什么有用
+
+humanizeAiError 老就识别了 401 / 403 / 'key' / 'invalid' / 余额 / model not exist 等场景,返回 `ctaSettings: true` 标志暗示调用方该挂"去设置"按钮。但之前**没人用这个标志**——5 处 humanizeAiError 调用都只读 `.message` / `.hint`,标志被忽略。
+
+这版给最高频的一处(召唤批注的错误 toast)接上,API Key / 余额 / 模型不存在类失败时用户一键跳到 Settings 改 Key,不用手动找 TopBar 的齿轮按钮。
+
+### 剩余(留后续 round)
+
+AgentPanel / PersonasTab / LectureMode / ReadingLogView 共 4 处 humanizeAiError 调用点也该接 CTA。本轮先接 AnnotationPanel,模式跑通了后续按需扩散。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 32.23s 通过
+
+---
+
 ## 2026-04-28 · Batch 55 · 夜间值守 Round 8 #12 · Bug · QuickOpen / BatchOcr 静态 sweep
 
 主题：**bug fix · 新扫 QuickOpen + BatchOcr 目录(R1-R7 未扫),抓两个 timer/sub 泄漏**

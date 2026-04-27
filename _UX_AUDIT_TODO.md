@@ -55,10 +55,14 @@ badge 悬浮提示用浏览器 `title` 属性，多行 `\n` 在某些 OS 会被�
 - 位置：`PersonasTab.tsx` SummonView.handleSend
 - 修法建议：send 前估算 prompt 字节数，超阈值时给 warning "对话较长，考虑开新对话或删历史资料"。
 
-### P2-8 · API key 未配时点召唤的错误信息不明确
+### P2-8 · API key 未配时点召唤的错误信息不明确 → **R8#13 部分完成**
 目前会拿到 IPC 返回的一串后端错误。
 - 位置：多处 `aiChatStream` 失败时
 - 修法建议：检测错误包含 "key" / "401" 等关键词时显示 "先去设置配置 AI Key"，并给一个跳转按钮。
+
+**R8#13 进展**：humanizeAiError 已 cover 全部关键词(R8#13 之前就完成了 message + hint),但 `ctaSettings` 标志没人用。AnnotationPanel summonErr toast 接入了 ctaSettings → 错误是 key/quota/model 类时显示"去设置"按钮一键打开 Settings。
+
+**剩余**(后续 round 可继续):AgentPanel / PersonasTab / LectureMode / ReadingLogView 等其它 4 处 humanizeAiError 调用点也该接 CTA。当前只接最高频的 AnnotationPanel。
 
 ### P2-9 · AnnotationPanel 召唤 popover 里没有快速 "去库里导入" 链接
 personaList 为空时没有引导按钮，用户要手动切到 Agent 面板召唤 tab。
