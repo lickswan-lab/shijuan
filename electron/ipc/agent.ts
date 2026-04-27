@@ -16,13 +16,37 @@ async function ensureAgentDir() {
   await fs.mkdir(AGENT_DIR, { recursive: true })
 }
 
+// BUG-FIX R8#3 · agent.ts:289 / 312 · agent-save-conversation / agent-delete-conversation 加 RMW 锁
+//   原问题(_BUG_REPORT.md R2 观察项):两个 handler 都是 read-modify-write 但没串行化。
+//   两个并发 IPC 调用(双窗口 / 一边自动保存一边手动重命名)会出现:
+//     A 读 [a, b, c] → B 读 [a, b, c] → A 写 [a', b, c] → B 写 [a, b', c] (覆盖 A)
+//   atomicWriteJson 自身的 writeLock 只保证写串行,不阻止 read 跨过。
+//   修法:模块级 promise chain 把整个 RMW 串起来。失败时 catch 把链路 reset
+//   让后续调用不被前一次失败卡死。
+let conversationsRMWChain: Promise<unknown> = Promise.resolve()
+function withConversationsLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = conversationsRMWChain.catch(() => { /* prior failure shouldn't block */ }).then(() => fn())
+  conversationsRMWChain = next.catch(() => { /* swallow for chain bookkeeping */ })
+  return next
+}
+
 // ===== Tool execution helpers =====
 
+// BUG-FIX R2#ζ · log corrupt JSON explicitly instead of swallowing silently.
+// A corrupt library.json otherwise made Hermes tool calls return "文献库未加载"
+// with no indication of why in the console.
 async function readLibrary(): Promise<any> {
+  let content: string
   try {
-    const content = await fs.readFile(LIBRARY_FILE, 'utf-8')
+    content = await fs.readFile(LIBRARY_FILE, 'utf-8')
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') console.warn('[agent] readLibrary failed:', err?.message || err)
+    return null
+  }
+  try {
     return JSON.parse(content)
-  } catch {
+  } catch (err: any) {
+    console.error('[agent] library.json corrupt — Hermes tools will return empty:', err?.message || err)
     return null
   }
 }
@@ -276,39 +300,45 @@ export function registerAgentIpc(): void {
   // Save conversation. Read-modify-write the list via safeLoadJsonOrBackup so
   // a corrupt conversations.json gets backed up (not silently overwritten,
   // which would wipe prior history on the next save).
+  // BUG-FIX R8#3 · 整个 RMW 序列在 withConversationsLock 内,防并发覆写。
   ipcMain.handle('agent-save-conversation', async (_event, conversation: AgentConversation) => {
-    try {
-      await ensureAgentDir()
-      let conversations = await safeLoadJsonOrBackup<AgentConversation[]>(CONVERSATIONS_FILE, [])
+    return withConversationsLock(async () => {
+      try {
+        await ensureAgentDir()
+        let conversations = await safeLoadJsonOrBackup<AgentConversation[]>(CONVERSATIONS_FILE, [])
 
-      const idx = conversations.findIndex(c => c.id === conversation.id)
-      if (idx >= 0) {
-        conversations[idx] = conversation
-      } else {
-        conversations.unshift(conversation)
+        const idx = conversations.findIndex(c => c.id === conversation.id)
+        if (idx >= 0) {
+          conversations[idx] = conversation
+        } else {
+          conversations.unshift(conversation)
+        }
+
+        // Keep last 50 conversations
+        if (conversations.length > 50) conversations = conversations.slice(0, 50)
+
+        await atomicWriteJson(CONVERSATIONS_FILE, conversations)
+        return { success: true }
+      } catch (err: any) {
+        return { success: false, error: err.message }
       }
-
-      // Keep last 50 conversations
-      if (conversations.length > 50) conversations = conversations.slice(0, 50)
-
-      await atomicWriteJson(CONVERSATIONS_FILE, conversations)
-      return { success: true }
-    } catch (err: any) {
-      return { success: false, error: err.message }
-    }
+    })
   })
 
   // Delete a conversation by id
+  // BUG-FIX R8#3 · 同样走 withConversationsLock 防 save+delete 交叉。
   ipcMain.handle('agent-delete-conversation', async (_event, conversationId: string) => {
-    try {
-      await ensureAgentDir()
-      const conversations = await safeLoadJsonOrBackup<AgentConversation[]>(CONVERSATIONS_FILE, [])
-      const next = conversations.filter(c => c.id !== conversationId)
-      await atomicWriteJson(CONVERSATIONS_FILE, next)
-      return { success: true }
-    } catch (err: any) {
-      return { success: false, error: err.message }
-    }
+    return withConversationsLock(async () => {
+      try {
+        await ensureAgentDir()
+        const conversations = await safeLoadJsonOrBackup<AgentConversation[]>(CONVERSATIONS_FILE, [])
+        const next = conversations.filter(c => c.id !== conversationId)
+        await atomicWriteJson(CONVERSATIONS_FILE, next)
+        return { success: true }
+      } catch (err: any) {
+        return { success: false, error: err.message }
+      }
+    })
   })
 
   // Execute tool

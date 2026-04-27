@@ -209,7 +209,7 @@
 
 - **electron/ipc/library.ts:326 save-ocr-text**：`absPath.replace(/\.pdf$/i, '.ocr.txt')`——非 .pdf 扩展名时没替换到，返回跟源一样的路径，`.ocr.txt` 结尾生成 `原名.ocr.txt` 最终还是正确（因为是追加）。边缘但不是 bug。
 - **src/App.tsx:301** `initLibrary().then(...)` 里 `setTimeout(openEntry, 300)` 无清理。如果用户 300ms 内触发了手动 openEntry，会 double-open——但 openEntry 内部检查 currentEntry.id 即可容忍。观察。
-- **electron/ipc/agent.ts:279** `agent-save-conversation` read-modify-write 没走 lock。两个窗口并发写会失一条。但用户几乎不会开俩窗口同时跟 Hermes 对话。
+- ~~**electron/ipc/agent.ts:279** `agent-save-conversation` read-modify-write 没走 lock。两个窗口并发写会失一条。但用户几乎不会开俩窗口同时跟 Hermes 对话。~~ → **R8#3 已修**(`withConversationsLock` 包 save + delete 两个 RMW 序列)
 - **src/store/uiStore.ts:158,164,165** `localStorage.getItem` 的数字解析用 `Number(v)` 没防 NaN——如果用户手动改坏 localStorage，aiContextWindow 会变 NaN。下游使用点应该也没崩过（NaN 传给比较器都是 false），但不严谨。
 
 ---
@@ -491,6 +491,19 @@
 
 **注释标签**：`// BUG-FIX R8#1 · char class 里 ~~ 是重复(R1 观察项),清成 ~`
 
+### BUG-FIX R8#3 · electron/ipc/agent.ts:289,312 · agent-save-conversation / agent-delete-conversation 加 RMW 锁
+**原问题**：R2 观察项第 3 条。两个 handler 都做 read-modify-write,但读和写之间没加锁:
+- A 读 [a, b, c] → B 读 [a, b, c] → A 写 [a', b, c] → B 写 [a, b', c] (B 用的是 stale read,覆盖 A)
+
+`atomicWriteJson` 自身的 `writeLock` 只保证写原子,不阻止 read 跨过。
+
+**修复**：模块级 `conversationsRMWChain: Promise<unknown>` + `withConversationsLock(fn)` helper(promise chain 串行化)。两个 handler 整个 RMW 序列都包在锁里。失败时 catch reset,后续调用不被卡死。
+
+**触发场景**：双窗口、IPC 队列里两个 save 紧挨着、save 紧跟 delete。普通单窗口低 ux 频率确实罕见,但模式上是真 bug。
+
+**注释标签**：`// BUG-FIX R8#3 · agent.ts · withConversationsLock 防并发覆写`
+
 ### 修复文件清单（Round 8 进行中）
 - `electron/ipc/citationVerifier.ts`（R8#1）
 - `src/components/Agent/personaCitationParse.ts`（R8#1）
+- `electron/ipc/agent.ts`（R8#3）

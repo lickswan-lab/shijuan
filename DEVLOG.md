@@ -4,6 +4,43 @@
 
 ---
 
+## 2026-04-28 · Batch 46 · 夜间值守 Round 8 #3 · Bug · agent.ts conversation RMW 加锁
+
+主题：**bug fix · _BUG_REPORT.md R2 观察项第 3 条 — 并发 RMW 覆写**
+
+### 修了什么(R8#3)
+
+`electron/ipc/agent.ts` 的两个 handler 之前都裸跑 RMW:
+```
+agent-save-conversation: 读 → modify → atomicWrite
+agent-delete-conversation: 读 → filter → atomicWrite
+```
+
+`atomicWriteJson` 内部的 writeLock 只串行化"写"那一步,两个并发调用的"读"会跨过对方,各自基于 stale list 写回,后写的覆盖前写的。
+
+修法:模块级
+```ts
+let conversationsRMWChain: Promise<unknown> = Promise.resolve()
+function withConversationsLock<T>(fn: () => Promise<T>): Promise<T> { ... }
+```
+
+把整个 RMW 序列包在 chain 里,失败 catch reset 不卡链。
+
+### 触发场景
+
+双窗口 / IPC 队列里两条 save 紧挨着 / save 紧跟 delete。单窗口低频用户基本碰不到,但模式上确是 bug,这版直接锁了。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 33.98s 通过
+
+### 后续
+
+R2 观察项还剩 3 条:library.ts:326 save-ocr-text 非 .pdf 命名 / App.tsx:301 setTimeout 清理 / uiStore.ts NaN 防御。下轮 Round 8 #4 必须 PERF 或 UX(因为 #3 选了 Bug)。
+
+---
+
 ## 2026-04-28 · Batch 45 · 夜间值守 Round 8 #2 · UX · SummonView 跨 Ctrl+Shift+R 状态保持
 
 主题：**UX · _UX_AUDIT_TODO P2-1 落地 + 顺手把 P2-3 / P1-8 标已修**
