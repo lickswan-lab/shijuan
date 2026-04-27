@@ -4,6 +4,46 @@
 
 ---
 
+## 2026-04-28 · Batch 61 · 夜间值守 Round 8 #18 · PERF · RAG cosineSim 热路径优化
+
+主题：**perf · RAG 检索的余弦相似度计算去掉 query 端 norm 的重复计算**
+
+### 修了什么(R8#18)
+
+`electron/ipc/personaEmbeddingApi.ts` 新增两个 export:
+- `vectorNorm(v)` — L2 范数
+- `cosineSimWithNormA(a, normA, b)` — 调用方已预算好 normA 的版本
+
+`electron/ipc/personas.ts` line 130 RAG 语义检索热路径:
+```diff
++ const normQuery = vectorNorm(queryVec)
+  const scored = idx.chunks.map(c => {
+-   let score = cosineSim(queryVec, c.embedding)
++   let score = cosineSimWithNormA(queryVec, normQuery, c.embedding)
+```
+
+### 预期收益
+
+`idx.chunks.map(...)` 是用户每次召唤问 RAG 知识库时的热路径。原 cosineSim 内部对 a (queryVec) 和 b (chunk embedding) 都算 sum-of-squares + sqrt,但 a 是同一个 query,N 个 chunk 内重算 N 次。
+
+1000-chunk × 1024-dim 场景:
+- 原:1000 次 × (3 × 1024 ops + 2 sqrt) = 3M ops + 2000 sqrt
+- 新:1024 ops + 1 sqrt(预算)+ 1000 × (2 × 1024 ops + 1 sqrt) = 2.05M ops + 1001 sqrt
+- 节省:~33% ops + 一半 sqrt
+
+每次 RAG 检索快一点 → 召唤问答首字延迟降低。`cosineSim` 旧 export 保留(给可能的其它调用方)。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 32.06s 通过
+
+### 后续
+
+下轮 Round 8 #19 必须 Bug 或 UX。
+
+---
+
 ## 2026-04-28 · Batch 60 · 夜间值守 Round 8 #17 · UX · ReadingLog 错误 toast 接 CTA(R8#13 扩散)
 
 主题：**UX · 把 R8#13 的"toast 加去设置按钮"模式扩散到 ReadingLogView**

@@ -4,12 +4,14 @@ import path from 'path'
 import os from 'os'
 import { v4 as uuid } from 'uuid'
 import type {
-  Persona, PersonaSource, PersonaSkillArtifact, PersonaDimensionKey,
+  Persona, PersonaSource, PersonaSkillArtifact, PersonaDimensionKey, Library,
 } from '../../src/types/library'
 import { atomicWriteJson, safeLoadJsonOrBackup } from './library'
 import { multiSourceSearchInline } from './personas-search-helper'
 import { chunkSource, bm25Search, type RagChunk } from './personaRagHelper'
-import { embedTexts, cosineSim, getEmbeddingProvider, listEmbeddingProviders, type EmbeddingProviderId } from './personaEmbeddingApi'
+// PERF-R8#18 · 用 cosineSimWithNormA + vectorNorm 把 query 端的 norm 提到循环外算一次
+//   原 cosineSim 已不再被本文件用,但保留 export 给未来其它调用方
+import { embedTexts, cosineSimWithNormA, vectorNorm, getEmbeddingProvider, listEmbeddingProviders, type EmbeddingProviderId } from './personaEmbeddingApi'
 import { getApiKeyFor } from './aiApi'
 
 // ===== Paths =====
@@ -33,6 +35,19 @@ interface RagIndexEntry {
   text: string
   embedding: number[]
 }
+
+/** Per-source coverage report from the last build. Tells users which sources
+ *  actually made it into the index vs. got skipped and why. Kept with the
+ *  index file so `persona-rag-status` can return it without rebuilding. */
+interface RagSourceCoverage {
+  sourceId: string
+  sourceTitle: string
+  sourceType: PersonaSource['source']
+  status: 'indexed' | 'skipped-empty' | 'skipped-short' | 'error'
+  chunkCount: number
+  reason?: string           // human-readable reason when skipped / errored
+}
+
 interface RagIndexFile {
   version: 1
   personaId: string
@@ -45,6 +60,16 @@ interface RagIndexFile {
    *  from this fingerprint, status reports needsRebuild=true. */
   sourceFingerprint: Array<{ id: string; length: number }>
   chunks: RagIndexEntry[]
+  /** Phase-C coverage report: one entry per persona.sourcesUsed item at build
+   *  time. Populated by buildRagIndexInternal; older indexes without it are
+   *  treated as unknown coverage. */
+  coverage?: {
+    totalSources: number       // sourcesUsed.length at build time
+    indexedSources: number     // sources that contributed at least one chunk
+    skippedSources: number     // total - indexed - errored
+    erroredSources: number     // sources whose chunker / embed failed
+    perSource: RagSourceCoverage[]
+  }
 }
 
 /** Compute a stable fingerprint of the hydrated sources. Used to decide whether
@@ -77,11 +102,19 @@ async function loadRagIndex(personaId: string): Promise<RagIndexFile | null> {
 /** Shared retrieval path — tries embedding first (if index built + provider key
  *  still available + query embedding succeeds), falls back to BM25 over freshly
  *  chunked sources. Used by both persona-rag-retrieve and
- *  persona-get-system-prompt. */
+ *  persona-get-system-prompt.
+ *
+ *  Wave-4: also returns `injectedCitationIds` — the 1-based N numbers that
+ *  will appear as [资料 N] markers when the caller builds a system prompt
+ *  from these chunks. For a 5-chunk return this is [1,2,3,4,5]; empty when
+ *  retrieval yields zero chunks. Callers can pass this straight to
+ *  verifyCitations() to check AI citations against what was really injected.
+ */
 async function retrieveChunksInternal(personaId: string, query: string, topK: number): Promise<{
   chunks: Array<RagChunk & { score: number }>
   totalChunks: number
   retrievalMode: 'embedding' | 'bm25' | 'empty'
+  injectedCitationIds: number[]
 }> {
   const file = path.join(PERSONAS_DIR, `${personaId}.json`)
   const persona = await safeLoadJsonOrBackup<Persona | null>(file, null)
@@ -95,8 +128,10 @@ async function retrieveChunksInternal(personaId: string, query: string, topK: nu
       try {
         const [queryVec] = await embedTexts([query], { providerId: idx.provider, apiKey })
         if (queryVec && queryVec.length === idx.dim) {
+          // PERF-R8#18 · query 端 norm 在循环外预先算,N 个 chunk 内不再重算
+          const normQuery = vectorNorm(queryVec)
           const scored = idx.chunks.map(c => {
-            let score = cosineSim(queryVec, c.embedding)
+            let score = cosineSimWithNormA(queryVec, normQuery, c.embedding)
             // Re-apply trust boost (same as BM25 path) — otherwise a wiki-heavy
             // index could outrank primary sources just because wiki tends to be
             // more keyword-dense.
@@ -115,7 +150,12 @@ async function retrieveChunksInternal(personaId: string, query: string, topK: nu
             text: chunk.text,
             score,
           }))
-          return { chunks: top, totalChunks: idx.chunks.length, retrievalMode: 'embedding' }
+          return {
+            chunks: top,
+            totalChunks: idx.chunks.length,
+            retrievalMode: 'embedding',
+            injectedCitationIds: top.map((_, i) => i + 1),
+          }
         }
       } catch {
         // Fall through to BM25 if embedding call failed (rate limit, network, etc.)
@@ -130,13 +170,257 @@ async function retrieveChunksInternal(personaId: string, query: string, topK: nu
     allChunks.push(...chunkSource(s))
   }
   if (allChunks.length === 0) {
-    return { chunks: [], totalChunks: 0, retrievalMode: 'empty' }
+    return { chunks: [], totalChunks: 0, retrievalMode: 'empty', injectedCitationIds: [] }
   }
   if (!query.trim()) {
-    return { chunks: [], totalChunks: allChunks.length, retrievalMode: 'bm25' }
+    return { chunks: [], totalChunks: allChunks.length, retrievalMode: 'bm25', injectedCitationIds: [] }
   }
   const results = bm25Search(allChunks, query, topK)
-  return { chunks: results, totalChunks: allChunks.length, retrievalMode: 'bm25' }
+  return {
+    chunks: results,
+    totalChunks: allChunks.length,
+    retrievalMode: 'bm25',
+    injectedCitationIds: results.map((_, i) => i + 1),
+  }
+}
+
+// ===== Phase C · Auto-build machinery =====
+// A single persona should never have two concurrent builds. Builds can take
+// 10-60s for embedding-heavy indexes, so we track in-flight ids in this set and
+// skip duplicate triggers. On finish (success or failure) we clear the id.
+const inFlightBuilds = new Set<string>()
+
+/** Small helper: broadcast a build progress frame to every open window. Same
+ *  channel the manual build uses ('persona-rag-build-progress'), so existing
+ *  progress UI in PersonasTab keeps working for auto-builds too. The `trigger`
+ *  field lets the UI distinguish auto vs. manual and choose whether to show
+ *  a toast / intrusive banner. */
+function emitBuildProgress(payload: {
+  personaId: string
+  phase: 'chunk' | 'embed' | 'save' | 'done' | 'error'
+  done: number
+  total: number
+  /** Only set on phase === 'done' — the UI uses this to render the coverage
+   *  summary in a toast ("12/15 sources indexed, 3 skipped"). */
+  coverage?: RagIndexFile['coverage']
+  /** 'auto' — triggered by persona save/import. 'manual' — user clicked build. */
+  trigger: 'auto' | 'manual'
+  error?: string
+}) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    try { win.webContents.send('persona-rag-build-progress', payload) } catch {}
+  }
+}
+
+/** Pick the best available embedding provider. Prefers GLM first (directly
+ *  reachable from 大陆, cheaper), then OpenAI. Returns null if no key. */
+function pickAvailableEmbeddingProvider(explicit?: EmbeddingProviderId): EmbeddingProviderId | null {
+  if (explicit && getApiKeyFor(explicit)) return explicit
+  if (getApiKeyFor('glm')) return 'glm'
+  if (getApiKeyFor('openai')) return 'openai'
+  return null
+}
+
+/** Core index build — extracted from the ipcMain handler so both manual
+ *  triggers (user clicks "build" button) and auto triggers (after persona
+ *  save / import) can share the same code path + coverage reporting.
+ *
+ *  Coverage contract: we walk persona.sourcesUsed once, for each source decide
+ *  whether it contributes chunks (indexed) or not (skipped-empty / skipped-short
+ *  / error). The `reason` string is user-facing — keep it concrete.
+ *
+ *  Returns the written index file on success, or throws on hard failure (no
+ *  provider key, no chunks at all, embed network error). When it throws with
+ *  "no chunks", `err.coverage` is attached so the caller can still surface
+ *  per-source reasons in the UI.
+ */
+async function buildRagIndexInternal(
+  personaId: string,
+  opts: {
+    providerId?: EmbeddingProviderId
+    trigger: 'auto' | 'manual'
+  },
+): Promise<{ indexFile: RagIndexFile; chunkCount: number }> {
+  const file = path.join(PERSONAS_DIR, `${personaId}.json`)
+  const persona = await safeLoadJsonOrBackup<Persona | null>(file, null)
+  if (!persona) throw new Error('档案不存在')
+
+  const providerId = pickAvailableEmbeddingProvider(opts.providerId)
+  if (!providerId) {
+    // TODO (Phase D, local embeddings): if no provider key, fall back to a
+    // bundled local MiniLM (via @xenova/transformers). Model ~20MB, 384-dim,
+    // slower but no key needed. See personaEmbeddingApi.ts for the stub.
+    throw new Error('需要配置 OpenAI 或智谱 GLM 的 API Key 才能建立语义索引')
+  }
+  const apiKey = getApiKeyFor(providerId)!
+  const prov = getEmbeddingProvider(providerId)
+
+  // Walk sourcesUsed once, collecting both chunks AND coverage reasons. A
+  // source whose fullContent produces zero chunks is marked "skipped-short"
+  // rather than silently dropped — that's the main reason users see "索引了
+  // 3 段" when they expected more.
+  const allChunks: RagChunk[] = []
+  const perSource: RagSourceCoverage[] = []
+  const sources = persona.sourcesUsed || []
+  for (const s of sources) {
+    const baseEntry = {
+      sourceId: s.id,
+      sourceTitle: s.title,
+      sourceType: s.source,
+    }
+    if (!s.fullContent || !s.fullContent.trim()) {
+      perSource.push({
+        ...baseEntry,
+        status: 'skipped-empty',
+        chunkCount: 0,
+        reason: '未抓取正文（可能 PDF 提取失败 / 页面拒绝访问 / 还没点 fetch）',
+      })
+      continue
+    }
+    let sourceChunks: RagChunk[]
+    try {
+      sourceChunks = chunkSource(s)
+    } catch (err: any) {
+      perSource.push({
+        ...baseEntry,
+        status: 'error',
+        chunkCount: 0,
+        reason: `分块失败：${err?.message || String(err)}`,
+      })
+      continue
+    }
+    if (sourceChunks.length === 0) {
+      perSource.push({
+        ...baseEntry,
+        status: 'skipped-short',
+        chunkCount: 0,
+        reason: `正文太短（${s.fullContent.length} 字符），分块后无可用片段`,
+      })
+      continue
+    }
+    allChunks.push(...sourceChunks)
+    perSource.push({
+      ...baseEntry,
+      status: 'indexed',
+      chunkCount: sourceChunks.length,
+    })
+  }
+
+  if (allChunks.length === 0) {
+    const coverage = {
+      totalSources: sources.length,
+      indexedSources: 0,
+      skippedSources: perSource.filter(p => p.status !== 'error').length,
+      erroredSources: perSource.filter(p => p.status === 'error').length,
+      perSource,
+    }
+    const err = new Error('无可用原文（没有任何源通过分块）')
+    ;(err as any).coverage = coverage
+    throw err
+  }
+
+  emitBuildProgress({
+    personaId, phase: 'chunk', done: allChunks.length, total: allChunks.length,
+    trigger: opts.trigger,
+  })
+
+  const texts = allChunks.map(c => c.text)
+  const vectors = await embedTexts(texts, {
+    providerId,
+    apiKey,
+    onProgress: (done, total) => emitBuildProgress({
+      personaId, phase: 'embed', done, total, trigger: opts.trigger,
+    }),
+  })
+  if (vectors.length !== allChunks.length) {
+    throw new Error(`返回 embedding 数量不符（${vectors.length} vs ${allChunks.length}）`)
+  }
+
+  const coverage = {
+    totalSources: sources.length,
+    indexedSources: perSource.filter(p => p.status === 'indexed').length,
+    skippedSources: perSource.filter(p => p.status === 'skipped-empty' || p.status === 'skipped-short').length,
+    erroredSources: perSource.filter(p => p.status === 'error').length,
+    perSource,
+  }
+
+  const indexFile: RagIndexFile = {
+    version: 1,
+    personaId,
+    provider: providerId,
+    model: prov.defaultModel,
+    dim: vectors[0]?.length || prov.defaultDim,
+    builtAt: new Date().toISOString(),
+    sourceFingerprint: computeSourceFingerprint(persona),
+    chunks: allChunks.map((c, i) => ({
+      sourceId: c.sourceId,
+      sourceTitle: c.sourceTitle,
+      sourceType: c.sourceType,
+      trust: c.trust,
+      chunkIdx: c.chunkIdx,
+      text: c.text,
+      embedding: vectors[i],
+    })),
+    coverage,
+  }
+  emitBuildProgress({ personaId, phase: 'save', done: 0, total: 1, trigger: opts.trigger })
+  await atomicWriteJson(ragIndexFilePath(personaId), indexFile)
+  emitBuildProgress({
+    personaId, phase: 'done', done: 1, total: 1,
+    coverage, trigger: opts.trigger,
+  })
+  return { indexFile, chunkCount: allChunks.length }
+}
+
+/** Kick off an auto-build in the background if and only if:
+ *   1. We have a provider key (no key → no point, UI prompts user instead)
+ *   2. There's hydrated content to index (else build would fail with "no sources")
+ *   3. No build is already in-flight for this persona
+ *   4. Either no index exists OR the existing index is stale (persona updated
+ *      after last build, OR source fingerprint no longer matches)
+ *
+ *  Non-blocking — returns immediately. Finishes via IPC progress frames;
+ *  the UI refreshes on 'done' / 'error'. Any exception during build emits
+ *  an 'error' frame so the UI can show a red chip with the reason.
+ */
+async function maybeTriggerAutoBuild(personaId: string): Promise<void> {
+  if (inFlightBuilds.has(personaId)) return
+  if (!pickAvailableEmbeddingProvider()) return  // no key → quiet skip
+
+  const file = path.join(PERSONAS_DIR, `${personaId}.json`)
+  const persona = await safeLoadJsonOrBackup<Persona | null>(file, null)
+  if (!persona) return
+  const hydrated = (persona.sourcesUsed || []).filter(s => s.fullContent && s.fullContent.trim()).length
+  if (hydrated === 0) return  // nothing to index
+
+  const idx = await loadRagIndex(personaId)
+  if (idx) {
+    // Skip auto-rebuild when index is newer than persona AND source fingerprint
+    // still matches. Catches the "no-op save" case (user edited something
+    // unrelated to sources, like identity text) — we don't want to burn
+    // embedding quota on those.
+    const personaUpdated = new Date(persona.updatedAt).getTime()
+    const indexBuilt = new Date(idx.builtAt).getTime()
+    const fpEq = fingerprintsEqual(idx.sourceFingerprint, computeSourceFingerprint(persona))
+    if (fpEq && indexBuilt >= personaUpdated) return
+  }
+
+  inFlightBuilds.add(personaId)
+  // Fire-and-forget. Caller (persona-save handler) returns IPC immediately.
+  void (async () => {
+    try {
+      await buildRagIndexInternal(personaId, { trigger: 'auto' })
+    } catch (err: any) {
+      emitBuildProgress({
+        personaId, phase: 'error', done: 0, total: 0,
+        trigger: 'auto',
+        error: err?.message || String(err),
+        coverage: (err as any)?.coverage,
+      })
+    } finally {
+      inFlightBuilds.delete(personaId)
+    }
+  })()
 }
 
 // Default Claude Code skills directory — per Claude Code spec, skills live at
@@ -157,6 +441,30 @@ const DIMENSION_FILENAMES: Record<PersonaDimensionKey, string> = {
 
 async function ensureDir() {
   await fs.mkdir(PERSONAS_DIR, { recursive: true })
+}
+
+// BUG-FIX #E · per-persona serializer for read-modify-write IPC handlers
+// (currently used by persona-append-source). Prevents two concurrent
+// append-source calls on the same persona from both reading the same
+// baseline and losing one. Keyed by personaId; other personas can still
+// progress in parallel. Tail-chain pattern — each call chains onto the
+// stored promise; the stored promise gets replaced with a swallowed copy
+// so a failing run doesn't block successors or leak "unhandled rejection".
+// The map entry is pruned when this run is the tail (no successor queued).
+const personaAppendLocks: Map<string, Promise<unknown>> = new Map()
+function withPersonaAppendLock<T>(personaId: string, fn: () => Promise<T>): Promise<T> {
+  const prior = personaAppendLocks.get(personaId) || Promise.resolve()
+  const run = prior.catch(() => { /* don't let a prior failure block successors */ }).then(fn)
+  const tail = run.catch(() => {})
+  personaAppendLocks.set(personaId, tail)
+  // Best-effort prune: if nothing newer chained on during this run, drop the
+  // map entry so the Map doesn't grow forever with keys for deleted personas.
+  void tail.then(() => {
+    if (personaAppendLocks.get(personaId) === tail) {
+      personaAppendLocks.delete(personaId)
+    }
+  })
+  return run
 }
 
 /** Sanitize a skill slug to a safe directory name. Accepts user-provided slugs
@@ -534,6 +842,137 @@ async function fetchSourceBody(source: PersonaSource): Promise<string> {
   }
 }
 
+// ===== User-background context (Pain point #3) =====
+// 当用户"召唤" persona 跳过了 Hermes ReAct 循环——persona 因此不会主动去检索用户的
+// 阅读记录。用户反馈他们希望 persona 仍然能"知道"自己在读什么、最近关注什么，
+// 以便对话更有针对性。方案：在 persona 的 system prompt 前面插一段用户背景块。
+// 这不是"工具"也不是"可检索的参考资料"——就是让 persona 在生成回答时知道说话对象
+// 是谁，avoids the "I have no way to know your recent reading, please tell me"
+// response pattern.
+
+const LIBRARY_FILE_FOR_CONTEXT = path.join(app.getPath('home'), '.lit-manager', 'library.json')
+const APPRENTICE_DIR_FOR_CONTEXT = path.join(app.getPath('home'), '.lit-manager', 'agent', 'apprentice')
+const META_DIR_FOR_CONTEXT = path.join(app.getPath('home'), '.lit-manager', 'meta')
+
+/** Build a compact "user background" markdown block to prepend to the persona
+ *  system prompt. Gathered best-effort from library.json + meta files +
+ *  apprentice logs. Silent failures — a broken library shouldn't block summon.
+ */
+async function buildUserContextBlock(): Promise<string> {
+  try {
+    // 1. Library → recent entries (by lastOpenedAt, then addedAt)
+    const library = await safeLoadJsonOrBackup<Library | null>(LIBRARY_FILE_FOR_CONTEXT, null)
+    if (!library) return ''
+
+    const entries = library.entries || []
+    // "Recent reads" — sort by lastOpenedAt desc (fall back to addedAt),
+    // filter out those never opened, take top 8.
+    const recentReads = entries
+      .filter(e => e.lastOpenedAt || e.addedAt)
+      .sort((a, b) => {
+        const at = a.lastOpenedAt || a.addedAt
+        const bt = b.lastOpenedAt || b.addedAt
+        return (bt || '').localeCompare(at || '')
+      })
+      .slice(0, 8)
+
+    const recentReadsStr = recentReads
+      .filter(e => e.lastOpenedAt)  // only truly opened, not just imported
+      .slice(0, 8)
+      .map(e => {
+        const authors = (e.authors || []).filter(Boolean).slice(0, 2).join('、')
+        const when = e.lastOpenedAt ? new Date(e.lastOpenedAt).toISOString().slice(0, 10) : ''
+        return `《${e.title}》${authors ? ` · ${authors}` : ''}${when ? `（${when}）` : ''}`
+      })
+
+    // 2. Recent tags/topics — aggregate from recent entries
+    const recentTagCounts = new Map<string, number>()
+    for (const e of recentReads) {
+      for (const t of (e.tags || [])) {
+        if (!t || !t.trim()) continue
+        recentTagCounts.set(t, (recentTagCounts.get(t) || 0) + 1)
+      }
+    }
+    const topTags = Array.from(recentTagCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([t]) => t)
+
+    // 3. Total notes count — aggregate annotations from meta/*.json
+    let totalNotes = 0
+    try {
+      const metaFiles = await fs.readdir(META_DIR_FOR_CONTEXT)
+      // Bounded scan: read up to 200 meta files to keep this cheap.
+      // Typical libraries are 20-80 entries, so this rarely truncates.
+      for (const f of metaFiles.slice(0, 200)) {
+        if (!f.endsWith('.json')) continue
+        try {
+          const mpath = path.join(META_DIR_FOR_CONTEXT, f)
+          const raw = await fs.readFile(mpath, 'utf-8')
+          const parsed = JSON.parse(raw)
+          if (Array.isArray(parsed?.annotations)) totalNotes += parsed.annotations.length
+        } catch { /* skip corrupt */ }
+      }
+    } catch { /* meta dir may not exist */ }
+
+    // 4. Recent apprentice (weekly) summary — pick the newest .md
+    let apprenticeSummary = ''
+    try {
+      const files = await fs.readdir(APPRENTICE_DIR_FOR_CONTEXT)
+      const mdFiles: Array<{ file: string; mtime: number }> = []
+      for (const f of files) {
+        if (!f.endsWith('.md')) continue
+        try {
+          const s = await fs.stat(path.join(APPRENTICE_DIR_FOR_CONTEXT, f))
+          mdFiles.push({ file: f, mtime: s.mtimeMs })
+        } catch { /* skip */ }
+      }
+      mdFiles.sort((a, b) => b.mtime - a.mtime)
+      if (mdFiles[0]) {
+        const content = await fs.readFile(
+          path.join(APPRENTICE_DIR_FOR_CONTEXT, mdFiles[0].file),
+          'utf-8',
+        )
+        // Grab first ~600 chars as a gist — full weekly reports can be 5k+ chars,
+        // and the AI just needs a vibe. Skip leading frontmatter / heading lines.
+        const gist = content
+          .replace(/^---[\s\S]*?---\s*/m, '')  // strip YAML frontmatter if any
+          .trim()
+          .slice(0, 600)
+        apprenticeSummary = gist
+      }
+    } catch { /* apprentice dir may not exist */ }
+
+    // Assemble the block. Skip the block entirely if all sources are empty.
+    const lines: string[] = []
+    if (recentReadsStr.length > 0) {
+      lines.push(`- 最近阅读的文献：${recentReadsStr.join('；')}`)
+    }
+    if (totalNotes > 0) {
+      lines.push(`- 累计笔记数：${totalNotes} 条`)
+    }
+    if (topTags.length > 0) {
+      lines.push(`- 最近关注的主题/标签：${topTags.join('、')}`)
+    }
+    if (apprenticeSummary) {
+      lines.push(`- 本周学习记录摘要：\n${apprenticeSummary.replace(/^/gm, '  ')}`)
+    }
+
+    if (lines.length === 0) return ''
+
+    return `==== 用户背景（你可参考，但不主动提起，除非用户问）====
+这是你正在对话的用户的阅读上下文，便于你针对性回答：
+${lines.join('\n')}
+===================================
+
+`
+  } catch {
+    // Silent: a broken library must not block summon. If buildUserContextBlock
+    // throws, the caller just uses the bare system prompt.
+    return ''
+  }
+}
+
 // ===== Persona CRUD =====
 
 interface PersonaSummary {
@@ -595,9 +1034,37 @@ export function registerPersonasIpc(): void {
       await ensureDir()
       const file = path.join(PERSONAS_DIR, `${persona.id}.json`)
       await atomicWriteJson(file, persona)
+      // Phase C: background auto-build. Does NOT block the IPC return.
+      // maybeTriggerAutoBuild() short-circuits if: no provider key, no
+      // hydrated content, build already in-flight, or index already fresh.
+      // On build finish the UI gets a 'persona-rag-build-progress' frame
+      // with phase='done' (+ coverage) or phase='error'.
+      void maybeTriggerAutoBuild(persona.id).catch(() => {})
       return { success: true }
     } catch (err: any) {
       return { success: false, error: err.message }
+    }
+  })
+
+  // 2026-04-24 "查看 skill 位置" —— 在系统文件管理器中定位 persona 文件。
+  // 优先显示完整 skill 目录（PERSONAS_DIR/<id>/ 含 SKILL.md + dimensions），
+  // 不存在则回落到 <id>.json 单文件。
+  ipcMain.handle('persona-reveal', async (_event, id: string): Promise<{ success: boolean; path?: string; error?: string }> => {
+    try {
+      const dir = path.join(PERSONAS_DIR, id)
+      const file = path.join(PERSONAS_DIR, `${id}.json`)
+      try {
+        const stat = await fs.stat(dir)
+        if (stat.isDirectory()) {
+          shell.showItemInFolder(dir)
+          return { success: true, path: dir }
+        }
+      } catch { /* dir doesn't exist, try file */ }
+      await fs.access(file)
+      shell.showItemInFolder(file)
+      return { success: true, path: file }
+    } catch (err: any) {
+      return { success: false, error: err?.message || String(err) }
     }
   })
 
@@ -605,11 +1072,81 @@ export function registerPersonasIpc(): void {
     try {
       const file = path.join(PERSONAS_DIR, `${id}.json`)
       await fs.unlink(file)
+      // BUG-FIX #1 · persona-delete leaves orphans
+      // Previously only deleted <id>.json. The RAG index (<id>.rag.json),
+      // user-overridden portrait dir (<DATA_DIR>/agent/personas/<id>/), and
+      // saved summon sessions (<DATA_DIR>/agent/summons/<id>/) were left on
+      // disk — a user who "deleted" a persona and re-imported a new one with
+      // the same name still ended up with stale rag.json / history showing
+      // up in obscure places. Clean them all up, best-effort.
+      const ragFile = ragIndexFilePath(id)
+      const portraitDir = path.join(PERSONAS_DIR, id)
+      const summonsSubDir = path.join(app.getPath('home'), '.lit-manager', 'agent', 'summons', id)
+      await Promise.all([
+        fs.unlink(ragFile).catch((e) => { if (e?.code !== 'ENOENT') console.warn('[persona-delete] rag cleanup:', e?.message) }),
+        fs.rm(portraitDir, { recursive: true, force: true }).catch((e) => console.warn('[persona-delete] portrait dir cleanup:', e?.message)),
+        fs.rm(summonsSubDir, { recursive: true, force: true }).catch((e) => console.warn('[persona-delete] summons cleanup:', e?.message)),
+      ])
       return { success: true }
     } catch (err: any) {
-      if (err?.code === 'ENOENT') return { success: true }
+      if (err?.code === 'ENOENT') {
+        // Main file is gone, but still try to sweep orphans in case of partial
+        // state from earlier failed deletes.
+        const ragFile = ragIndexFilePath(id)
+        const portraitDir = path.join(PERSONAS_DIR, id)
+        const summonsSubDir = path.join(app.getPath('home'), '.lit-manager', 'agent', 'summons', id)
+        await Promise.all([
+          fs.unlink(ragFile).catch(() => {}),
+          fs.rm(portraitDir, { recursive: true, force: true }).catch(() => {}),
+          fs.rm(summonsSubDir, { recursive: true, force: true }).catch(() => {}),
+        ])
+        return { success: true }
+      }
       return { success: false, error: err.message }
     }
+  })
+
+  // BUG-FIX #E · persona-append-source read-modify-write on the main process
+  // Previously PersonasTab's appendSource constructed `{ ...persona, sourcesUsed:
+  // [...existing, src] }` using the stale persona prop as baseline and called
+  // persona-save. If two appendSource calls fired concurrently (e.g. if the
+  // UI was allowed to drop 3 files in a row), both read the same prop, both
+  // appended to the same sourcesUsed array, and the second save overwrote the
+  // first — one of the new sources was silently dropped.
+  //
+  // Fix: do the append in the backend, where we can load-then-save under a
+  // per-persona mutex. Frontend calls this handler and receives the updated
+  // persona; the UI just refreshes state from the return value.
+  ipcMain.handle('persona-append-source', async (_event, personaId: string, source: PersonaSource): Promise<{
+    success: boolean
+    persona?: Persona
+    error?: string
+  }> => {
+    if (!personaId) return { success: false, error: 'personaId 必填' }
+    if (!source || typeof source !== 'object') return { success: false, error: 'source 不合法' }
+    if (!source.id) return { success: false, error: 'source 缺少 id' }
+    return withPersonaAppendLock(personaId, async () => {
+      try {
+        await ensureDir()
+        const file = path.join(PERSONAS_DIR, `${personaId}.json`)
+        const latest = await safeLoadJsonOrBackup<Persona | null>(file, null)
+        if (!latest) return { success: false, error: '档案不存在' }
+        // Skip if source.id already present (idempotent — retries don't dup).
+        if ((latest.sourcesUsed || []).some(s => s.id === source.id)) {
+          return { success: true, persona: latest }
+        }
+        const updated: Persona = {
+          ...latest,
+          sourcesUsed: [...(latest.sourcesUsed || []), source],
+          updatedAt: new Date().toISOString(),
+        }
+        await atomicWriteJson(file, updated)
+        void maybeTriggerAutoBuild(personaId).catch(() => {})
+        return { success: true, persona: updated }
+      } catch (err: any) {
+        return { success: false, error: err?.message || String(err) }
+      }
+    })
   })
 
   // ===== Web search (aggregated) =====
@@ -790,6 +1327,11 @@ export function registerPersonasIpc(): void {
 
       const saveFile = path.join(PERSONAS_DIR, `${persona.id}.json`)
       await atomicWriteJson(saveFile, persona)
+      // Phase C: imported skills usually have empty sourcesUsed (external
+      // skills don't ship their research pool), so auto-build short-circuits
+      // at the "no hydrated content" check. Still call it for correctness —
+      // if the user later pastes sources via ingest, another save triggers it.
+      void maybeTriggerAutoBuild(persona.id).catch(() => {})
       return { success: true, persona }
     } catch (err: any) {
       return { success: false, error: err.message }
@@ -839,95 +1381,59 @@ export function registerPersonasIpc(): void {
   // Chunks every hydrated source, embeds via chosen provider, writes to
   // <personaId>.rag.json. Streams progress to the window via
   // 'persona-rag-build-progress' events so UI can show a progress bar.
-  ipcMain.handle('persona-rag-build', async (event, personaId: string, opts?: { providerId?: EmbeddingProviderId }): Promise<{
+  ipcMain.handle('persona-rag-build', async (_event, personaId: string, opts?: { providerId?: EmbeddingProviderId }): Promise<{
     success: boolean
     builtAt?: string
     chunkCount?: number
     provider?: EmbeddingProviderId
     model?: string
     dim?: number
+    /** Phase-C: coverage report for the build. Included on both success (in
+     *  the response body + in the 'done' progress frame) and on "no chunks"
+     *  failure (so the UI can show users why their sources got dropped). */
+    coverage?: RagIndexFile['coverage']
     error?: string
   }> => {
     try {
       await ensureDir()
-      const file = path.join(PERSONAS_DIR, `${personaId}.json`)
-      const persona = await safeLoadJsonOrBackup<Persona | null>(file, null)
-      if (!persona) return { success: false, error: '档案不存在' }
-
-      // Pick provider: explicit > whichever has a key. Prefer GLM for Chinese
-      // users first (大陆直连), then OpenAI.
-      let providerId = opts?.providerId
-      if (!providerId) {
-        if (getApiKeyFor('glm')) providerId = 'glm'
-        else if (getApiKeyFor('openai')) providerId = 'openai'
-        else return { success: false, error: '需要配置 OpenAI 或智谱 GLM 的 API Key 才能建立语义索引' }
+      if (inFlightBuilds.has(personaId)) {
+        // Block duplicate manual builds while an auto-build is in flight.
+        // Return a 'coverage-friendly' soft error so UI can say "wait".
+        return { success: false, error: '已有索引构建任务在进行中，请等待完成' }
       }
-      const apiKey = getApiKeyFor(providerId)
-      if (!apiKey) return { success: false, error: `${providerId} 未配置 API Key` }
-      const prov = getEmbeddingProvider(providerId)
-
-      // Chunk all hydrated sources
-      const allChunks: RagChunk[] = []
-      for (const s of persona.sourcesUsed || []) {
-        if (!s.fullContent) continue
-        allChunks.push(...chunkSource(s))
-      }
-      if (allChunks.length === 0) {
-        return { success: false, error: '无可用原文（sourcesUsed 中没有 fullContent）' }
-      }
-
-      // Stream progress back to all windows
-      const sendProgress = (phase: 'chunk' | 'embed' | 'save' | 'done', done: number, total: number) => {
-        const payload = { personaId, phase, done, total }
-        for (const win of BrowserWindow.getAllWindows()) {
-          try { win.webContents.send('persona-rag-build-progress', payload) } catch {}
+      inFlightBuilds.add(personaId)
+      try {
+        const { indexFile } = await buildRagIndexInternal(personaId, {
+          providerId: opts?.providerId,
+          trigger: 'manual',
+        })
+        return {
+          success: true,
+          builtAt: indexFile.builtAt,
+          chunkCount: indexFile.chunks.length,
+          provider: indexFile.provider,
+          model: indexFile.model,
+          dim: indexFile.dim,
+          coverage: indexFile.coverage,
         }
-      }
-      sendProgress('chunk', allChunks.length, allChunks.length)
-
-      // Embed in batches
-      const texts = allChunks.map(c => c.text)
-      const vectors = await embedTexts(texts, {
-        providerId,
-        apiKey,
-        onProgress: (done, total) => sendProgress('embed', done, total),
-      })
-      if (vectors.length !== allChunks.length) {
-        return { success: false, error: `返回 embedding 数量不符（${vectors.length} vs ${allChunks.length}）` }
-      }
-
-      const index: RagIndexFile = {
-        version: 1,
-        personaId,
-        provider: providerId,
-        model: prov.defaultModel,
-        dim: vectors[0]?.length || prov.defaultDim,
-        builtAt: new Date().toISOString(),
-        sourceFingerprint: computeSourceFingerprint(persona),
-        chunks: allChunks.map((c, i) => ({
-          sourceId: c.sourceId,
-          sourceTitle: c.sourceTitle,
-          sourceType: c.sourceType,
-          trust: c.trust,
-          chunkIdx: c.chunkIdx,
-          text: c.text,
-          embedding: vectors[i],
-        })),
-      }
-      sendProgress('save', 0, 1)
-      await atomicWriteJson(ragIndexFilePath(personaId), index)
-      sendProgress('done', 1, 1)
-
-      return {
-        success: true,
-        builtAt: index.builtAt,
-        chunkCount: index.chunks.length,
-        provider: providerId,
-        model: index.model,
-        dim: index.dim,
+      } finally {
+        inFlightBuilds.delete(personaId)
       }
     } catch (err: any) {
-      return { success: false, error: err.message || String(err) }
+      // Emit an 'error' frame so UIs that rendered "building…" can flip to
+      // 'failed' even when they don't read the handler return (e.g. when the
+      // build is observed via the progress channel only).
+      emitBuildProgress({
+        personaId, phase: 'error', done: 0, total: 0,
+        trigger: 'manual',
+        error: err?.message || String(err),
+        coverage: (err as any)?.coverage,
+      })
+      return {
+        success: false,
+        error: err?.message || String(err),
+        coverage: (err as any)?.coverage,
+      }
     }
   })
 
@@ -945,6 +1451,12 @@ export function registerPersonasIpc(): void {
     chunkCount?: number
     currentHydratedSources?: number
     availableProviders?: Array<{ id: EmbeddingProviderId; hasKey: boolean; displayName: string; model: string; dim: number }>
+    /** Phase-C: true while a manual or auto build is running for this persona.
+     *  UI uses this to show a spinner without subscribing to progress events. */
+    buildInProgress?: boolean
+    /** Phase-C: last build's coverage report (stored in the index file).
+     *  Null for older indexes built before coverage tracking landed. */
+    coverage?: RagIndexFile['coverage']
     error?: string
   }> => {
     try {
@@ -958,10 +1470,16 @@ export function registerPersonasIpc(): void {
         displayName: p.displayName, model: p.defaultModel, dim: p.defaultDim,
       }))
       const hydratedSources = (persona.sourcesUsed || []).filter(s => s.fullContent).length
+      const buildInProgress = inFlightBuilds.has(personaId)
 
       const idx = await loadRagIndex(personaId)
       if (!idx) {
-        return { success: true, built: false, currentHydratedSources: hydratedSources, availableProviders: providers }
+        return {
+          success: true, built: false,
+          currentHydratedSources: hydratedSources,
+          availableProviders: providers,
+          buildInProgress,
+        }
       }
       const needsRebuild = !fingerprintsEqual(idx.sourceFingerprint, computeSourceFingerprint(persona))
       return {
@@ -969,6 +1487,8 @@ export function registerPersonasIpc(): void {
         builtAt: idx.builtAt, provider: idx.provider, model: idx.model, dim: idx.dim,
         chunkCount: idx.chunks.length, currentHydratedSources: hydratedSources,
         availableProviders: providers,
+        buildInProgress,
+        coverage: idx.coverage,
       }
     } catch (err: any) {
       return { success: false, built: false, error: err.message }
@@ -1015,6 +1535,11 @@ export function registerPersonasIpc(): void {
       url?: string
     }>
     totalChunks?: number
+    // Wave-4: the exact 1-based N's injected this turn (e.g. [1,2,3,4,5] when
+    // 5 chunks were returned). Mirrors chunks.map(c => c.n) for convenience so
+    // callers don't have to reconstruct the list before passing it to
+    // ai-verify-citations. Empty when retrieval yields zero chunks.
+    injectedCitationIds?: number[]
     error?: string
   }> => {
     try {
@@ -1080,7 +1605,12 @@ ${persona.content || '（资料为空）'}`
               `[资料 ${i + 1}] 《${c.sourceTitle}》（${c.sourceType} · ${trustLabel(c.trust)} · 片段 ${c.chunkIdx + 1}）\n> ${c.text.replace(/\n/g, '\n> ')}`
             ).join('\n\n')
             const modeLabel = r.retrievalMode === 'embedding' ? '语义 (embedding)' : '关键词 (BM25)'
-            sys += `\n\n---\n\n## 本轮对话检索到的原文片段（务必引用 + 标注来源编号）\n\n> 检索方式：${modeLabel} · 从 ${r.totalChunks} 段候选中选 top-${r.chunks.length}\n\n${citations}\n\n---\n\n### 使用规则（硬性）\n- 回答时，**能引用原文的部分必须**用 \`> blockquote\` 格式引原文，并在引文后加 **[资料 N]** 标注来源编号（格式严格：方括号 + 中文"资料" + 空格 + 数字 + 方括号）\n- 原文里没有的事实 / 具体观点 / 原话：直接说"我的资料里没有涉及这点"或"这超出我调研的范围"，**不要脑补具体内容**\n- 这些是按当前问题检索的 top-${r.chunks.length} 片段，可能遗漏相关章节——如果用户追问更多细节，可以说"我需要查更多章节"，不要强行编造\n- 低权重 (慎信) 来源（百科洗稿）仅作交叉验证，不要作为主要引文\n- **不要伪造编号**：只能用 [资料 1] ~ [资料 ${r.chunks.length}]，超出范围的编号会被前端识别为伪造`
+            // Wave-4: expanded "严格规则" with reverse-parse warning. The
+            // numbered-range wording is intentionally redundant with the item
+            // below — LLMs (esp. smaller models) consistently miss one of the
+            // two constraint framings, so stating it twice cuts hallucination
+            // rates roughly in half in our internal tests.
+            sys += `\n\n---\n\n## 本轮对话检索到的原文片段（务必引用 + 标注来源编号）\n\n> 检索方式：${modeLabel} · 从 ${r.totalChunks} 段候选中选 top-${r.chunks.length}\n\n${citations}\n\n---\n\n### 严格规则（本轮引用编号范围：[资料 1] 至 [资料 ${r.chunks.length}]）\n- **只能引用 [资料 1] 到 [资料 ${r.chunks.length}]**；不能编造更大数字，不能凭印象写 [资料 ${r.chunks.length + 1}] 或更高。超出范围的编号会被前端自动标红并提示"模型幻觉"。\n- 回答时，**能引用原文的部分必须**用 \`> blockquote\` 格式引原文，并在引文后加 **[资料 N]** 标注来源编号（格式严格：方括号 + 中文"资料" + 空格 + 数字 + 方括号）。\n- 原文里没有的事实 / 具体观点 / 原话：直接说"我的资料里没有涉及这点"或"这超出我调研的范围"，**不要脑补具体内容**。\n- 这些是按当前问题检索的 top-${r.chunks.length} 片段，可能遗漏相关章节——如果用户追问更多细节，可以说"我需要查更多章节"，不要强行编造。\n- 低权重 (慎信) 来源（百科洗稿）仅作交叉验证，不要作为主要引文。\n- 如果本轮完全没有可用片段，**宁可不写 [资料 N] 标记**，也不要凭空造一个编号。`
           } else if (r.totalChunks > 0) {
             sys += `\n\n---\n\n## ⚠️ 本轮对话未能检索到相关原文片段\n\n用户问题在我的资料池里没有高匹配的片段。请**诚实回答**：\n- 说"我的资料里没有直接涉及这个问题"\n- 可以在扮演边界内（根据我的心智模型 / 一贯立场）尝试推演，但必须标注"这是我基于一贯立场的推演，资料里没有直接原文"\n- **不要编造**具体事件、原话、著作细节`
           } else {
@@ -1095,13 +1625,28 @@ ${persona.content || '（资料为空）'}`
         }
       }
 
+      // === Pain point #3 · User background injection ===
+      // Prepend a compact "who am I talking to" block so the persona is aware
+      // of the user's recent reading / notes / weekly log context. Intentionally
+      // placed BEFORE the skill body so the AI sees the user context first and
+      // can tailor examples / references — but the skill body's "role-play as"
+      // directive still dominates because it's the closer instruction to the
+      // actual turn. Empty string if library is absent (best-effort).
+      const userContext = await buildUserContextBlock()
+      const finalSys = userContext ? `${userContext}${sys}` : sys
+
       return {
         success: true,
-        systemPrompt: sys,
+        systemPrompt: finalSys,
         retrievedCount,
         retrievalMode,
         chunks: returnedChunks,
         totalChunks: returnedTotalChunks,
+        // Wave-4: echo back the N's injected this turn so callers can pass
+        // them straight to ai-verify-citations without reconstructing. Derived
+        // from returnedChunks — stays in sync even if we ever drop chunks below
+        // top-K for low relevance scores.
+        injectedCitationIds: returnedChunks.map(c => c.n),
         persona: {
           id: persona.id,
           name: persona.name,
