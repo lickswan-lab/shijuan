@@ -491,6 +491,19 @@
 
 **注释标签**：`// BUG-FIX R8#1 · char class 里 ~~ 是重复(R1 观察项),清成 ~`
 
+### BUG-FIX R8#16 · electron/ipc/apprentice.ts · weekCode 路径清洗(同 R2#γ 模式)
+**新扫**:apprentice.ts 5 个 handler(load / save / delete / load-dialogue / save-dialogue)都把
+`weekCode` 直接进 `path.join(APPRENTICE_DIR, \`${weekCode}.md\`)` 没做清洗。
+
+`weekCode` 当前由 `isoWeekCode(date)` 产出('YYYY-Www' 安全格式),IPC 暴露但 UI 现在不用学徒
+观察(CLEAN-R7#1 之后死代码),所以触发不到。但 IPC 是 renderer 可控接口,defense-in-depth:
+将来改 UI 复活 / 上游 weekCode 来源变化 / 第三方插件等都该挡住路径穿越。
+
+**修复**：在每个 handler 顶部加 `SAFE_WEEK_CODE = /^[\w-]+$/` + `typeof === 'string'` 检查,
+不通过返回 `{ success: false, error: 'weekCode 含非法字符' }`(load-dialogue 还多带 `history: []`)。
+
+**注释标签**：`// BUG-FIX R8#16 · weekCode 路径清洗(同 R2#γ 对 lecture sessionId 做的)`
+
 ### BUG-FIX R8#12 · QuickOpen / BatchOcr · 静态 sweep · setTimeout 泄漏 + IPC sub 抖动
 **新扫区**：QuickOpen / BatchOcr / common 三个目录(R1-R7 没扫过)。
 

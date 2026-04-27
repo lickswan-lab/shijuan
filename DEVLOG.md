@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-04-28 · Batch 59 · 夜间值守 Round 8 #16 · Bug · apprentice weekCode 路径清洗
+
+主题：**bug fix · 静态 sweep apprentice.ts · path traversal defense-in-depth(同 R2#γ 模式)**
+
+### 修了什么(R8#16)
+
+`electron/ipc/apprentice.ts` 5 个 handler(apprentice-load / save / delete / load-dialogue / save-dialogue):
+- 之前 `path.join(APPRENTICE_DIR, \`${weekCode}.md\`)` 直接用 weekCode 没清洗
+- 当前 isoWeekCode 产出 'YYYY-Www' 安全,但 IPC 接受任意字符串 → defense-in-depth
+- 加 `SAFE_WEEK_CODE = /^[\w-]+$/` + typeof 检查,不过返回 error
+
+模式照搬 R2#γ 给 lecture sessionId 做的清洗。学徒观察 UI 已删(CLEAN-R7#1),触发不到,但 IPC 还在暴露。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 33.72s 通过
+
+### 后续
+
+下轮 Round 8 #17 必须 PERF 或 UX。
+
+---
+
 ## 2026-04-28 · Batch 58 · 夜间值守 Round 8 #15 · UX · SummonView 发送按钮尺寸对齐
 
 主题：**UX / UI polish · _UX_AUDIT_TODO P1-6 落地 · _UI_POLISH_LOG Change #50**

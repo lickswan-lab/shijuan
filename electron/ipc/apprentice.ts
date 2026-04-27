@@ -14,12 +14,38 @@ async function ensureDir(): Promise<void> {
   try { await fs.mkdir(APPRENTICE_DIR, { recursive: true }) } catch {}
 }
 
+// BUG-FIX R5#2 · 区分 ENOENT（正常首启）和 corrupt JSON（需用户警告），
+// 原来单层 catch 把两种都当 null 返回，导致 apprentice 观察生成静默失败无人知。
 async function loadLibrary(): Promise<Library | null> {
-  try { return JSON.parse(await fs.readFile(LIBRARY_FILE, 'utf-8')) } catch { return null }
+  let content: string
+  try {
+    content = await fs.readFile(LIBRARY_FILE, 'utf-8')
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') console.warn('[apprentice] loadLibrary read:', err?.message || err)
+    return null
+  }
+  try {
+    return JSON.parse(content)
+  } catch (err: any) {
+    console.error('[apprentice] library.json corrupt — 学徒观察暂无法生成:', err?.message || err)
+    return null
+  }
 }
 
 async function loadMeta(entryId: string): Promise<PdfMeta | null> {
-  try { return JSON.parse(await fs.readFile(path.join(META_DIR, `${entryId}.json`), 'utf-8')) } catch { return null }
+  let content: string
+  try {
+    content = await fs.readFile(path.join(META_DIR, `${entryId}.json`), 'utf-8')
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') console.warn('[apprentice] loadMeta read:', err?.message || err)
+    return null
+  }
+  try {
+    return JSON.parse(content)
+  } catch (err: any) {
+    console.error('[apprentice] meta 损坏:', entryId, err?.message || err)
+    return null
+  }
 }
 
 // ===== Week helpers (ISO weeks, Mon-start) =====
@@ -375,8 +401,18 @@ export function registerApprenticeIpc(): void {
   })
 
   // Load a specific week's log
+  // BUG-FIX R8#16 · weekCode 路径清洗(同 R2#γ 对 lecture sessionId 做的)
+  //   weekCode 进 path.join 但是 IPC 接受任意字符串,一旦 renderer 上游有 bug
+  //   或者将来 weekCode 参数从外部数据来,'../../etc/passwd.md' 这种值会
+  //   穿越到 APPRENTICE_DIR 之外。当前 isoWeekCode 产出 'YYYY-Www' 安全,
+  //   但 IPC 是 renderer 可控接口,defense-in-depth。
+  const SAFE_WEEK_CODE = /^[\w-]+$/  // 字母数字 + 下划线 + 短横
+
   ipcMain.handle('apprentice-load', async (_event, weekCode: string) => {
     try {
+      if (typeof weekCode !== 'string' || !SAFE_WEEK_CODE.test(weekCode)) {
+        return { success: false, error: 'weekCode 含非法字符' }
+      }
       await ensureDir()
       const content = await fs.readFile(path.join(APPRENTICE_DIR, `${weekCode}.md`), 'utf-8')
       return { success: true, content }
@@ -388,6 +424,9 @@ export function registerApprenticeIpc(): void {
   // Save a generated log
   ipcMain.handle('apprentice-save', async (_event, weekCode: string, content: string) => {
     try {
+      if (typeof weekCode !== 'string' || !SAFE_WEEK_CODE.test(weekCode)) {
+        return { success: false, error: 'weekCode 含非法字符' }
+      }
       await ensureDir()
       await atomicWriteFile(path.join(APPRENTICE_DIR, `${weekCode}.md`), content)
       return { success: true }
@@ -399,6 +438,9 @@ export function registerApprenticeIpc(): void {
   // Delete a log (+ its dialogue sidecar if any)
   ipcMain.handle('apprentice-delete', async (_event, weekCode: string) => {
     try {
+      if (typeof weekCode !== 'string' || !SAFE_WEEK_CODE.test(weekCode)) {
+        return { success: false, error: 'weekCode 含非法字符' }
+      }
       await fs.unlink(path.join(APPRENTICE_DIR, `${weekCode}.md`))
       // Dialogue file is optional — silently ignore if absent
       try { await fs.unlink(path.join(APPRENTICE_DIR, `${weekCode}.dialogue.json`)) } catch { /* fine */ }
@@ -416,6 +458,9 @@ export function registerApprenticeIpc(): void {
 
   ipcMain.handle('apprentice-load-dialogue', async (_event, weekCode: string) => {
     try {
+      if (typeof weekCode !== 'string' || !SAFE_WEEK_CODE.test(weekCode)) {
+        return { success: false, error: 'weekCode 含非法字符', history: [] }
+      }
       await ensureDir()
       const file = path.join(APPRENTICE_DIR, `${weekCode}.dialogue.json`)
       const history = await safeLoadJsonOrBackup<Array<{ role: string; content: string; createdAt?: string }>>(file, [])
@@ -427,6 +472,9 @@ export function registerApprenticeIpc(): void {
 
   ipcMain.handle('apprentice-save-dialogue', async (_event, weekCode: string, history: Array<{ role: string; content: string; createdAt?: string }>) => {
     try {
+      if (typeof weekCode !== 'string' || !SAFE_WEEK_CODE.test(weekCode)) {
+        return { success: false, error: 'weekCode 含非法字符' }
+      }
       await ensureDir()
       const file = path.join(APPRENTICE_DIR, `${weekCode}.dialogue.json`)
       await atomicWriteJson(file, history)
