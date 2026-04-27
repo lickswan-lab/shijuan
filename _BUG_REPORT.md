@@ -207,7 +207,7 @@
 
 ## 🟢 Round 2 观察项（非 bug · 4 条）
 
-- **electron/ipc/library.ts:326 save-ocr-text**：`absPath.replace(/\.pdf$/i, '.ocr.txt')`——非 .pdf 扩展名时没替换到，返回跟源一样的路径，`.ocr.txt` 结尾生成 `原名.ocr.txt` 最终还是正确（因为是追加）。边缘但不是 bug。
+- ~~**electron/ipc/library.ts:326 save-ocr-text**：`absPath.replace(/\.pdf$/i, '.ocr.txt')`——非 .pdf 扩展名时没替换到，返回跟源一样的路径，`.ocr.txt` 结尾生成 `原名.ocr.txt` 最终还是正确（因为是追加）。边缘但不是 bug。~~ → **R8#5 修(其实是真 bug,不是边缘 — 非 PDF 会 atomicWrite 覆盖源文件)**
 - **src/App.tsx:301** `initLibrary().then(...)` 里 `setTimeout(openEntry, 300)` 无清理。如果用户 300ms 内触发了手动 openEntry，会 double-open——但 openEntry 内部检查 currentEntry.id 即可容忍。观察。
 - ~~**electron/ipc/agent.ts:279** `agent-save-conversation` read-modify-write 没走 lock。两个窗口并发写会失一条。但用户几乎不会开俩窗口同时跟 Hermes 对话。~~ → **R8#3 已修**(`withConversationsLock` 包 save + delete 两个 RMW 序列)
 - **src/store/uiStore.ts:158,164,165** `localStorage.getItem` 的数字解析用 `Number(v)` 没防 NaN——如果用户手动改坏 localStorage，aiContextWindow 会变 NaN。下游使用点应该也没崩过（NaN 传给比较器都是 false），但不严谨。
@@ -491,6 +491,21 @@
 
 **注释标签**：`// BUG-FIX R8#1 · char class 里 ~~ 是重复(R1 观察项),清成 ~`
 
+### BUG-FIX R8#5 · electron/ipc/library.ts:326+ · save-ocr-text 非 .pdf 扩展名会覆盖源文件
+**原问题**：R2 观察项第 1 条,但 audit 写的"边缘但不是 bug"低估了。
+- `pdfAbsPath.replace(/\.pdf$/i, '.ocr.txt')` 对 `.epub` / `.docx` / `.txt` 这类不匹配 → ocrPath = pdfAbsPath
+- `atomicWriteFile(ocrPath, text)` 直接把 OCR 文本**写到源文件**位置 → **源文件被销毁**
+
+当前 OCR 流水线只对 PDF 调,但 IPC 暴露 + 用户/未来扩展不该假设这点。
+
+**修复**：抽 `ocrPathFor(srcPath)` helper:
+- PDF → `book.ocr.txt`(向后兼容已有文件名)
+- 非 PDF → `book.epub.ocr.txt`(永远不覆盖源)
+
+四处调用点(save / read / delete / full-text-search)统一走 helper,保持一致。
+
+**注释标签**：`// BUG-FIX R8#5 · 走同一个 ocrPathFor helper 保持四处一致`
+
 ### BUG-FIX R8#3 · electron/ipc/agent.ts:289,312 · agent-save-conversation / agent-delete-conversation 加 RMW 锁
 **原问题**：R2 观察项第 3 条。两个 handler 都做 read-modify-write,但读和写之间没加锁:
 - A 读 [a, b, c] → B 读 [a, b, c] → A 写 [a', b, c] → B 写 [a, b', c] (B 用的是 stale read,覆盖 A)
@@ -507,3 +522,7 @@
 - `electron/ipc/citationVerifier.ts`（R8#1）
 - `src/components/Agent/personaCitationParse.ts`（R8#1）
 - `electron/ipc/agent.ts`（R8#3）
+- `electron/ipc/library.ts`（R8#5）
+- 用户体验/性能(无 BUG-FIX 编号但同 Round):
+  - `src/components/Agent/PersonasTab.tsx`(UX-R8#2)
+  - `src/components/PdfViewer/PdfViewer.tsx`(PERF-R8#4)

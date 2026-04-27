@@ -4,6 +4,43 @@
 
 ---
 
+## 2026-04-28 · Batch 48 · 夜间值守 Round 8 #5 · Bug · save-ocr-text 非 PDF 覆盖源文件
+
+主题：**bug fix · R2 观察项第 1 条原 audit 标"边缘但不是 bug",实际是真 bug**
+
+### 修了什么(R8#5)
+
+`electron/ipc/library.ts` 里 `save-ocr-text` handler 之前是:
+```ts
+const ocrPath = pdfAbsPath.replace(/\.pdf$/i, '.ocr.txt')
+await atomicWriteFile(ocrPath, text)
+```
+
+非 PDF 扩展名(`.epub` / `.docx` / `.txt` ...)→ regex 不匹配 → ocrPath 等于源文件路径 → atomicWriteFile **直接覆盖源文件,源文件被销毁**。
+
+当前 OCR 流水线限于 PDF,实际触发概率低。但:
+- `save-ocr-text` IPC 是 renderer 可达接口,任何调用方传非 PDF 都会触发
+- 未来给 epub / docx 加 OCR 能力时这就是隐藏雷
+- 边缘但不是 bug → 实际是真 bug,只是被上游逻辑挡住
+
+修法抽 `ocrPathFor(srcPath)` helper:
+- PDF → `book.ocr.txt`(向后兼容已有文件命名)
+- 非 PDF → 追加 `.ocr.txt`(`book.epub` → `book.epub.ocr.txt`,永远不覆盖源)
+
+四处调用点(save / read / delete / full-text-search)统一走 helper。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npx electron-vite build`: 33.47s 通过
+- 手测路径:对 PDF OCR 应当不变(还是 `book.ocr.txt`),对非 PDF OCR(若有)走 `book.<ext>.ocr.txt`
+
+### 后续
+
+R2 观察项剩 2 条:App.tsx:301 setTimeout(openEntry,300) 清理 / uiStore.ts NaN 防御。下轮 Round 8 #6 必须 PERF 或 UX(因为 #5 是 Bug)。
+
+---
+
 ## 2026-04-28 · Batch 47 · 夜间值守 Round 8 #4 · PERF · PdfViewer zustand 全量解构 → selector
 
 主题：**perf · 对照 PERF-R7#1 (App.tsx) 把 PdfViewer 也改成 selector 订阅**

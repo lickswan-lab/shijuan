@@ -13,6 +13,19 @@ async function ensureDirs() {
   await fs.mkdir(META_DIR, { recursive: true })
 }
 
+// BUG-FIX R8#5 · save-ocr-text 非 .pdf 扩展名会覆盖源文件
+//   原代码 `pdfAbsPath.replace(/\.pdf$/i, '.ocr.txt')`:
+//     book.pdf  → book.ocr.txt  ✅
+//     book.epub → book.epub     ✅✅ → atomicWriteFile 把 EPUB 源文件写成 OCR 文本,源文件被销毁
+//   现在的 OCR 流水线只对 PDF 调,但 IPC 暴露 + 未来扩展都不该假设这点。
+// 修法:helper 函数,PDF 走老逻辑(向后兼容已有 .ocr.txt 文件名),
+//   非 PDF 改为追加 .ocr.txt(book.epub → book.epub.ocr.txt) — 永远不会覆盖源。
+//   read-ocr-text / delete-file / full-text-search 三处也走同一个 helper 保持一致。
+export function ocrPathFor(srcPath: string): string {
+  if (/\.pdf$/i.test(srcPath)) return srcPath.replace(/\.pdf$/i, '.ocr.txt')
+  return srcPath + '.ocr.txt'
+}
+
 // Serializes all library.json / meta writes so a second save can't race with a
 // first one. The lock enforces ordering only — it must NOT swallow errors: the
 // caller has to know when a save fails so the UI can surface it, and so we do
@@ -323,8 +336,9 @@ export function registerLibraryIpc(): void {
   // Save OCR text file alongside original PDF.
   // Atomic: a crashed OCR batch can't leave a half-written .ocr.txt that
   // would corrupt the full-text index on next open.
+  // BUG-FIX R8#5 · 非 .pdf 扩展名时 ocrPathFor 改为追加 .ocr.txt,不再覆盖源文件
   ipcMain.handle('save-ocr-text', async (_event, pdfAbsPath: string, text: string) => {
-    const ocrPath = pdfAbsPath.replace(/\.pdf$/i, '.ocr.txt')
+    const ocrPath = ocrPathFor(pdfAbsPath)
     await atomicWriteFile(ocrPath, text)
     return ocrPath
   })
@@ -335,7 +349,8 @@ export function registerLibraryIpc(): void {
     try {
       await shell.trashItem(absPath)
       // Also try to trash the .ocr.txt if it exists
-      const ocrPath = absPath.replace(/\.pdf$/i, '.ocr.txt')
+      // BUG-FIX R8#5 · 走同一个 ocrPathFor helper 保持四处一致
+      const ocrPath = ocrPathFor(absPath)
       try { await shell.trashItem(ocrPath) } catch { /* ignore */ }
       return { success: true }
     } catch (err: any) {
@@ -344,8 +359,9 @@ export function registerLibraryIpc(): void {
   })
 
   // Read OCR text file
+  // BUG-FIX R8#5 · 走同一个 ocrPathFor helper 保持四处一致
   ipcMain.handle('read-ocr-text', async (_event, pdfAbsPath: string) => {
-    const ocrPath = pdfAbsPath.replace(/\.pdf$/i, '.ocr.txt')
+    const ocrPath = ocrPathFor(pdfAbsPath)
     try {
       const text = await fs.readFile(ocrPath, 'utf-8')
       return { exists: true, text, path: ocrPath }
@@ -355,77 +371,87 @@ export function registerLibraryIpc(): void {
   })
 
   // Full-text search across OCR texts and annotations (parallelized)
+  // BUG-FIX SEARCH#2 · wrap whole handler body in try/catch. Previously a
+  // stray libraryData shape mismatch or fs quirk could bubble up as
+  // uncaught IPC reject and crash the main process. Always return [] on
+  // error — search results being empty is UX-acceptable; crashing is not.
   ipcMain.handle('full-text-search', async (_event, query: string, libraryData: any) => {
-    if (!query || query.length < 2) return []
+    try {
+      if (!query || query.length < 2) return []
 
-    type SearchResult = {
-      entryId: string; entryTitle: string; type: 'ocr' | 'annotation';
-      text: string; pageNumber?: number; annotationId?: string;
-    }
+      type SearchResult = {
+        entryId: string; entryTitle: string; type: 'ocr' | 'annotation';
+        text: string; pageNumber?: number; annotationId?: string;
+      }
 
-    const q = query.toLowerCase()
-    const entries = (libraryData?.entries || []) as Array<{ id: string; title: string; absPath: string }>
+      const q = query.toLowerCase()
+      const entries = (libraryData?.entries || []) as Array<{ id: string; title: string; absPath: string }>
 
-    // Helper: extract snippet around match
-    const snippet = (text: string, idx: number, qLen: number, pad: number = 30) => {
-      const s = Math.max(0, idx - pad)
-      const e = Math.min(text.length, idx + qLen + pad)
-      return (s > 0 ? '...' : '') + text.slice(s, e) + (e < text.length ? '...' : '')
-    }
+      // Helper: extract snippet around match
+      const snippet = (text: string, idx: number, qLen: number, pad: number = 30) => {
+        const s = Math.max(0, idx - pad)
+        const e = Math.min(text.length, idx + qLen + pad)
+        return (s > 0 ? '...' : '') + text.slice(s, e) + (e < text.length ? '...' : '')
+      }
 
-    // Search each entry in parallel (batches of 10)
-    const allResults: SearchResult[] = []
-    for (let i = 0; i < entries.length && allResults.length < 50; i += 10) {
-      const batch = entries.slice(i, i + 10)
-      const batchResults = await Promise.all(batch.map(async (entry): Promise<SearchResult[]> => {
-        const results: SearchResult[] = []
-        // Read OCR + meta in parallel
-        const [ocrText, metaText, rawText] = await Promise.all([
-          fs.readFile(entry.absPath.replace(/\.pdf$/i, '.ocr.txt'), 'utf-8').catch(() => null),
-          fs.readFile(metaPath(entry.id), 'utf-8').catch(() => null),
-          /\.(txt|md)$/i.test(entry.absPath) ? fs.readFile(entry.absPath, 'utf-8').catch(() => null) : null,
-        ])
+      // Search each entry in parallel (batches of 10)
+      const allResults: SearchResult[] = []
+      for (let i = 0; i < entries.length && allResults.length < 50; i += 10) {
+        const batch = entries.slice(i, i + 10)
+        const batchResults = await Promise.all(batch.map(async (entry): Promise<SearchResult[]> => {
+          const results: SearchResult[] = []
+          // Read OCR + meta in parallel
+          // BUG-FIX R8#5 · 走同一个 ocrPathFor helper 保持四处一致
+          const [ocrText, metaText, rawText] = await Promise.all([
+            fs.readFile(ocrPathFor(entry.absPath), 'utf-8').catch(() => null),
+            fs.readFile(metaPath(entry.id), 'utf-8').catch(() => null),
+            /\.(txt|md)$/i.test(entry.absPath) ? fs.readFile(entry.absPath, 'utf-8').catch(() => null) : null,
+          ])
 
-        // Search OCR/TXT content
-        const textContent = ocrText || rawText
-        if (textContent) {
-          const lines = textContent.split('\n')
-          let page = 1, found = 0
-          for (const line of lines) {
-            const pm = line.match(/^=== 第 (\d+) 页 ===$/)
-            if (pm) { page = parseInt(pm[1]); continue }
-            const idx = line.toLowerCase().indexOf(q)
-            if (idx >= 0 && found < 3) {
-              results.push({ entryId: entry.id, entryTitle: entry.title, type: 'ocr', text: snippet(line, idx, query.length), pageNumber: page })
-              found++
+          // Search OCR/TXT content
+          const textContent = ocrText || rawText
+          if (textContent) {
+            const lines = textContent.split('\n')
+            let page = 1, found = 0
+            for (const line of lines) {
+              const pm = line.match(/^=== 第 (\d+) 页 ===$/)
+              if (pm) { page = parseInt(pm[1]); continue }
+              const idx = line.toLowerCase().indexOf(q)
+              if (idx >= 0 && found < 3) {
+                results.push({ entryId: entry.id, entryTitle: entry.title, type: 'ocr', text: snippet(line, idx, query.length), pageNumber: page })
+                found++
+              }
             }
           }
-        }
 
-        // Search annotations
-        if (metaText) {
-          try {
-            const meta = JSON.parse(metaText) as PdfMeta
-            for (const ann of (meta.annotations || []).slice(0, 20)) {
-              if (ann.anchor.selectedText.toLowerCase().includes(q)) {
-                results.push({ entryId: entry.id, entryTitle: entry.title, type: 'annotation', text: ann.anchor.selectedText.slice(0, 80), pageNumber: ann.anchor.pageNumber, annotationId: ann.id })
-              }
-              for (const h of (ann.historyChain || [])) {
-                const idx = h.content.toLowerCase().indexOf(q)
-                if (idx >= 0) {
-                  results.push({ entryId: entry.id, entryTitle: entry.title, type: 'annotation', text: snippet(h.content, idx, query.length, 20), pageNumber: ann.anchor.pageNumber, annotationId: ann.id })
-                  break
+          // Search annotations
+          if (metaText) {
+            try {
+              const meta = JSON.parse(metaText) as PdfMeta
+              for (const ann of (meta.annotations || []).slice(0, 20)) {
+                if (ann.anchor.selectedText.toLowerCase().includes(q)) {
+                  results.push({ entryId: entry.id, entryTitle: entry.title, type: 'annotation', text: ann.anchor.selectedText.slice(0, 80), pageNumber: ann.anchor.pageNumber, annotationId: ann.id })
+                }
+                for (const h of (ann.historyChain || [])) {
+                  const idx = h.content.toLowerCase().indexOf(q)
+                  if (idx >= 0) {
+                    results.push({ entryId: entry.id, entryTitle: entry.title, type: 'annotation', text: snippet(h.content, idx, query.length, 20), pageNumber: ann.anchor.pageNumber, annotationId: ann.id })
+                    break
+                  }
                 }
               }
-            }
-          } catch {}
-        }
-        return results
-      }))
-      allResults.push(...batchResults.flat())
-    }
+            } catch {}
+          }
+          return results
+        }))
+        allResults.push(...batchResults.flat())
+      }
 
-    return allResults.slice(0, 50)
+      return allResults.slice(0, 50)
+    } catch (err: any) {
+      console.error('[full-text-search] unexpected:', err?.message || err)
+      return []
+    }
   })
 
   // Persist a translated text as a .txt file in ~/.lit-manager/translations/
