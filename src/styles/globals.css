@@ -115,11 +115,13 @@ html, body, #root {
   -webkit-app-region: drag;
 }
 .top-bar button, .top-bar input { -webkit-app-region: no-drag; }
+/* 2026-04-28 polish · top-bar 提到 44px 后 logo 同比例放大 15→17px,
+   letter-spacing 微调 0.5→0.6 让暖金色"拾卷"在更宽边栏里不显瘦小。 */
 .top-bar .logo {
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 600;
   color: var(--accent);
-  letter-spacing: 0.5px;
+  letter-spacing: 0.6px;
 }
 
 /* ========== SIDEBAR ========== */

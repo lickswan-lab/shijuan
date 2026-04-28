@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useUiStore } from '../../store/uiStore'
 import { useLibraryStore } from '../../store/libraryStore'
 import { generateBibTeX, generateRIS } from '../../utils/citations'
+import { invalidateAiConfigCache } from '../../utils/aiConfigCache'
 
 // ===== Auto Update Panel =====
 function UpdatePanel() {
@@ -10,14 +11,24 @@ function UpdatePanel() {
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState('')
 
+  // BUG-FIX R2#ε · update check / download is async and slow; user may close
+  // Settings mid-flight. Guard all setState with mountedRef.
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
   const handleCheck = useCallback(async () => {
     if (!window.electronAPI?.checkUpdate) return
     setStatus('checking'); setError('')
     try {
       const result = await window.electronAPI.checkUpdate()
+      if (!mountedRef.current) return
       setInfo(result)
       setStatus(result.hasUpdate ? 'available' : 'idle')
     } catch (err: any) {
+      if (!mountedRef.current) return
       setError(err.message || '检查失败')
       setStatus('error')
     }
@@ -28,11 +39,14 @@ function UpdatePanel() {
     setStatus('downloading'); setProgress(0)
 
     // Listen for progress
-    const cleanup = window.electronAPI.onUpdateProgress?.((pct: number) => setProgress(pct))
+    const cleanup = window.electronAPI.onUpdateProgress?.((pct: number) => {
+      if (mountedRef.current) setProgress(pct)
+    })
 
     try {
       const result = await window.electronAPI.downloadUpdate(info.downloadUrl)
       cleanup?.()
+      if (!mountedRef.current) return
       if (result.success) {
         setStatus('ready')
       } else {
@@ -41,6 +55,7 @@ function UpdatePanel() {
       }
     } catch (err: any) {
       cleanup?.()
+      if (!mountedRef.current) return
       setError(err.message || '下载失败')
       setStatus('error')
     }
@@ -273,7 +288,8 @@ function DiagnosticPanel() {
 //    anxiety. Does not include the PDF binaries themselves (they stay in the
 //    user's own folders) or OCR .txt files (they live next to the PDFs).
 function DataExportPanel() {
-  const { library, importFromBibTeX } = useLibraryStore()
+  const library = useLibraryStore(s => s.library)
+  const importFromBibTeX = useLibraryStore(s => s.importFromBibTeX)
   const [status, setStatus] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -448,7 +464,21 @@ interface ProviderInfo {
 }
 
 export default function TopBar() {
-  const { showSettings, setShowSettings, glmApiKeyStatus, activeReadingLogDate, setActiveReadingLogDate, setSidebarTab, rightPanel, setRightPanel, annotationPanelCollapsed, toggleAnnotationPanel, hermesHasInsight, darkMode, toggleDarkMode, updateAvailable } = useUiStore()
+  // 2026-04-25 PERF · 选择性订阅
+  const showSettings = useUiStore(s => s.showSettings)
+  const setShowSettings = useUiStore(s => s.setShowSettings)
+  const glmApiKeyStatus = useUiStore(s => s.glmApiKeyStatus)
+  const activeReadingLogDate = useUiStore(s => s.activeReadingLogDate)
+  const setActiveReadingLogDate = useUiStore(s => s.setActiveReadingLogDate)
+  const setSidebarTab = useUiStore(s => s.setSidebarTab)
+  const rightPanel = useUiStore(s => s.rightPanel)
+  const setRightPanel = useUiStore(s => s.setRightPanel)
+  const annotationPanelCollapsed = useUiStore(s => s.annotationPanelCollapsed)
+  const toggleAnnotationPanel = useUiStore(s => s.toggleAnnotationPanel)
+  const hermesHasInsight = useUiStore(s => s.hermesHasInsight)
+  const darkMode = useUiStore(s => s.darkMode)
+  const toggleDarkMode = useUiStore(s => s.toggleDarkMode)
+  const updateAvailable = useUiStore(s => s.updateAvailable)
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState<string | null>(null)
@@ -476,10 +506,16 @@ export default function TopBar() {
   }, [lockedHint])
 
   // Load providers when settings opens
+  // BUG-FIX R2#ε · cancellation flag so a late aiGetProviders resolve
+  // after the user closes Settings doesn't fire setProviders on a
+  // component whose Settings subtree just unmounted.
   useEffect(() => {
-    if (showSettings && window.electronAPI?.aiGetProviders) {
-      window.electronAPI.aiGetProviders().then(setProviders).catch(() => {})
-    }
+    if (!showSettings || !window.electronAPI?.aiGetProviders) return
+    let cancelled = false
+    window.electronAPI.aiGetProviders()
+      .then(r => { if (!cancelled) setProviders(r) })
+      .catch(() => {})
+    return () => { cancelled = true }
   }, [showSettings])
 
   const handleSaveKey = async (providerId: string) => {
@@ -497,6 +533,8 @@ export default function TopBar() {
       const updated = await window.electronAPI.aiGetProviders()
       setProviders(updated)
       setKeyInputs(prev => ({ ...prev, [providerId]: '' }))
+      // 2026-04-25 PERF · 让 aiConfigCache 失效，下次组件 mount/refresh 重新拉
+      invalidateAiConfigCache()
     } catch { /* ignore */ }
     setSaving(null)
   }
@@ -508,6 +546,8 @@ export default function TopBar() {
     }
     const updated = await window.electronAPI.aiGetProviders()
     setProviders(updated)
+    // 2026-04-25 PERF · 失效 aiConfigCache
+    invalidateAiConfigCache()
   }
 
   const configuredCount = providers.filter(p => p.hasKey).length
@@ -522,17 +562,17 @@ export default function TopBar() {
           className="btn btn-sm btn-icon"
           onClick={toggleDarkMode}
           title={darkMode ? '切换到亮色模式' : '切换到暗色模式'}
-          style={{ padding: '5px 7px', marginRight: 4, color: darkMode ? '#ffc107' : 'var(--text-muted)' }}
+          style={{ padding: '6px 9px', marginRight: 4, color: darkMode ? '#ffc107' : 'var(--text-muted)' }}
         >
           {darkMode ? (
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
               <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
               <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
               <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
             </svg>
           ) : (
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
             </svg>
           )}
@@ -549,13 +589,13 @@ export default function TopBar() {
               setRightPanel('agent')
             }
           }}
-          title="Hermes 研究助手"
+          title="学徒 · 研究伙伴"
           style={{
-            padding: '5px 7px', marginRight: 4, position: 'relative',
+            padding: '6px 9px', marginRight: 4, position: 'relative',
             color: rightPanel === 'agent' && !annotationPanelCollapsed ? 'var(--accent)' : 'var(--text-muted)',
           }}
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
           </svg>
           {hermesHasInsight && (
@@ -577,14 +617,14 @@ export default function TopBar() {
           onClick={() => setLockedHint('听课模式正在打磨中，敬请期待')}
           title="听课模式 · 敬请期待（打磨中）"
           style={{
-            padding: '5px 7px', marginRight: 4,
+            padding: '6px 9px', marginRight: 4,
             color: 'var(--text-muted)',
             opacity: 0.45,
             cursor: 'not-allowed',
             position: 'relative',
           }}
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
             <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
           </svg>
@@ -616,11 +656,11 @@ export default function TopBar() {
           }}
           title="阅读日志"
           style={{
-            padding: '5px 7px', marginRight: 4,
+            padding: '6px 9px', marginRight: 4,
             color: activeReadingLogDate ? 'var(--accent)' : 'var(--text-muted)',
           }}
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
           </svg>
         </button>
@@ -630,11 +670,11 @@ export default function TopBar() {
           onClick={() => setShowSettings(true)}
           title={updateAvailable ? `设置 · 有新版本 v${updateAvailable.version}` : '设置'}
           style={{
-            padding: '5px 7px', position: 'relative',
+            padding: '6px 9px', position: 'relative',
             ...(glmApiKeyStatus !== 'set' && configuredCount === 0 ? { color: 'var(--warning)' } : { color: 'var(--text-muted)' }),
           }}
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
           </svg>
           {updateAvailable && (
