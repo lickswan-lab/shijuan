@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { Library, PdfMeta, HistoryEntry, ReadingLogEvent, ReadingLog, Persona, PersonaSource } from '../src/types/library'
+// 2026-04-28 · ReadingLog 类型移除(readingLog 功能下线)
+import type { Library, PdfMeta, HistoryEntry, Persona, PersonaSource } from '../src/types/library'
 
 const electronAPI = {
   // Library (central storage)
@@ -504,18 +505,7 @@ const electronAPI = {
   logRendererCrash: (payload: { label?: string; message?: string; stack?: string; componentStack?: string }): void =>
     ipcRenderer.send('log-renderer-crash', payload),
 
-  // === Reading Log ===
-  readingLogCollectEvents: (date: string): Promise<{ success: boolean; events: ReadingLogEvent[]; error?: string }> =>
-    ipcRenderer.invoke('reading-log-collect-events', date),
-  readingLogGenerateSummary: (params: { events: ReadingLogEvent[]; date: string; recentLogs: ReadingLog[]; model: string }): Promise<{ success: boolean; text?: string; error?: string }> =>
-    ipcRenderer.invoke('reading-log-generate-summary', params),
-  readingLogSave: (log: ReadingLog): Promise<{ success: boolean; error?: string }> =>
-    ipcRenderer.invoke('reading-log-save', log),
-  onReadingLogGenerated: (callback: (log: ReadingLog) => void) => {
-    const handler = (_event: any, log: ReadingLog) => callback(log)
-    ipcRenderer.on('reading-log-generated', handler)
-    return () => { ipcRenderer.removeListener('reading-log-generated', handler) }
-  },
+  // === Reading Log === (2026-04-28 deleted — feature removed by user decision)
 }
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI)

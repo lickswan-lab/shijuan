@@ -96,10 +96,21 @@ export function registerLectureIpc(): void {
       return { success: false, error: err.message }
     }
   })
+  // BUG-FIX R2#γ · sanitize sessionId before path join so a crafted renderer
+  // payload (e.g. "../../../../evil") can't escape AUDIO_DIR. Current ids are
+  // all uuid() so this is defense-in-depth; matters if the renderer ever gets
+  // XSS'd (malicious PDF / plugin surface) or the session id source changes.
+  const SAFE_SESSION_ID = /^[a-zA-Z0-9_-]+$/
+
   // Save/update lecture session in library.json — goes through shared writeLock
   // so it cannot interleave with save-library or the midnight scheduler.
+  // BUG-FIX R4#3 · lecture-save 也加 sessionId 清洗（R2#γ 只改了 audio 两个
+  // handler，漏了这里，脏 id 会写入 library.json 污染后续操作）
   ipcMain.handle('lecture-save', async (_event, session: LectureSession) => {
     try {
+      if (!session?.id || typeof session.id !== 'string' || !SAFE_SESSION_ID.test(session.id)) {
+        return { success: false, error: 'sessionId 含非法字符' }
+      }
       const result = await mutateLibraryOnDisk((library) => {
         const lib = library as any
         if (!lib.lectureSessions) lib.lectureSessions = []
@@ -121,6 +132,9 @@ export function registerLectureIpc(): void {
   // Save audio recording buffer
   ipcMain.handle('lecture-save-audio', async (_event, sessionId: string, buffer: Buffer) => {
     try {
+      if (typeof sessionId !== 'string' || !SAFE_SESSION_ID.test(sessionId)) {
+        return { success: false, error: 'sessionId 含非法字符' }
+      }
       await ensureAudioDir()
       const filePath = path.join(AUDIO_DIR, `${sessionId}.webm`)
       await fs.writeFile(filePath, buffer)
@@ -133,6 +147,9 @@ export function registerLectureIpc(): void {
   // Delete lecture audio file
   ipcMain.handle('lecture-delete-audio', async (_event, sessionId: string) => {
     try {
+      if (typeof sessionId !== 'string' || !SAFE_SESSION_ID.test(sessionId)) {
+        return { success: false, error: 'sessionId 含非法字符' }
+      }
       const filePath = path.join(AUDIO_DIR, `${sessionId}.webm`)
       await fs.unlink(filePath).catch(() => {})
       return { success: true }

@@ -468,8 +468,7 @@ export default function TopBar() {
   const showSettings = useUiStore(s => s.showSettings)
   const setShowSettings = useUiStore(s => s.setShowSettings)
   const glmApiKeyStatus = useUiStore(s => s.glmApiKeyStatus)
-  const activeReadingLogDate = useUiStore(s => s.activeReadingLogDate)
-  const setActiveReadingLogDate = useUiStore(s => s.setActiveReadingLogDate)
+  // 2026-04-28 · activeReadingLogDate / setActiveReadingLogDate 已删(readingLog 功能下线)
   const setSidebarTab = useUiStore(s => s.setSidebarTab)
   const rightPanel = useUiStore(s => s.rightPanel)
   const setRightPanel = useUiStore(s => s.setRightPanel)
@@ -642,28 +641,7 @@ export default function TopBar() {
             </svg>
           </span>
         </button>
-        {/* Reading log button */}
-        <button
-          className="btn btn-sm btn-icon"
-          onClick={() => {
-            if (activeReadingLogDate) {
-              setActiveReadingLogDate(null)
-            } else {
-              setSidebarTab('reading-log')
-              // Open today's log or just switch to log tab
-              setActiveReadingLogDate(new Date().toISOString().slice(0, 10))
-            }
-          }}
-          title="阅读日志"
-          style={{
-            padding: '6px 9px', marginRight: 4,
-            color: activeReadingLogDate ? 'var(--accent)' : 'var(--text-muted)',
-          }}
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-          </svg>
-        </button>
+        {/* 2026-04-28 · 阅读日志按钮已删(readingLog 功能下线) */}
         {/* Settings button */}
         <button
           className="btn btn-sm btn-icon"

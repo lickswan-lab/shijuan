@@ -172,17 +172,12 @@ async function executeTool(toolName: string, argsJson: string): Promise<string> 
     }
 
     case 'get_reading_activity': {
-      const days = args.days || 7
-      const logs = (library.readingLogs || []).slice(0, days)
+      // 2026-04-28 · readingLog 功能已删,这个 Hermes tool 返回空。
+      //   未来如果做"按概念检索我的笔记"那种约束版,可以从这里重新挂上。
       return JSON.stringify({
-        count: logs.length,
-        logs: logs.map((l: any) => ({
-          date: l.date, eventCount: l.events?.length || 0,
-          hasSummary: !!l.aiSummary,
-          events: (l.events || []).slice(0, 10).map((e: any) => ({
-            type: e.type, detail: e.detail, timestamp: e.timestamp,
-          })),
-        })),
+        count: 0,
+        logs: [],
+        note: 'reading log feature is deprecated',
       })
     }
 

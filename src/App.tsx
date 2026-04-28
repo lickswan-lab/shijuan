@@ -5,7 +5,7 @@ import FileTree from './components/Sidebar/FileTree'
 const PdfViewer = lazy(() => import('./components/PdfViewer/PdfViewer'))
 const AnnotationPanel = lazy(() => import('./components/AnnotationPanel/AnnotationPanel'))
 const MemoEditor = lazy(() => import('./components/Memo/MemoEditor'))
-const ReadingLogView = lazy(() => import('./components/ReadingLog/ReadingLogView'))
+// 2026-04-28 · ReadingLogView 已删(readingLog 功能下线)
 const AgentPanel = lazy(() => import('./components/Agent/AgentPanel'))
 const QuickOpenModal = lazy(() => import('./components/QuickOpen/QuickOpenModal'))
 const BatchOcrRunner = lazy(() => import('./components/BatchOcr/BatchOcrRunner'))
@@ -105,7 +105,7 @@ export default function App() {
   const annotationPanelCollapsed = useUiStore(s => s.annotationPanelCollapsed)
   const toggleAnnotationPanel = useUiStore(s => s.toggleAnnotationPanel)
   const activeMemoId = useUiStore(s => s.activeMemoId)
-  const activeReadingLogDate = useUiStore(s => s.activeReadingLogDate)
+  // 2026-04-28 · activeReadingLogDate 已删(readingLog 功能下线)
   const rightPanel = useUiStore(s => s.rightPanel)
   // 2026-04-28 CLEAN · immersiveMode + dualPageMode 已删(沉浸式阅读下线)
   const [dropActive, setDropActive] = useState(false)
@@ -193,10 +193,9 @@ export default function App() {
         return
       }
 
-      // Ctrl+1/2/3 → Switch sidebar tabs
+      // Ctrl+1/2 → Switch sidebar tabs (Ctrl+3 reading-log removed 2026-04-28)
       if (ctrl && e.key === '1' && !isEditing) { e.preventDefault(); useUiStore.getState().setSidebarTab('library'); return }
       if (ctrl && e.key === '2' && !isEditing) { e.preventDefault(); useUiStore.getState().setSidebarTab('memos'); return }
-      if (ctrl && e.key === '3' && !isEditing) { e.preventDefault(); useUiStore.getState().setSidebarTab('reading-log'); return }
     }
 
     document.addEventListener('keydown', handler)
@@ -278,15 +277,8 @@ export default function App() {
     window.electronAPI?.setTitleBarTheme?.(dark)
   }, [])
 
-  // Main-process nudge: midnight scheduler wrote a reading log to library.json
-  // directly. Reload just the readingLogs slice so our next saveLibrary() doesn't
-  // overwrite what it wrote.
-  useEffect(() => {
-    const off = window.electronAPI.onLibraryChangedOnDisk?.(() => {
-      useLibraryStore.getState().reloadReadingLogsFromDisk()
-    })
-    return () => { if (off) off() }
-  }, [])
+  // 2026-04-28 · onLibraryChangedOnDisk + reloadReadingLogsFromDisk 已删
+  //   (readingLog 功能下线,midnight scheduler 也跟着删了,不再有"主进程改库"事件)
 
   // Init library on mount
   // BUG-FIX R8#10 · 原 R2 观察项第 2 条:setTimeout(openEntry, 300) 无清理 + 不防 race。
@@ -335,46 +327,37 @@ export default function App() {
       setGlmApiKeyStatus('not-set')
     }
 
-    // Listen for midnight reading log generation
-    let logListenerCleanup: (() => void) | undefined
+    // 2026-04-28 · readingLog 功能已删,onReadingLogGenerated listener 也删。
+    //   原本 update-check setTimeout 被嵌在该 listener 块里(意外耦合),拆出来独立跑。
     let updateCheckTimer: ReturnType<typeof setTimeout> | null = null
-    if (window.electronAPI?.onReadingLogGenerated) {
-      logListenerCleanup = window.electronAPI.onReadingLogGenerated((log) => {
-        const { library } = useLibraryStore.getState()
-        if (library) {
-          useLibraryStore.getState().saveReadingLog(log)
-        }
-      })
-      // Background update check: only if ≥ 24h since last check (avoid hitting GitHub
-      // on every startup). Runs 3s after mount so initial render isn't blocked.
-      // BUG-FIX R8#10 · 之前 setTimeout handle 没跟踪,renderer reload 时 timer 漏。
-      updateCheckTimer = setTimeout(() => {
-        updateCheckTimer = null
-        if (cancelled) return
-        try {
-          // BUG-FIX R8#8 · NaN 防御:坏数据时 last=0 → 总是触发检查(预期行为)
-          const last = readNumber('sj-lastUpdateCheck', 0)
-          if (Date.now() - last < 24 * 3600 * 1000) return
-          if (!window.electronAPI?.checkUpdate) return
-          window.electronAPI.checkUpdate().then(res => {
-            localStorage.setItem('sj-lastUpdateCheck', String(Date.now()))
-            if (res.hasUpdate) {
-              useUiStore.getState().setUpdateAvailable({
-                version: res.latestVersion,
-                downloadUrl: res.downloadUrl,
-                asarSize: res.asarSize,
-              })
-            }
-          }).catch(() => { /* silent — don't bother user if network flakes */ })
-        } catch { /* ignore localStorage errors */ }
-      }, 3000)
-    }
-    // BUG-FIX R8#10 · 统一 cleanup:取消 cancelled 标志 + 两个 timer + 听众
+    // Background update check: only if ≥ 24h since last check (avoid hitting GitHub
+    // on every startup). Runs 3s after mount so initial render isn't blocked.
+    // BUG-FIX R8#10 · 之前 setTimeout handle 没跟踪,renderer reload 时 timer 漏。
+    updateCheckTimer = setTimeout(() => {
+      updateCheckTimer = null
+      if (cancelled) return
+      try {
+        // BUG-FIX R8#8 · NaN 防御:坏数据时 last=0 → 总是触发检查(预期行为)
+        const last = readNumber('sj-lastUpdateCheck', 0)
+        if (Date.now() - last < 24 * 3600 * 1000) return
+        if (!window.electronAPI?.checkUpdate) return
+        window.electronAPI.checkUpdate().then(res => {
+          localStorage.setItem('sj-lastUpdateCheck', String(Date.now()))
+          if (res.hasUpdate) {
+            useUiStore.getState().setUpdateAvailable({
+              version: res.latestVersion,
+              downloadUrl: res.downloadUrl,
+              asarSize: res.asarSize,
+            })
+          }
+        }).catch(() => { /* silent — don't bother user if network flakes */ })
+      } catch { /* ignore localStorage errors */ }
+    }, 3000)
+    // BUG-FIX R8#10 · 统一 cleanup:取消 cancelled 标志 + 两个 timer
     return () => {
       cancelled = true
       if (restoreTimer !== null) clearTimeout(restoreTimer)
       if (updateCheckTimer !== null) clearTimeout(updateCheckTimer)
-      if (logListenerCleanup) logListenerCleanup()
     }
   }, [])
 
@@ -415,13 +398,10 @@ export default function App() {
           <FileTree />
         </ErrorBoundary>
 
-        {/* Main content: Reading log / Memo editor / PDF viewer (lazy-loaded) */}
+        {/* Main content: Memo editor / PDF viewer (lazy-loaded)
+            2026-04-28 · ReadingLogView 分支已删(readingLog 功能下线) */}
         <Suspense fallback={<div className="empty-state"><span className="loading-spinner" /></div>}>
-        {activeReadingLogDate ? (
-          <ErrorBoundary fallbackLabel="阅读日志">
-            <ReadingLogView />
-          </ErrorBoundary>
-        ) : activeMemoId ? (
+        {activeMemoId ? (
           <>
             <ErrorBoundary fallbackLabel="笔记">
               <MemoEditor />

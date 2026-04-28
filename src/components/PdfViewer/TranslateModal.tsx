@@ -18,6 +18,7 @@ import { useEffect, useState } from 'react'
 import { useUiStore } from '../../store/uiStore'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useTranslationJobsStore } from '../../store/translationJobsStore'
+import { fetchAiConfig, subscribeAiConfig } from '../../utils/aiConfigCache'
 
 type TranslateMode = 'selection' | 'current-page' | 'range' | 'full'
 
@@ -84,9 +85,10 @@ function deriveProgressMsg(job: ReturnType<typeof useTranslationJobsStore.getSta
 }
 
 // Build the source text from the user's selected mode.
-function buildSourceText(props: TranslateModalProps, mode: TranslateMode, range: { start: number; end: number }): string {
+function buildSourceText(props: TranslateModalProps & { _effectiveCurrentPageText?: string }, mode: TranslateMode, range: { start: number; end: number }): string {
   if (mode === 'selection') return props.selectedText || ''
-  if (mode === 'current-page') return props.currentPageText || ''
+  // Batch 43 · 当前页用动态计算的文本（订阅 uiStore.currentVisiblePage）
+  if (mode === 'current-page') return props._effectiveCurrentPageText || props.currentPageText || ''
   if (mode === 'full') return props.fullText || ''
   if (mode === 'range') {
     const pages = props.pageTexts || []
@@ -124,6 +126,19 @@ export default function TranslateModal(props: TranslateModalProps) {
   const progressMsg = deriveProgressMsg(job)
 
   const [mode, setMode] = useState<TranslateMode>(props.initialMode)
+  // Batch 43 · "当前页"模式动态跟随用户阅读位置：直接订阅 uiStore.currentVisiblePage
+  // （TranslateModal 实例只有打开时才渲染消耗大件 UI，订阅成本低；放在 PdfViewer
+  // 订阅会让整个 viewer 每次滚动都重渲）
+  const currentVisiblePage = useUiStore(s => s.currentVisiblePage)
+  // 优先使用 props 显式传入的当前页（保留旧 API），fallback 到 store 实时值
+  const effectiveCurrentPage = props.currentPageNumber || currentVisiblePage || 0
+  const effectiveCurrentPageText = (() => {
+    if (props.currentPageText) return props.currentPageText
+    if (effectiveCurrentPage > 0 && props.pageTexts && props.pageTexts[effectiveCurrentPage - 1]) {
+      return props.pageTexts[effectiveCurrentPage - 1]
+    }
+    return ''
+  })()
   const [targetLang, setTargetLang] = useState<'zh' | 'en'>('zh')
   const [range, setRange] = useState<{ start: number; end: number }>({ start: 1, end: Math.min(5, totalPages || 1) })
   const [localProgressMsg, setLocalProgressMsg] = useState('')
@@ -137,12 +152,17 @@ export default function TranslateModal(props: TranslateModalProps) {
     Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>
   >([])
 
-  // Load configured AI providers once on mount, and refresh whenever the modal
-  // opens (the user may have added/removed a provider between opens).
+  // Load configured AI providers — 2026-04-25 PERF · 走共享 cache（命中后无 IPC）
+  // Settings 里改 API key 时会调 invalidateAiConfigCache() 让下次重 fetch
+  // Batch 43 · 订阅 cache 失效：modal 开着时改 Settings 也立即刷新下拉
   useEffect(() => {
-    if (open && (window as any).electronAPI?.aiGetConfigured) {
-      (window as any).electronAPI.aiGetConfigured().then(setConfiguredProviders).catch(() => {})
-    }
+    if (!open) return
+    let cancelled = false
+    fetchAiConfig().then(r => { if (!cancelled) setConfiguredProviders(r) })
+    const unsub = subscribeAiConfig(latest => {
+      if (!cancelled) setConfiguredProviders(latest)
+    })
+    return () => { cancelled = true; unsub() }
   }, [open])
 
   // Reset local-only state when modal opens. We DON'T clear result/progress
@@ -178,7 +198,7 @@ export default function TranslateModal(props: TranslateModalProps) {
 
   if (!open) return null
 
-  const currentSource = buildSourceText(props, mode, range)
+  const currentSource = buildSourceText({ ...props, _effectiveCurrentPageText: effectiveCurrentPageText }, mode, range)
   const canRun = currentSource.trim().length > 0 && !running
 
   async function handleRun() {
@@ -233,7 +253,7 @@ export default function TranslateModal(props: TranslateModalProps) {
     let partLabel: string
     switch (mode) {
       case 'full': partLabel = '全文'; break
-      case 'current-page': partLabel = props.currentPageNumber ? `第${props.currentPageNumber}页` : '当前页'; break
+      case 'current-page': partLabel = effectiveCurrentPage > 0 ? `第${effectiveCurrentPage}页` : '当前页'; break
       case 'range': partLabel = range.start === range.end ? `第${range.start}页` : `第${range.start}-${range.end}页`; break
       case 'selection':
       default: partLabel = '选中片段'; break
@@ -272,16 +292,18 @@ export default function TranslateModal(props: TranslateModalProps) {
     }
   }
 
+  // Batch 43 · 当前页 mode 动态显示页号"当前页（第 X 页）"
   const modeLabel: Record<TranslateMode, string> = {
     selection: '选中文本',
-    'current-page': '当前页',
+    'current-page': effectiveCurrentPage > 0 ? `当前页（第 ${effectiveCurrentPage} 页）` : '当前页',
     range: '页码范围',
     full: '全文',
   }
 
   const sourceAvailability: Record<TranslateMode, boolean> = {
     selection: !!(props.selectedText && props.selectedText.trim()),
-    'current-page': !!(props.currentPageText && props.currentPageText.trim()),
+    // Batch 43 · 用 effectiveCurrentPageText（自动从 pageTexts[currentVisiblePage-1] 取）
+    'current-page': !!(effectiveCurrentPageText && effectiveCurrentPageText.trim()),
     range: !!(props.pageTexts && props.pageTexts.length > 0),
     full: !!(props.fullText && props.fullText.trim()),
   }
@@ -347,7 +369,15 @@ export default function TranslateModal(props: TranslateModalProps) {
                     cursor: !avail || running ? 'not-allowed' : 'pointer',
                     opacity: !avail ? 0.5 : 1,
                   }}
-                  title={!avail ? '当前没有可用的源文本（先完成 OCR 或选中文字）' : undefined}
+                  title={
+                    !avail
+                      ? (m === 'selection'
+                          ? '建议通过注释功能对选中语句进行翻译（在阅读区选中文字 → 弹出工具栏 → 注释）'
+                          : m === 'current-page'
+                            ? '当前页没有 OCR 文本（请先 OCR）'
+                            : '当前没有可用的源文本（先完成 OCR 或选中文字）')
+                      : undefined
+                  }
                 >
                   {modeLabel[m]}
                 </button>

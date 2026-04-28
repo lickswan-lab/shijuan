@@ -3,12 +3,15 @@ import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 import { registerLibraryIpc } from './ipc/library'
 import { registerAiApiIpc } from './ipc/aiApi'
-import { registerReadingLogIpc, startMidnightScheduler } from './ipc/readingLog'
+// 2026-04-28 · readingLog 功能删除(用户决定)
 import { registerUpdaterIpc } from './updater'
 import { registerAgentIpc } from './ipc/agent'  // Needed for Hermes memory + knowledge map
 import { registerApprenticeIpc } from './ipc/apprentice'  // Hermes apprentice log (weekly observation)
 import { registerDiagnosticIpc, appendCrashLog } from './ipc/diagnostic'
 import { registerPersonasIpc } from './ipc/personas'  // 召唤 — persona archives with multi-source web search
+import { registerPersonaPortraitIpc } from './ipc/personaPortrait'  // 召唤 — resolves bundled / user persona portraits to data URLs
+import { registerCitationVerifierIpc } from './ipc/citationVerifier'  // Wave-4 — reverse-parse [资料 N] in AI output
+import { registerSummonSessionIpc } from './ipc/summonSession'  // 召唤对话会话持久化（per-persona session history）
 
 // Fire-and-forget startup logger. main.ts can't reliably emit IPC during
 // boot, so we just write straight to ~/.lit-manager/crash.log. Errors are
@@ -58,7 +61,7 @@ function createWindow(): BrowserWindow {
     titleBarOverlay: {
       color: '#E9E0C8',
       symbolColor: '#3D3529',
-      height: 36
+      height: 44
     },
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -220,22 +223,22 @@ if (!gotTheLock) {
   }
   safeRegister('library', registerLibraryIpc)
   safeRegister('aiApi', registerAiApiIpc)
-  safeRegister('readingLog', registerReadingLogIpc)
   safeRegister('agent', registerAgentIpc)
   safeRegister('apprentice', registerApprenticeIpc)
   safeRegister('personas', registerPersonasIpc)
+  safeRegister('personaPortrait', registerPersonaPortraitIpc)
+  safeRegister('citationVerifier', registerCitationVerifierIpc)
+  safeRegister('summonSession', registerSummonSessionIpc)
   safeRegister('updater', registerUpdaterIpc)
   safeRegister('diagnostic', registerDiagnosticIpc)
 
   app.whenReady().then(() => {
     try {
-      const mainWindow = createWindow()
-      startMidnightScheduler(mainWindow)
+      createWindow()
 
       app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
-          const win = createWindow()
-          startMidnightScheduler(win)
+          createWindow()
         }
       })
     } catch (err: any) {
@@ -250,4 +253,7 @@ if (!gotTheLock) {
   app.on('window-all-closed', () => {
     app.quit()
   })
+
+  // 2026-04-28 · midnight scheduler 已删(readingLog 功能下线),before-quit 不再
+  //   需要 stopMidnightScheduler 调用。
 }

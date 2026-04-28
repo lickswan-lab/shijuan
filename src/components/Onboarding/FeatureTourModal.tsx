@@ -176,7 +176,7 @@ const STEPS: Step[] = [
     icon: <ApprenticeIcon />,
     body: (
       <>
-        右侧 <Pill tone="accent">Hermes</Pill> 面板顶部切到 <Pill>学徒</Pill> 标签。
+        右侧 <Pill tone="accent">学徒</Pill> 面板顶部切到 <Pill>观察</Pill> 标签。
         <br /><br />
         点
         <Pill tone="accent">让学徒写最近 7 天观察</Pill>

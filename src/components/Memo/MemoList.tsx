@@ -1,7 +1,8 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useMemo, useCallback, memo } from 'react'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
 import type { MemoFolder, Memo } from '../../types/library'
+import { useConfirmDialog } from '../common/ConfirmDialog'
 
 // ===== MemoFolderItem =====
 
@@ -22,6 +23,8 @@ function MemoFolderItem({
   onDeleteFolder: (id: string) => void
   onMoveMemoToFolder: (memoId: string, folderId: string | undefined) => void
 }) {
+  // Batch 43: 替换 window.confirm
+  const { ask: askConfirm, dialog: confirmDialog } = useConfirmDialog()
   const [expanded, setExpanded] = useState(true)
   const [renaming, setRenaming] = useState(false)
   const [renameName, setRenameName] = useState(folder.name)
@@ -133,8 +136,14 @@ function MemoFolderItem({
               const msg = childCount > 0
                 ? `删除文件夹「${folder.name}」？\n\n文件夹内的 ${childCount} 条笔记会移回根目录（不会被删除）。`
                 : `删除空文件夹「${folder.name}」？`
-              if (!window.confirm(msg)) { setFolderMenu(null); return }
-              onDeleteFolder(folder.id); setFolderMenu(null)
+              setFolderMenu(null)
+              askConfirm({
+                title: '删除文件夹',
+                message: msg,
+                confirmLabel: '删除',
+                danger: true,
+                onConfirm: () => onDeleteFolder(folder.id),
+              })
             }}
             style={{ padding: '7px 14px', fontSize: 12, cursor: 'pointer', color: 'var(--danger)' }}
             onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
@@ -144,13 +153,15 @@ function MemoFolderItem({
           </div>
         </div>
       )}
+      {confirmDialog}
     </div>
   )
 }
 
 // ===== MemoItem =====
 
-function MemoItem({
+// 2026-04-25 PERF · memo 包裹，配合父组件传稳定 callback 让 list 渲染高效
+const MemoItem = memo(function MemoItem({
   memo, isActive, indent, multiSelect, isSelected,
   onSelect, onToggleSelect, onContextMenu,
 }: {
@@ -221,13 +232,23 @@ function MemoItem({
       </div>
     </div>
   )
-}
+})
 
 // ===== MemoList =====
 
 export default function MemoList() {
-  const { library, createMemo, deleteMemo, createMemoFolder, renameMemoFolder, deleteMemoFolder, moveMemoToFolder } = useLibraryStore()
-  const { activeMemoId, setActiveMemo } = useUiStore()
+  // Batch 43: 替换 window.confirm
+  const { ask: askConfirm, dialog: confirmDialog } = useConfirmDialog()
+  // 2026-04-25 PERF · 选择性订阅
+  const library = useLibraryStore(s => s.library)
+  const createMemo = useLibraryStore(s => s.createMemo)
+  const deleteMemo = useLibraryStore(s => s.deleteMemo)
+  const createMemoFolder = useLibraryStore(s => s.createMemoFolder)
+  const renameMemoFolder = useLibraryStore(s => s.renameMemoFolder)
+  const deleteMemoFolder = useLibraryStore(s => s.deleteMemoFolder)
+  const moveMemoToFolder = useLibraryStore(s => s.moveMemoToFolder)
+  const activeMemoId = useUiStore(s => s.activeMemoId)
+  const setActiveMemo = useUiStore(s => s.setActiveMemo)
   const [creating, setCreating] = useState(false)
   const [newTitle, setNewTitle] = useState('')
   const [creatingFolder, setCreatingFolder] = useState(false)
@@ -242,23 +263,32 @@ export default function MemoList() {
   const [multiSelect, setMultiSelect] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
 
-  const toggleSelect = (id: string) => {
+  // 2026-04-25 PERF · useCallback 稳定 toggleSelect 引用，让 MemoItem memo 生效
+  const toggleSelect = useCallback((id: string) => {
     setSelectedIds(prev => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id); else next.add(id)
       return next
     })
-  }
+  }, [])
 
   const handleBatchDelete = () => {
     if (selectedIds.size === 0) return
-    if (!window.confirm(`删除选中的 ${selectedIds.size} 条笔记？\n\n此操作无法撤销。`)) return
-    selectedIds.forEach(id => {
-      deleteMemo(id)
-      if (activeMemoId === id) setActiveMemo(null)
+    const count = selectedIds.size
+    askConfirm({
+      title: `批量删除 ${count} 条笔记`,
+      message: `删除选中的 ${count} 条笔记？\n\n此操作无法撤销。`,
+      confirmLabel: '删除',
+      danger: true,
+      onConfirm: () => {
+        selectedIds.forEach(id => {
+          deleteMemo(id)
+          if (activeMemoId === id) setActiveMemo(null)
+        })
+        setSelectedIds(new Set())
+        setMultiSelect(false)
+      },
     })
-    setSelectedIds(new Set())
-    setMultiSelect(false)
   }
 
   const handleCreate = async () => {
@@ -283,30 +313,35 @@ export default function MemoList() {
     setNewFolderName('')
   }
 
-  const handleContextMenu = (e: React.MouseEvent, memoId: string) => {
+  const handleContextMenu = useCallback((e: React.MouseEvent, memoId: string) => {
     e.preventDefault()
     e.stopPropagation()
     setMenuMemoId(memoId)
     setMenuPos({ x: e.clientX, y: e.clientY })
-  }
+  }, [])
 
   const handleDelete = (id: string) => {
     const memo = memos.find(m => m.id === id)
     const title = memo?.title || '无标题'
-    if (!window.confirm(`删除笔记「${title}」？\n\n此操作无法撤销。`)) {
-      setMenuMemoId(null)
-      setMenuPos(null)
-      return
-    }
-    deleteMemo(id)
-    if (activeMemoId === id) setActiveMemo(null)
     setMenuMemoId(null)
     setMenuPos(null)
+    askConfirm({
+      title: '删除笔记',
+      message: `删除笔记「${title}」？\n\n此操作无法撤销。`,
+      confirmLabel: '删除',
+      danger: true,
+      onConfirm: () => {
+        deleteMemo(id)
+        if (activeMemoId === id) setActiveMemo(null)
+      },
+    })
   }
 
-  // Root memos (no folder)
-  const rootMemos = memos.filter(m => !m.folderId)
-    .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
+  // Root memos (no folder) — 2026-04-25 PERF · useMemo 避免每次 render 都重 filter+sort
+  const rootMemos = useMemo(
+    () => memos.filter(m => !m.folderId).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')),
+    [memos],
+  )
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -408,7 +443,7 @@ export default function MemoList() {
             activeMemoId={activeMemoId}
             multiSelect={multiSelect}
             selectedIds={selectedIds}
-            onSelect={id => setActiveMemo(id)}
+            onSelect={setActiveMemo}
             onToggleSelect={toggleSelect}
             onContextMenu={handleContextMenu}
             onRenameFolder={renameMemoFolder}
@@ -425,7 +460,7 @@ export default function MemoList() {
             isActive={activeMemoId === memo.id}
             multiSelect={multiSelect}
             isSelected={selectedIds.has(memo.id)}
-            onSelect={id => setActiveMemo(id)}
+            onSelect={setActiveMemo}
             onToggleSelect={toggleSelect}
             onContextMenu={handleContextMenu}
           />
@@ -521,6 +556,8 @@ export default function MemoList() {
           </div>
         </div>
       )}
+      {/* Batch 43: ConfirmDialog 替代 window.confirm */}
+      {confirmDialog}
     </div>
   )
 }

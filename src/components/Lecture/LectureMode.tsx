@@ -5,6 +5,7 @@ import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
 import type { LectureSession, TranscriptSegment } from '../../types/library'
 import { connectWebSpeech, connectXfyun, connectAliyun, type STTConnection } from './sttProviders'
+import { humanizeAiError } from '../../utils/humanizeAiError'
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60).toString().padStart(2, '0')
@@ -17,7 +18,7 @@ function LectureSetup({ onStart, onCancel }: {
   onStart: (title: string, provider: 'webspeech' | 'xfyun' | 'aliyun', preDocIds: string[]) => void
   onCancel: () => void
 }) {
-  const { library } = useLibraryStore()
+  const library = useLibraryStore(s => s.library)
   const [title, setTitle] = useState(`${new Date().toLocaleDateString('zh-CN')} 听课记录`)
   const [provider, setProvider] = useState<'webspeech' | 'xfyun' | 'aliyun'>('webspeech')
   const [selectedDocs, setSelectedDocs] = useState<Set<string>>(new Set())
@@ -120,8 +121,14 @@ function LectureSetup({ onStart, onCancel }: {
 
 // ===== Main Lecture Mode Component =====
 export default function LectureMode() {
-  const { library, saveLectureSession } = useLibraryStore()
-  const { activeLectureId, setActiveLecture, isRecording, setIsRecording, selectedAiModel } = useUiStore()
+  // 2026-04-25 PERF · 选择性订阅
+  const library = useLibraryStore(s => s.library)
+  const saveLectureSession = useLibraryStore(s => s.saveLectureSession)
+  const activeLectureId = useUiStore(s => s.activeLectureId)
+  const setActiveLecture = useUiStore(s => s.setActiveLecture)
+  const isRecording = useUiStore(s => s.isRecording)
+  const setIsRecording = useUiStore(s => s.setIsRecording)
+  const selectedAiModel = useUiStore(s => s.selectedAiModel)
 
   const [session, setSession] = useState<LectureSession | null>(null)
   const [showSetup, setShowSetup] = useState(false)
@@ -142,6 +149,24 @@ export default function LectureMode() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const startTimeRef = useRef(0)
   const transcriptEndRef = useRef<HTMLDivElement>(null)
+
+  // BUG-FIX R2#α · mount guard + active summary stream id, so an in-flight
+  // summary stream can be aborted when the user leaves lecture view and we
+  // don't setState on an unmounted component.
+  const mountedRef = useRef(true)
+  const activeSummaryStreamIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      const sid = activeSummaryStreamIdRef.current
+      if (sid) {
+        // Fire-and-forget abort; don't block unmount. Stops token burn.
+        window.electronAPI.aiAbortStream(sid).catch(() => { /* ignore */ })
+        activeSummaryStreamIdRef.current = null
+      }
+    }
+  }, [])
 
   // Load existing session if activeLectureId is a real ID (not '__list__')
   useEffect(() => {
@@ -387,10 +412,14 @@ export default function LectureMode() {
     const userMsg = `===== 课堂转写 =====\n${transcriptText || '（无转写记录）'}\n\n===== 学生笔记 =====\n${notes || '（无笔记）'}\n\n===== 课前文献 =====\n${preDocTitles || '（无课前文献）'}`
 
     const streamId = uuid()
+    // BUG-FIX R2#α · register active stream so unmount can abort it
+    activeSummaryStreamIdRef.current = streamId
     let fullText = ''
 
     const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => {
       if (sid !== streamId) return
+      // BUG-FIX R2#α · drop chunks arriving after unmount
+      if (!mountedRef.current) return
       fullText += chunk
       setStreamingSummary(fullText)
     })
@@ -400,10 +429,20 @@ export default function LectureMode() {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMsg },
       ])
-      if (!result.success) fullText = `生成失败：${result.error}`
+      if (!result.success && mountedRef.current) {
+        // Batch 43: humanize raw error for friendlier inline display
+        const h = humanizeAiError(result.error)
+        fullText = h.silent
+          ? '生成已中断'
+          : `生成失败：${h.message}${h.hint ? `（${h.hint}）` : ''}`
+      }
     } finally {
       cleanup()
+      activeSummaryStreamIdRef.current = null
     }
+
+    // BUG-FIX R2#α · bail if user left while stream was running
+    if (!mountedRef.current) return
 
     setStreamingSummary('')
     if (session && fullText) {
@@ -412,7 +451,7 @@ export default function LectureMode() {
       saveLectureSession(updated)
       await window.electronAPI.lectureSave(updated)
     }
-    setGeneratingSummary(false)
+    if (mountedRef.current) setGeneratingSummary(false)
   }, [session, transcript, notes, elapsed, selectedAiModel, library])
 
   // Add manual transcript (for when STT isn't connected)

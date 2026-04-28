@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { v4 as uuid } from 'uuid'
-import type { Library, LibraryEntry, PdfMeta, VirtualFolder, Memo, BlockRef, MemoSnapshot, MemoFolder, ReadingLog, LectureSession } from '../types/library'
+// 2026-04-28 · ReadingLog 类型已删
+import type { Library, LibraryEntry, PdfMeta, VirtualFolder, Memo, BlockRef, MemoSnapshot, MemoFolder, LectureSession } from '../types/library'
 import { createDefaultLibrary, createDefaultPdfMeta } from '../types/library'
 import { extractPdfMetadata } from '../utils/pdfMetadata'
 import { parseBibTeX, splitAuthors, splitKeywords, parseYear, extractFilePath } from '../utils/bibtexParser'
@@ -118,12 +119,8 @@ interface LibraryState {
   deleteMemoFolder: (id: string) => Promise<void>
   moveMemoToFolder: (memoId: string, folderId: string | undefined) => Promise<void>
 
-  // Reading log actions
-  saveReadingLog: (log: ReadingLog) => void
-  /** Refresh only the `readingLogs` slice from disk — used when the main process
-   * (midnight scheduler) wrote a log we didn't know about. Merges into current
-   * in-memory library so in-flight edits elsewhere aren't discarded. */
-  reloadReadingLogsFromDisk: () => Promise<void>
+  // 2026-04-28 · Reading log actions(saveReadingLog / reloadReadingLogsFromDisk)
+  //   已删,readingLog 功能下线。
 
   // Lecture actions
   saveLectureSession: (session: LectureSession) => void
@@ -157,7 +154,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (!library.memos) library.memos = []
     if (!library.folders) library.folders = []
     if (!library.memoFolders) library.memoFolders = []
-    if (!library.readingLogs) library.readingLogs = []
+    // 2026-04-28 · readingLogs 字段从 type 中移除,旧库里的数据在下次 saveLibrary
+    //   时会被自然丢弃(JSON.stringify 不写入未声明字段),不再 patch 默认数组。
     if (!library.lectureSessions) library.lectureSessions = []
     for (const memo of library.memos) {
       if (!memo.blocks) memo.blocks = []
@@ -880,29 +878,5 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     window.electronAPI.saveLibrary(library).catch(() => {})
   },
 
-  // ===== Reading log actions =====
-
-  saveReadingLog: (log: ReadingLog) => {
-    const { library } = get()
-    if (!library) return
-    if (!library.readingLogs) library.readingLogs = []
-    const idx = library.readingLogs.findIndex(l => l.date === log.date)
-    if (idx >= 0) {
-      library.readingLogs[idx] = log
-    } else {
-      library.readingLogs.unshift(log) // newest first
-    }
-    set({ library: { ...library } })
-    window.electronAPI.saveLibrary(library).catch(() => {})
-  },
-
-  reloadReadingLogsFromDisk: async () => {
-    try {
-      const fresh = await window.electronAPI.loadLibrary()
-      if (!fresh) return
-      const current = get().library
-      if (!current) return
-      set({ library: { ...current, readingLogs: fresh.readingLogs || [] } })
-    } catch { /* best effort */ }
-  },
+  // 2026-04-28 · Reading log actions 已删(readingLog 功能下线)
 }))

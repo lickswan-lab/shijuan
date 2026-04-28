@@ -12,7 +12,10 @@ import { useUiStore } from '../../store/uiStore'
  * to linger for routine info).
  */
 export default function BatchOcrProgress() {
-  const { ocrQueue, cancelOcrQueue, dismissOcrQueue } = useUiStore()
+  // 2026-04-25 PERF · 选择性订阅
+  const ocrQueue = useUiStore(s => s.ocrQueue)
+  const cancelOcrQueue = useUiStore(s => s.cancelOcrQueue)
+  const dismissOcrQueue = useUiStore(s => s.dismissOcrQueue)
   const [expanded, setExpanded] = useState(false)
 
   // Auto-dismiss on clean completion. Guards: must actually be done, no errors,

@@ -250,32 +250,10 @@ export async function collectApprenticeContext(start: Date, end: Date): Promise<
       preview: clip((m.content || '').replace(/\n+/g, ' ').trim(), 200),
     }))
 
-  // === 4. Struggling entries (opened ≥3 times in 4 weeks, <2 annotations) ===
-  const fourWeeksAgo = endMs - 28 * 86400000
-  const opensIn4WeeksMap = new Map<string, number>()
-  // Since we only have lastOpenedAt (not per-open history), use readingLogs if available
-  for (const log of library.readingLogs || []) {
-    const logDate = new Date(log.date + 'T00:00:00').getTime()
-    if (logDate >= fourWeeksAgo && logDate < endMs) {
-      for (const ev of log.events || []) {
-        if (ev.type === 'open_doc' && ev.entryId) {
-          opensIn4WeeksMap.set(ev.entryId, (opensIn4WeeksMap.get(ev.entryId) || 0) + 1)
-        }
-      }
-    }
-  }
+  // === 4. Struggling entries === (2026-04-28 · readingLog 删除后失去 per-open
+  //   历史数据源,这个统计暂停。entry.lastOpenedAt 只有"最近一次"的 timestamp,
+  //   不能反推"4 周内打开 N 次"。如果将来恢复 per-event 记录可以重新启用。)
   const strugglingEntries: ApprenticeContext['wider']['strugglingEntries'] = []
-  for (const [entryId, opens] of opensIn4WeeksMap.entries()) {
-    if (opens < 3) continue
-    const entry = entries.find(e => e.id === entryId)
-    if (!entry) continue
-    const meta = await loadMeta(entryId)
-    const annCount = meta?.annotations?.length || 0
-    if (annCount < 2) {
-      strugglingEntries.push({ entryId, title: entry.title, opensIn4Weeks: opens, annotationCount: annCount })
-    }
-  }
-  strugglingEntries.sort((a, b) => b.opensIn4Weeks - a.opensIn4Weeks)
 
   // === 5. Active days ===
   const activeDays = new Set<string>()

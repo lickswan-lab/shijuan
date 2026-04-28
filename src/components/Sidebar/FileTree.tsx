@@ -137,7 +137,7 @@ const EntryItem = memo(function EntryItem({ entry, multiSelect, selected, onTogg
   const deleteEntry = useLibraryStore(s => s.deleteEntry)
   const reorderEntry = useLibraryStore(s => s.reorderEntry)
   const setActiveMemo = useUiStore(s => s.setActiveMemo)
-  const setActiveReadingLogDate = useUiStore(s => s.setActiveReadingLogDate)
+  // 2026-04-28 · setActiveReadingLogDate 已删(readingLog 功能下线)
   const [dropPos, setDropPos] = useState<'before' | 'after' | null>(null)
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -182,7 +182,7 @@ const EntryItem = memo(function EntryItem({ entry, multiSelect, selected, onTogg
         className={`tree-item ${isActive ? 'active' : ''} ${selected ? 'selected' : ''}`}
         onClick={() => {
           if (multiSelect) { onToggleSelect?.(entry.id); return }
-          setActiveMemo(null); setActiveReadingLogDate(null); openEntry(entry)
+          setActiveMemo(null); openEntry(entry)
         }}
         draggable={!multiSelect}
         onDragStart={handleDragStart}

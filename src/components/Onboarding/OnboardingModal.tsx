@@ -15,7 +15,7 @@
 // render at all. Setting it on either button click means the user won't be
 // re-pestered on subsequent boots even if they never end up configuring a key.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useUiStore } from '../../store/uiStore'
 
 const FLAG_KEY = 'sj-onboarding-shown'
@@ -79,9 +79,21 @@ export default function OnboardingModal(): JSX.Element | null {
   // already know they don't want AI right now but still want the lay of the
   // land. Same dismiss flag — onboarding is "done" either way.
   const setForceFeatureTour = useUiStore(s => s.setForceFeatureTour)
+  // BUG-FIX ONBOARD#1 · track the 60ms hand-off timer so we can cancel it on
+  // unmount — otherwise if the user Esc / clicks backdrop right as the timer
+  // fires, setForceFeatureTour runs on unmounted modal (React warning +
+  // opens the feature-tour modal even though the user may have moved on).
+  const goToFeatureTourTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => {
+    if (goToFeatureTourTimerRef.current) clearTimeout(goToFeatureTourTimerRef.current)
+  }, [])
   const goToFeatureTour = () => {
     dismiss()
-    setTimeout(() => setForceFeatureTour(true), 60)
+    if (goToFeatureTourTimerRef.current) clearTimeout(goToFeatureTourTimerRef.current)
+    goToFeatureTourTimerRef.current = setTimeout(() => {
+      setForceFeatureTour(true)
+      goToFeatureTourTimerRef.current = null
+    }, 60)
   }
 
   // forceOnboarding bypasses both the localStorage flag and the provider check,

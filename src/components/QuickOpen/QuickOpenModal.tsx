@@ -41,7 +41,7 @@ export default function QuickOpenModal() {
   const showQuickOpen = useUiStore(s => s.showQuickOpen)
   const setShowQuickOpen = useUiStore(s => s.setShowQuickOpen)
   const setActiveMemo = useUiStore(s => s.setActiveMemo)
-  const setActiveReadingLogDate = useUiStore(s => s.setActiveReadingLogDate)
+  // 2026-04-28 · setActiveReadingLogDate 已删(readingLog 功能下线)
   const [query, setQuery] = useState('')
   const [activeIdx, setActiveIdx] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -116,12 +116,11 @@ export default function QuickOpenModal() {
     setShowQuickOpen(false)
     if (item.kind === 'entry') {
       setActiveMemo(null)
-      setActiveReadingLogDate(null)
       openEntry(item.entry)
     } else {
       setActiveMemo(item.memo.id)
     }
-  }, [openEntry, setActiveMemo, setActiveReadingLogDate, setShowQuickOpen])
+  }, [openEntry, setActiveMemo, setShowQuickOpen])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Escape') { e.preventDefault(); setShowQuickOpen(false); return }

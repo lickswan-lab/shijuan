@@ -104,12 +104,27 @@ export const useAnnotationAiJobsStore = create<JobsStore>((set, get) => ({
     // that fast.
     let flushTimer: ReturnType<typeof setTimeout> | null = null
     let pendingFlush = false
+    // BUG-FIX R4#1 · updater rejection 以前只 console.warn，UI 还是停留在 'running'
+    // 造成"下次启动时假装正在生成"的幽灵状态。catch 时把 job 标为 failed + error
+    // 字段，让 UI 显示真实终态。
     const flushToEntry = () => {
       pendingFlush = false
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
-      // updater may reject if disk write fails — log so loss is at least visible
       Promise.resolve(updater(entryId, annotationId, historyEntryId, { content: fullText }))
-        .catch(err => console.warn('[ai-job] flush updater rejected', err))
+        .catch(err => {
+          console.warn('[ai-job] flush updater rejected', err)
+          // 只有在 running 时才写入失败态——避免覆盖 abort / completed 的正确终态
+          set(s => {
+            const j = s.jobs[key]
+            if (!j || j.status !== 'running') return s
+            return {
+              jobs: {
+                ...s.jobs,
+                [key]: { ...j, status: 'failed', error: err?.message || '保存失败', _cleanupChunk: undefined },
+              },
+            }
+          })
+        })
     }
     const scheduleFlush = () => {
       pendingFlush = true
@@ -127,12 +142,18 @@ export const useAnnotationAiJobsStore = create<JobsStore>((set, get) => ({
       }, 180_000)
     }
 
+    // BUG-FIX R4#2 · 拒绝已终态 job 的后续 chunk
+    // 场景：用户 abort 或 idleTimer 触发 → Promise.race 返回 → job 标为 aborted/failed
+    // 但 stream 后端还在发 chunk，旧 listener 仍会累加到 fullText，污染错误消息或
+    // 幻影追加到已完成消息。顶部检查 status，非 running 直接 return。
     const cleanup = (window as any).electronAPI.onAiStreamChunk((sid: string, chunk: string) => {
       if (sid !== streamId) return
+      const currentJob = get().jobs[key]
+      if (!currentJob || currentJob.status !== 'running') return
       fullText += chunk
       set(s => {
         const j = s.jobs[key]
-        if (!j) return s
+        if (!j || j.status !== 'running') return s
         return { jobs: { ...s.jobs, [key]: { ...j, streamingText: fullText } } }
       })
       scheduleFlush()

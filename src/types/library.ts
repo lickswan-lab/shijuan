@@ -13,8 +13,7 @@ export interface Library {
   memos: Memo[]
   // Memo folders
   memoFolders: MemoFolder[]
-  // Reading logs
-  readingLogs: ReadingLog[]
+  // 2026-04-28 · readingLogs: ReadingLog[] 已删(readingLog 功能下线)
   // Lecture sessions
   lectureSessions: LectureSession[]
 }
@@ -181,29 +180,9 @@ export interface MemoSnapshot {
   savedAt: string
 }
 
-// ===== Reading Log =====
-
-export interface ReadingLogEvent {
-  id: string
-  timestamp: string                // ISO
-  type: 'open_doc' | 'annotate' | 'note' | 'question' | 'stance' | 'ai_interaction' | 'memo_create' | 'memo_edit' | 'mark_text'
-  entryId?: string
-  entryTitle?: string
-  memoId?: string
-  memoTitle?: string
-  annotationId?: string            // For annotate/note/question/stance/ai_interaction — jump target (v1.2.7+)
-  detail: string                   // e.g. "在《论法的精神》第3页添加了注释"
-  selectedText?: string            // excerpt (≤80 chars)
-}
-
-export interface ReadingLog {
-  id: string
-  date: string                     // YYYY-MM-DD
-  events: ReadingLogEvent[]
-  aiSummary?: string               // Markdown
-  aiModel?: string
-  generatedAt: string
-}
+// ===== Reading Log (2026-04-28 删除) =====
+// ReadingLogEvent / ReadingLog 接口已移除。功能下线原因:基于 timestamp 的活动
+// 流水记录,价值/成本不匹配,用户决定删除。如需恢复 git 历史 commit 之前。
 
 // ===== Lecture Session =====
 
@@ -567,7 +546,7 @@ export function createDefaultLibrary(): Library {
     entries: [],
     memos: [],
     memoFolders: [],
-    readingLogs: [],
+    // 2026-04-28 · readingLogs 已删
     lectureSessions: []
   }
 }

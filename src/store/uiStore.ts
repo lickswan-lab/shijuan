@@ -43,10 +43,9 @@ interface UiState {
 
   // Memo
   activeMemoId: string | null
-  sidebarTab: 'library' | 'memos' | 'reading-log'
+  sidebarTab: 'library' | 'memos'  // 2026-04-28 · 'reading-log' tab 已删
 
-  // Reading log
-  activeReadingLogDate: string | null
+  // 2026-04-28 · Reading log 功能已删,activeReadingLogDate state 移除
 
   // Current document full text (for AI context)
   currentDocText: string | null
@@ -118,8 +117,8 @@ interface UiState {
   setShowSettings: (show: boolean) => void
   setGlmApiKeyStatus: (status: 'set' | 'not-set' | 'checking') => void
   setActiveMemo: (id: string | null) => void
-  setSidebarTab: (tab: 'library' | 'memos' | 'reading-log') => void
-  setActiveReadingLogDate: (date: string | null) => void
+  setSidebarTab: (tab: 'library' | 'memos') => void
+  // 2026-04-28 · setActiveReadingLogDate 已删
   setCurrentDocText: (text: string | null) => void
   setAiContextWindow: (size: number) => void
   setActiveLecture: (id: string | null) => void
@@ -156,7 +155,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   glmApiKeyStatus: 'checking',
   activeMemoId: null,
   sidebarTab: 'library',
-  activeReadingLogDate: null,
+  // 2026-04-28 · activeReadingLogDate 已删
   currentDocText: null,
   activeLectureId: null,
   isRecording: false,
@@ -211,12 +210,12 @@ export const useUiStore = create<UiState>((set, get) => ({
   setSearchQuery: (query) => set({ searchQuery: query }),
   setShowSettings: (show) => set({ showSettings: show }),
   setGlmApiKeyStatus: (status) => set({ glmApiKeyStatus: status }),
-  setActiveMemo: (id) => set({ activeMemoId: id, activeReadingLogDate: null, ...(id ? { sidebarTab: 'memos' as const } : {}) }),
+  setActiveMemo: (id) => set({ activeMemoId: id, ...(id ? { sidebarTab: 'memos' as const } : {}) }),
   setSidebarTab: (tab) => set({ sidebarTab: tab }),
-  setActiveReadingLogDate: (date) => set({ activeReadingLogDate: date, activeMemoId: null }),
+  // 2026-04-28 · setActiveReadingLogDate 已删
   setCurrentDocText: (text) => set({ currentDocText: text }),
   setAiContextWindow: (size) => { set({ aiContextWindow: size }); try { localStorage.setItem('sj-aiContextWindow', String(size)) } catch {} },
-  setActiveLecture: (id) => set({ activeLectureId: id, activeMemoId: null, activeReadingLogDate: null }),
+  setActiveLecture: (id) => set({ activeLectureId: id, activeMemoId: null }),
   setIsRecording: (recording) => set({ isRecording: recording }),
   setSelectedAiModel: (model) => set({ selectedAiModel: model }),
   setAiReasoningEffort: (effort) => {
