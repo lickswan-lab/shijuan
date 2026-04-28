@@ -730,6 +730,8 @@ function MemoAiSection({ memoId, blocks, aiHistory }: {
   const setAiWebSearch = useUiStore(s => s.setAiWebSearch)
   const [effortSupported, setEffortSupported] = useState(false)
   const [webSearchSupported, setWebSearchSupported] = useState(false)
+  // 2026-04-28 · web search 是否单独付费(GLM/Claude),用于 🌐 tooltip 加付费提示
+  const [webSearchIsPaid, setWebSearchIsPaid] = useState(false)
 
   // 2026-04-28 · 接入召唤思想家(对齐 AnnotationPanel)
   const [personaList, setPersonaList] = useState<PersonaListEntry[]>([])
@@ -770,10 +772,13 @@ function MemoAiSection({ memoId, blocks, aiHistory }: {
   useEffect(() => {
     let cancelled = false
     const [pid] = aiModel.includes(':') ? aiModel.split(':', 2) : [aiModel]
-    if (!pid) { setWebSearchSupported(false); return }
+    if (!pid) { setWebSearchSupported(false); setWebSearchIsPaid(false); return }
     window.electronAPI.aiProviderSupportsWebSearch?.(pid).then(ok => {
       if (!cancelled) setWebSearchSupported(!!ok)
     }).catch(() => { if (!cancelled) setWebSearchSupported(false) })
+    window.electronAPI.aiProviderWebSearchIsPaid?.(pid).then(paid => {
+      if (!cancelled) setWebSearchIsPaid(!!paid)
+    }).catch(() => { if (!cancelled) setWebSearchIsPaid(false) })
     return () => { cancelled = true }
   }, [aiModel])
 
@@ -1006,11 +1011,15 @@ function MemoAiSection({ memoId, blocks, aiHistory }: {
         {/* 联网搜索:provider 不支持时灰掉 + tooltip */}
         {(() => {
           const effective = aiWebSearch && webSearchSupported
+          // 2026-04-28 · 付费 provider(GLM/Claude) 加扣费警告;免费 provider 不警告
+          const paidWarn = webSearchIsPaid
+            ? '\n⚠ 该 provider 联网调用付费工具(如 GLM web_search_pro 约 ¥0.03/次, Claude web_search 约 $0.01/次),会从你的 provider 账户扣费'
+            : ''
           const tip = !webSearchSupported
             ? '当前 provider 不支持联网搜索（仅 Ollama / Claude CLI 不支持）'
             : (effective
-                ? '已开启联网搜索：AI 提问 / 召唤前可查时事 / 实时信息（关闭可省 quota）'
-                : '点击开启联网搜索')
+                ? '已开启联网搜索：AI 提问 / 召唤前可查时事 / 实时信息（关闭可省 quota）' + paidWarn
+                : '点击开启联网搜索' + paidWarn)
           return (
             <button
               type="button"

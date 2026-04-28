@@ -391,13 +391,18 @@ export default function AgentPanel() {
   // GLM/Claude/Kimi/Gemini 走原生；OpenAI/DeepSeek/Doubao 走 manual loop（升级版能解析
   // DeepSeek V4 的 DSML 协议）；Ollama/Claude CLI 不支持。
   const [webSearchSupported, setWebSearchSupported] = useState(false)
+  // 2026-04-28 · web search 是否单独付费(GLM/Claude),用于 🌐 tooltip 加付费提示
+  const [webSearchIsPaid, setWebSearchIsPaid] = useState(false)
   useEffect(() => {
     let cancelled = false
     const [pid] = agentModel.includes(':') ? agentModel.split(':', 2) : [agentModel]
-    if (!pid) { setWebSearchSupported(false); return }
+    if (!pid) { setWebSearchSupported(false); setWebSearchIsPaid(false); return }
     window.electronAPI.aiProviderSupportsWebSearch?.(pid).then(ok => {
       if (!cancelled) setWebSearchSupported(!!ok)
     }).catch(() => { if (!cancelled) setWebSearchSupported(false) })
+    window.electronAPI.aiProviderWebSearchIsPaid?.(pid).then(paid => {
+      if (!cancelled) setWebSearchIsPaid(!!paid)
+    }).catch(() => { if (!cancelled) setWebSearchIsPaid(false) })
     return () => { cancelled = true }
   }, [agentModel])
   useEffect(() => {
@@ -1181,11 +1186,16 @@ export default function AgentPanel() {
             其他 provider (OpenAI/DeepSeek/豆包) 灰掉 + tooltip 提示原因 */}
         {(() => {
           const effective = aiWebSearch && webSearchSupported  // 实际生效状态
+          // 2026-04-28 · 付费 provider(GLM/Claude)的 web search 是单独计费的工具,
+          //   tooltip 明确警告;免费/包含在 token 里的(Kimi/manual loop)不警告。
+          const paidWarn = webSearchIsPaid
+            ? '\n⚠ 该 provider 联网调用付费工具(如 GLM web_search_pro 约 ¥0.03/次, Claude web_search 约 $0.01/次),会从你的 provider 账户扣费'
+            : ''
           const tip = !webSearchSupported
             ? '当前 provider 不支持联网搜索（仅 Ollama / Claude CLI 不支持，请切换 provider）'
             : (effective
-                ? '已开启联网搜索：persona 辩论前可查时事 / 实时信息（关闭可省 quota）'
-                : '点击开启联网搜索 —— 历史名家不了解 2026 时事，开启后可让 AI 先搜真实信息再辩论')
+                ? '已开启联网搜索：persona 辩论前可查时事 / 实时信息（关闭可省 quota）' + paidWarn
+                : '点击开启联网搜索 —— 历史名家不了解 2026 时事，开启后可让 AI 先搜真实信息再辩论' + paidWarn)
           return (
             <button
               type="button"

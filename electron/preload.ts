@@ -81,7 +81,8 @@ const electronAPI = {
     ipcRenderer.invoke('get-glm-api-key-status'),
   glmOcr: (imageBase64: string): Promise<{ success: boolean; text?: string; error?: string }> =>
     ipcRenderer.invoke('glm-ocr', imageBase64),
-  glmOcrPdf: (pdfAbsPath: string, opts?: { entryId?: string }): Promise<{ success: boolean; text?: string; pageTexts?: string[]; pageCount?: number; chunks?: number; error?: string }> =>
+  // Batch 43 · opts.startPage/endPage 让用户只 OCR PDF 部分页（1-indexed inclusive）
+  glmOcrPdf: (pdfAbsPath: string, opts?: { entryId?: string; startPage?: number; endPage?: number }): Promise<{ success: boolean; text?: string; pageTexts?: string[]; pageCount?: number; chunks?: number; actualStartPage?: number; actualEndPage?: number; error?: string }> =>
     ipcRenderer.invoke('glm-ocr-pdf', pdfAbsPath, opts),
   onOcrProgress: (callback: (payload: { entryId?: string; chunkIndex: number; totalChunks: number; phase: 'start' | 'done' | 'error' }) => void) => {
     const handler = (_event: any, payload: any) => callback(payload)
@@ -99,10 +100,75 @@ const electronAPI = {
     ipcRenderer.invoke('glm-ask', question, selectedText, history, model),
 
   // === Streaming AI ===
-  aiChatStream: (streamId: string, modelSpec: string, messages: Array<{ role: string; content: string }>, opts?: { webSearch?: boolean }): Promise<{ success: boolean; text?: string; error?: string; aborted?: boolean }> =>
+  // Batch 43 · opts.effort 让 'low'|'medium'|'high' 透传给主进程，按 provider 翻译成
+  // OpenAI reasoning_effort / Claude output_config.effort / Gemini thinking_level / 等
+  aiChatStream: (streamId: string, modelSpec: string, messages: Array<{ role: string; content: string }>, opts?: { webSearch?: boolean; effort?: 'low' | 'medium' | 'high' }): Promise<{ success: boolean; text?: string; error?: string; aborted?: boolean }> =>
     ipcRenderer.invoke('ai-chat-stream', streamId, modelSpec, '', messages, opts),
   aiAbortStream: (streamId: string): Promise<boolean> =>
     ipcRenderer.invoke('ai-abort-stream', streamId),
+
+  // Batch 43 · 查询某 provider+model 是否支持 effort（用于 UI 决定是否显示控件）
+  aiModelSupportsEffort: (providerId: string, modelId: string): Promise<boolean> =>
+    ipcRenderer.invoke('ai-model-supports-effort', providerId, modelId),
+  // Batch 43 · 查询某 provider 是否支持原生 web search（不支持时 UI 应禁用联网开关）
+  aiProviderHasNativeWebSearch: (providerId: string): Promise<boolean> =>
+    ipcRenderer.invoke('ai-provider-has-native-web-search', providerId),
+  // Batch 43 · 查询 provider 是否支持 web search（原生或 manual loop 任一）—— 前端按钮判断用
+  aiProviderSupportsWebSearch: (providerId: string): Promise<boolean> =>
+    ipcRenderer.invoke('ai-provider-supports-web-search', providerId),
+  // 2026-04-28 · 查询 provider 的 web search 是否单独计费(GLM/Claude) → 🌐 tooltip 加付费提示
+  aiProviderWebSearchIsPaid: (providerId: string): Promise<boolean> =>
+    ipcRenderer.invoke('ai-provider-web-search-is-paid', providerId),
+
+  // === AI Throttle Status ===
+  // Adaptive rate-limiter state per provider: queue depth, effective RPM,
+  // recent 429 hits, backoff state. The main process ticks once per second
+  // and broadcasts to all windows on 'ai-throttle-status'. UI shows an
+  // indicator (e.g. in PersonasTab / AnnotationPanel) so users know why a
+  // request is being delayed.
+  aiThrottleGetStatus: (): Promise<Array<{
+    providerId: string
+    displayName: string
+    effectiveRpm: number
+    baseRpm: number
+    adaptiveMultiplier: number
+    interactiveQueued: number
+    backgroundQueued: number
+    running: number
+    maxConcurrency: number
+    recentRateLimitHits: number
+    inBackoff: boolean
+    nextAllowedAt: number
+    lastRateLimitAt: number
+  }>> => ipcRenderer.invoke('ai-throttle-get-status'),
+  // Explicit subscribe: returns once the main process has sent the current
+  // snapshot. UI should also register onAiThrottleStatus(cb) to receive tick
+  // updates.
+  aiThrottleSubscribe: (): Promise<{ subscribed: boolean }> =>
+    ipcRenderer.invoke('ai-throttle-status-subscribe'),
+  onAiThrottleStatus: (callback: (snapshot: Array<{
+    providerId: string
+    displayName: string
+    effectiveRpm: number
+    baseRpm: number
+    adaptiveMultiplier: number
+    interactiveQueued: number
+    backgroundQueued: number
+    running: number
+    maxConcurrency: number
+    recentRateLimitHits: number
+    inBackoff: boolean
+    nextAllowedAt: number
+    lastRateLimitAt: number
+  }>) => void) => {
+    const handler = (_event: any, snapshot: any) => callback(snapshot)
+    ipcRenderer.on('ai-throttle-status', handler)
+    return () => { ipcRenderer.removeListener('ai-throttle-status', handler) }
+  },
+  // Override base RPM for a provider (paid tier / user setting). Pass
+  // rpm=null to reset. Adaptive decay still applies on top.
+  aiThrottleSetRpmOverride: (providerId: string, rpm: number | null): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('ai-throttle-set-rpm-override', providerId, rpm),
 
   // Main process tells the renderer it just updated library.json (e.g. midnight
   // scheduler wrote a reading log). The renderer should reload its in-memory
@@ -173,6 +239,16 @@ const electronAPI = {
     ipcRenderer.invoke('persona-load', id),
   personaSave: (persona: Persona): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('persona-save', persona),
+  // BUG-FIX #E · backend read-modify-write for appending a source, serialized
+  // under a per-persona lock so concurrent handlers can't lose a source by
+  // both reading the same baseline. Prefer this over fetching persona +
+  // patching client-side + calling personaSave.
+  personaAppendSource: (personaId: string, source: PersonaSource): Promise<{
+    success: boolean
+    persona?: Persona
+    error?: string
+  }> =>
+    ipcRenderer.invoke('persona-append-source', personaId, source),
   personaDelete: (id: string): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('persona-delete', id),
   // Multi-source web search (Wikipedia zh+en + Baidu Baike + DuckDuckGo)
@@ -187,6 +263,9 @@ const electronAPI = {
   // Export a persona's skill to a directory (defaults to ~/.claude/skills/<slug>/)
   personaExportSkill: (personaId: string, opts?: { outDir?: string; includeResearch?: boolean }): Promise<{ success: boolean; skillDir?: string; error?: string }> =>
     ipcRenderer.invoke('persona-export-skill', personaId, opts),
+  // 2026-04-24 在文件管理器中定位该 persona 的文件
+  personaReveal: (personaId: string): Promise<{ success: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('persona-reveal', personaId),
   // Dialog — pick a root directory to export skill under
   personaPickExportDir: (): Promise<{ success: boolean; dir?: string }> =>
     ipcRenderer.invoke('persona-pick-export-dir'),
@@ -196,6 +275,16 @@ const electronAPI = {
   // Dialog — pick a SKILL.md file or skill directory to import
   personaPickSkillPath: (): Promise<{ success: boolean; path?: string }> =>
     ipcRenderer.invoke('persona-pick-skill-path'),
+  // Look up a portrait for a persona. Resolution order:
+  //   1. ~/.lit-manager/agent/personas/<id>/portrait.{jpg,jpeg,png,webp}
+  //   2. project skills/<slug>/portrait.{jpg,jpeg,png,webp}
+  // Returns a data URL (base64) or source='none' if nothing found.
+  personaGetPortrait: (personaId: string): Promise<{
+    success: boolean
+    dataUrl?: string
+    source?: 'user' | 'bundled' | 'none'
+    error?: string
+  }> => ipcRenderer.invoke('persona-get-portrait', personaId),
   // Build the system prompt used when summoning a persona for chat / annotation.
   // When userQuery is passed, the prompt is augmented with retrieved original-
   // text snippets (embedding cos sim if index built, else BM25) from
@@ -220,9 +309,28 @@ const electronAPI = {
       url?: string
     }>
     totalChunks?: number
+    // Wave-4: the 1-based N's injected this turn. Mirrors chunks.map(c => c.n).
+    // Pass straight to aiVerifyCitations to flag hallucinated numbers.
+    injectedCitationIds?: number[]
     error?: string
   }> =>
     ipcRenderer.invoke('persona-get-system-prompt', personaId, userQuery),
+  // Wave-4: verify [资料 N] / [Source N] citations in an AI response against
+  // the IDs that were actually injected. Returns a breakdown of valid vs
+  // hallucinated cites plus an optional trailing warning the renderer can
+  // append to the saved message. See electron/ipc/citationVerifier.ts.
+  aiVerifyCitations: (responseText: string, injectedIds: number[]): Promise<{
+    success: boolean
+    result?: {
+      valid: number[]
+      invalid: number[]
+      duplicates: number[]
+      total: number
+      allCited: number[]
+    }
+    warning?: string
+    error?: string
+  }> => ipcRenderer.invoke('ai-verify-citations', responseText, injectedIds),
   // Directly retrieve top-K chunks for a persona + query (embedding if
   // indexed, BM25 fallback). persona-get-system-prompt already calls this
   // internally when userQuery is passed.
@@ -236,6 +344,10 @@ const electronAPI = {
   // Build the persona's semantic index (Phase A). Embeds every chunk via the
   // chosen provider (defaults to whichever key is configured; GLM preferred for
   // Chinese users, OpenAI fallback). Persisted to <personaId>.rag.json.
+  // Phase-C: also returns a `coverage` field — per-source indexed/skipped/error
+  // breakdown with human-readable reasons for skips. Coverage is attached to
+  // both success and "no chunks" failures, so the UI can always show users
+  // why their sources dropped out (empty / too-short / extract-fail / ...).
   personaRagBuild: (personaId: string, opts?: { providerId?: 'openai' | 'glm' }): Promise<{
     success: boolean
     builtAt?: string
@@ -243,9 +355,27 @@ const electronAPI = {
     provider?: 'openai' | 'glm'
     model?: string
     dim?: number
+    coverage?: {
+      totalSources: number
+      indexedSources: number
+      skippedSources: number
+      erroredSources: number
+      perSource: Array<{
+        sourceId: string
+        sourceTitle: string
+        sourceType: string
+        status: 'indexed' | 'skipped-empty' | 'skipped-short' | 'error'
+        chunkCount: number
+        reason?: string
+      }>
+    }
     error?: string
   }> => ipcRenderer.invoke('persona-rag-build', personaId, opts),
   // Index status: built? stale? which provider? how many chunks?
+  // Phase-C additions:
+  //   - buildInProgress: true while a manual OR auto build is running
+  //   - coverage: the last build's per-source coverage report (absent for
+  //     indexes built before Phase-C rolled out)
   personaRagStatus: (personaId: string): Promise<{
     success: boolean
     built: boolean
@@ -257,16 +387,87 @@ const electronAPI = {
     chunkCount?: number
     currentHydratedSources?: number
     availableProviders?: Array<{ id: 'openai' | 'glm'; hasKey: boolean; displayName: string; model: string; dim: number }>
+    buildInProgress?: boolean
+    coverage?: {
+      totalSources: number
+      indexedSources: number
+      skippedSources: number
+      erroredSources: number
+      perSource: Array<{
+        sourceId: string
+        sourceTitle: string
+        sourceType: string
+        status: 'indexed' | 'skipped-empty' | 'skipped-short' | 'error'
+        chunkCount: number
+        reason?: string
+      }>
+    }
     error?: string
   }> => ipcRenderer.invoke('persona-rag-status', personaId),
   personaRagClear: (personaId: string): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('persona-rag-clear', personaId),
-  // Progress event for persona-rag-build
-  onPersonaRagBuildProgress: (callback: (payload: { personaId: string; phase: 'chunk' | 'embed' | 'save' | 'done'; done: number; total: number }) => void) => {
+  // Progress event for persona-rag-build.
+  // Phase-C: payload gained `trigger: 'auto' | 'manual'` (auto = fired by
+  // persona-save/import; manual = user clicked "build"), an 'error' phase
+  // when build fails, and a `coverage` field on the 'done' and 'error'
+  // frames so UIs can render a toast / failure panel without re-calling
+  // persona-rag-status.
+  onPersonaRagBuildProgress: (callback: (payload: {
+    personaId: string
+    phase: 'chunk' | 'embed' | 'save' | 'done' | 'error'
+    done: number
+    total: number
+    trigger?: 'auto' | 'manual'
+    coverage?: {
+      totalSources: number
+      indexedSources: number
+      skippedSources: number
+      erroredSources: number
+      perSource: Array<{
+        sourceId: string
+        sourceTitle: string
+        sourceType: string
+        status: 'indexed' | 'skipped-empty' | 'skipped-short' | 'error'
+        chunkCount: number
+        reason?: string
+      }>
+    }
+    error?: string
+  }) => void) => {
     const handler = (_event: any, payload: any) => callback(payload)
     ipcRenderer.on('persona-rag-build-progress', handler)
     return () => { ipcRenderer.removeListener('persona-rag-build-progress', handler) }
   },
+
+  // === Summon session persistence ===
+  // Each召唤 chat is stored as ~/.lit-manager/agent/summons/<personaId>/<sessionId>.json.
+  // Renderer debounces saves by 2s to avoid per-token writes during streaming.
+  summonSessionList: (personaId: string): Promise<{
+    success: boolean
+    sessions?: Array<{ sessionId: string; startedAt: string; messageCount: number; firstPreview: string }>
+    error?: string
+  }> => ipcRenderer.invoke('summon-session-list', personaId),
+  summonSessionLoad: (personaId: string, sessionId: string): Promise<{
+    success: boolean
+    session?: {
+      sessionId: string
+      personaId: string
+      startedAt: string
+      updatedAt: string
+      messages: Array<{ role: 'user' | 'assistant'; content: string; [key: string]: any }>
+    }
+    error?: string
+  }> => ipcRenderer.invoke('summon-session-load', personaId, sessionId),
+  summonSessionSave: (session: {
+    sessionId: string
+    personaId: string
+    startedAt: string
+    updatedAt?: string
+    messages: Array<{ role: 'user' | 'assistant'; content: string; [key: string]: any }>
+  }): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('summon-session-save', session),
+  summonSessionDelete: (personaId: string, sessionId: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('summon-session-delete', personaId, sessionId),
 
   // === Auto Update ===
   checkUpdate: (): Promise<{
