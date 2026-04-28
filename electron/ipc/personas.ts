@@ -1549,13 +1549,51 @@ export function registerPersonasIpc(): void {
       if (!persona) return { success: false, error: '档案不存在' }
 
       const displayName = persona.canonicalName || persona.name
+
+      // 2026-04-28 · 附属包加载 · 先前 personaImportSkill 只读 SKILL.md,bundled
+      //   persona(plato/aristotle 等)的 6 份附属 md(MENTAL_MODELS / WORKS /
+      //   EXPRESSION / TIMELINE / TENSIONS / CONTROVERSIES)完全没进 prompt,
+      //   ~1800 行精心写的内容白白浪费。这里 system_prompt 构建时实时读取,
+      //   不修改已存的 persona.json,改动最小。
+      //
+      //   失败容忍:任何文件读不到都跳过(用户可能删了 / persona 是用户自己
+      //   蒸馏没有这些文件 → fullMarkdown 已含足够信息)。
+      let appendixMd = ''
+      if (persona.importedFrom) {
+        try {
+          const importStat = await fs.stat(persona.importedFrom).catch(() => null)
+          // importedFrom 可能是目录(有附属包)或单 SKILL.md 文件(没附属)
+          const skillDir = importStat?.isDirectory()
+            ? persona.importedFrom
+            : path.dirname(persona.importedFrom)
+          const APPENDIX_FILES: Array<{ filename: string; section: string }> = [
+            { filename: 'MENTAL_MODELS.md', section: '## 心智模型集' },
+            { filename: 'WORKS.md',         section: '## 著作概览' },
+            { filename: 'EXPRESSION.md',    section: '## 表达 DNA' },
+            { filename: 'TIMELINE.md',      section: '## 生平时序' },
+            { filename: 'TENSIONS.md',      section: '## 思想张力' },
+            { filename: 'CONTROVERSIES.md', section: '## 同时代争论' },
+          ]
+          const parts: string[] = []
+          for (const { filename, section } of APPENDIX_FILES) {
+            try {
+              const content = await fs.readFile(path.join(skillDir, filename), 'utf-8')
+              if (content.trim()) parts.push(`${section}\n\n${content.trim()}`)
+            } catch { /* 文件不存在,跳过 */ }
+          }
+          if (parts.length > 0) {
+            appendixMd = `\n\n---\n\n# 附属知识包\n\n${parts.join('\n\n---\n\n')}`
+          }
+        } catch { /* importedFrom 异常,跳过 */ }
+      }
+
       let sys: string
       if (persona.skill?.fullMarkdown) {
         sys = `你现在按下面这份 skill 扮演 **${displayName}**。严格遵循其中的 Agentic Protocol、心智模型、启发式与表达 DNA；遇到"诚实边界"里提到的资料空白，直接说"这超出我的已知"，不要编造。以第一人称回答，不要以第三人称谈论该人物。
 
 ---
 
-${persona.skill.fullMarkdown}`
+${persona.skill.fullMarkdown}${appendixMd}`
       } else {
         // legacy fallback
         sys = `你现在根据下面这份资料扮演 **${displayName}**，以第一人称回答问题。这份资料不是蒸馏后的 skill，信息密度有限——遇到资料里没写的事项，坦白说"这超出我的已知"，不要编造。
