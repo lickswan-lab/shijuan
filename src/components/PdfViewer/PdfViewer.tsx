@@ -2,6 +2,14 @@ import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import Markdown from 'react-markdown'
 const ReactMarkdown = Markdown  // alias for compatibility
+
+// 2026-04-28 · "你上次在 X 读过这本"提示去重 — 模块级 Set 记录本次会话内
+//   "用户已经查看过本文献注释"的 entryId。切出再切入这本时:
+//   - 在 Set 内 → 跳过提示(用户已经看过注释,不需要再 nudge)
+//   - 不在 Set 内 → 仍然弹(用户开了但没看注释,提示仍然有用)
+//   入 Set 时机:用户点击"查看注释"按钮、或点击任意注释 marker(setActiveAnnotation
+//   被触发)。app 重启后清零。
+const rereadingViewedThisSession = new Set<string>()
 import remarkMath from 'remark-math'
 import { KATEX_FORGIVING as rehypeKatex } from '../../utils/markdownConfig'
 import { v4 as uuid } from 'uuid'
@@ -2010,6 +2018,20 @@ export default function PdfViewer() {
     updatePdfMeta(meta => ({ ...meta, marks: (meta.marks || []).filter(m => m.id !== markId) }))
   }, [updatePdfMeta])
 
+  // 2026-04-28 · 任何"针对本文献注释的相关操作"都把当前 entryId 加入会话内
+  //   "已查看"集合 → 后续切回时不再弹 rereadingReminder。
+  //   触发点:点击注释 marker(activeAnnotationId 命中本文献的注释)/ 标注列表里
+  //   选中条目。banner 上的"查看注释/查看旧注释/× 关闭"也分别在 onClick 里
+  //   直接 add(就近,不依赖此 effect)。
+  const activeAnnotationIdForReread = useUiStore(s => s.activeAnnotationId)
+  useEffect(() => {
+    if (!activeAnnotationIdForReread || !currentEntry?.id || !currentPdfMeta) return
+    if (currentPdfMeta.annotations.some(a => a.id === activeAnnotationIdForReread)) {
+      rereadingViewedThisSession.add(currentEntry.id)
+      setRereadingReminder(prev => prev ? null : prev)  // 同时把 banner 收掉
+    }
+  }, [activeAnnotationIdForReread, currentEntry?.id, currentPdfMeta])
+
   const absPath = currentEntry?.absPath || ''
   const fileExt = absPath.split('.').pop()?.toLowerCase() || ''
   const isPdf = fileExt === 'pdf'
@@ -2048,6 +2070,8 @@ export default function PdfViewer() {
     //      the gap is meaningful (≥ 3 days). Replaces the static text when
     //      it arrives. If AI fails or isn't configured, static stays.
     if (currentEntry.lastOpenedAt) {
+      // 2026-04-28 · 本次会话内已经查看过这本注释 → 切出再切入时跳过提示。
+      if (rereadingViewedThisSession.has(currentEntry.id)) return
       const capturedEntryId = currentEntry.id
       window.electronAPI.loadPdfMeta(currentEntry.id).then(async meta => {
         if (!meta || !meta.annotations || meta.annotations.length < 2) return
@@ -3121,6 +3145,8 @@ export default function PdfViewer() {
                   — 同伴 · 距上次 {rereadingReminder.lastTime}
                   <button
                     onClick={() => {
+                      // 2026-04-28 · 标记本会话已查看,切回不再弹
+                      if (currentEntry?.id) rereadingViewedThisSession.add(currentEntry.id)
                       useUiStore.getState().toggleAnnotationPanel()
                       setRereadingReminder(null)
                     }}
@@ -3144,6 +3170,8 @@ export default function PdfViewer() {
                 你上次在 {rereadingReminder.lastTime} 读过这本，留下了 {rereadingReminder.annCount} 条注释。
                 <button
                   onClick={() => {
+                    // 2026-04-28 · 标记本会话已查看,切回不再弹
+                    if (currentEntry?.id) rereadingViewedThisSession.add(currentEntry.id)
                     useUiStore.getState().toggleAnnotationPanel()
                     setRereadingReminder(null)
                   }}
@@ -3159,7 +3187,11 @@ export default function PdfViewer() {
             )}
           </div>
           <button
-            onClick={() => setRereadingReminder(null)}
+            onClick={() => {
+              // 2026-04-28 · 主动关闭也算"已处理过",切回不再弹
+              if (currentEntry?.id) rereadingViewedThisSession.add(currentEntry.id)
+              setRereadingReminder(null)
+            }}
             style={{
               background: 'none', border: 'none', cursor: 'pointer',
               color: 'var(--text-muted)', fontSize: 16, lineHeight: 1,
