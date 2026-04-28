@@ -1,7 +1,11 @@
 import type { PersonaSource } from '../../src/types/library'
 
 /** One retrievable chunk from a source. Chunks are 500-800 chars, split on
- *  natural boundaries (paragraph breaks, sentence ends). */
+ *  natural boundaries (paragraph breaks, sentence ends).
+ *
+ *  2026-04-28 · `sectionPath` 字段:从 markdown 源切出来时,记录 chunk 所属的
+ *  ## / ### 标题路径,如 "心智模型集 / 理念论"。citation 显示用,提升可溯源性。
+ *  非 markdown 源(纯文本 / 维基扁平段落)留空。 */
 export interface RagChunk {
   sourceId: string
   sourceTitle: string
@@ -9,15 +13,112 @@ export interface RagChunk {
   trust: NonNullable<PersonaSource['trust']>
   chunkIdx: number
   text: string
+  sectionPath?: string  // e.g. "心智模型集 / 理念论 (Theory of Forms)"
 }
 
-/** Chunk a source's fullContent into RagChunks. Prefers paragraph breaks
- *  (\n\n), falls back to sentence boundaries (。 ！ ？ .), then fixed-size
- *  overlap windows. Skips sources with no fullContent. */
+/** Chunk a source's fullContent into RagChunks.
+ *
+ *  2026-04-28 · 新增 markdown heading-aware 切分:
+ *  - 检测到正文像 markdown(开头几行有 `^#+\s` heading,或者 heading 数 ≥ 2)
+ *    → 按 `## XX` / `### XX` 分段,每段一个 chunk(超长时进一步切但保留 sectionPath)
+ *    → 每个 chunk 带 sectionPath 标签如 "心智模型集 / 理念论"
+ *  - 否则走原段落式切分(纯文本 / 维基)
+ *
+ *  这让 MENTAL_MODELS.md 这种结构化文档能被精确命中(用户问"理念论"
+ *  → 直接命中那一节,而不是被无关段稀释)。 */
 export function chunkSource(source: PersonaSource, targetChars = 650, maxChars = 900): RagChunk[] {
   const text = source.fullContent || source.snippet || ''
   if (!text.trim()) return []
 
+  // 检测 markdown:正文里 heading 行(##/###/####)≥ 2 个 → 走 heading split
+  const headingMatches = text.match(/^#{2,4}\s+\S/gm)
+  const looksLikeMarkdown = (headingMatches?.length || 0) >= 2
+
+  if (looksLikeMarkdown) {
+    return chunkByHeadings(source, text, targetChars, maxChars)
+  }
+  return chunkByParagraphs(source, text, targetChars, maxChars, undefined)
+}
+
+/** 按 markdown heading 切分。每个 ## section 是基础单元,超长时再按段落细切,
+ *  细切出来的 sub-chunks 全部继承同一个 sectionPath(主标题 / 子标题)。 */
+function chunkByHeadings(source: PersonaSource, text: string, targetChars: number, maxChars: number): RagChunk[] {
+  const chunks: RagChunk[] = []
+  const idxRef = { value: 0 }
+
+  // 切到 ## 级别(把 # H1 当作整篇标题不切),保留 ### H3 在 section 内
+  // 用正则找所有 ## 的位置,把它们之间的内容当作一个 section
+  const sections: Array<{ heading: string; level: number; content: string }> = []
+  const headingRe = /^(#{2,4})\s+(.+)$/gm
+  const matches: Array<{ idx: number; level: number; heading: string }> = []
+  let m: RegExpExecArray | null
+  while ((m = headingRe.exec(text)) !== null) {
+    matches.push({ idx: m.index, level: m[1].length, heading: m[2].trim() })
+  }
+  if (matches.length === 0) {
+    // 兜底,按段落切(虽然 looksLikeMarkdown 已 ≥ 2,这里防御)
+    return chunkByParagraphs(source, text, targetChars, maxChars, undefined)
+  }
+  // 第一个 match 之前的导言段(如果有内容)
+  const intro = text.slice(0, matches[0].idx).trim()
+  if (intro && intro.length > 50) {
+    sections.push({ heading: '(开篇)', level: 2, content: intro })
+  }
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].idx
+    const end = i + 1 < matches.length ? matches[i + 1].idx : text.length
+    // section 内容包含 heading 行本身,后面的正文
+    const sectionRaw = text.slice(start, end)
+    // 去掉 heading 行,只留正文
+    const lines = sectionRaw.split('\n')
+    const body = lines.slice(1).join('\n').trim()
+    if (!body) continue
+    sections.push({ heading: matches[i].heading, level: matches[i].level, content: body })
+  }
+
+  // 维护当前的 H2 / H3 路径,生成 sectionPath 字符串
+  let currentH2 = ''
+  for (const sec of sections) {
+    if (sec.level === 2) currentH2 = sec.heading
+    const sectionPath = sec.level === 2
+      ? sec.heading
+      : (currentH2 ? `${currentH2} / ${sec.heading}` : sec.heading)
+
+    if (sec.content.length <= maxChars) {
+      // 整 section 直接一个 chunk(包含 heading 文本帮助检索匹配)
+      chunks.push({
+        sourceId: source.id,
+        sourceTitle: source.title,
+        sourceType: source.source,
+        trust: source.trust || 'medium',
+        chunkIdx: idxRef.value++,
+        text: `## ${sec.heading}\n\n${sec.content}`,
+        sectionPath,
+      })
+    } else {
+      // section 太长 → 按段落切,所有 sub-chunk 共享同一 sectionPath
+      const subs = chunkByParagraphs(source, sec.content, targetChars, maxChars, sectionPath)
+      for (const sub of subs) {
+        chunks.push({
+          ...sub,
+          chunkIdx: idxRef.value++,
+          // sub-chunk 第一个加上 heading 前缀,后续保持原文
+          text: sub.chunkIdx === 0 ? `## ${sec.heading}\n\n${sub.text}` : sub.text,
+        })
+      }
+    }
+  }
+  return chunks
+}
+
+/** 段落式切分(原逻辑),提取为独立函数以便 chunkByHeadings 在长 section 下复用 */
+function chunkByParagraphs(
+  source: PersonaSource,
+  text: string,
+  targetChars: number,
+  maxChars: number,
+  sectionPath: string | undefined,
+): RagChunk[] {
   const chunks: RagChunk[] = []
   let idx = 0
   let buffer = ''
@@ -32,17 +133,16 @@ export function chunkSource(source: PersonaSource, targetChars = 650, maxChars =
         trust: source.trust || 'medium',
         chunkIdx: idx++,
         text: t,
+        sectionPath,
       })
     }
     buffer = ''
   }
 
   const splitHugeParagraph = (p: string) => {
-    // Sentence boundary split — CJK 。！？ + ASCII .!? + optional closing quote
     const sentences = p.split(/(?<=[。！？\.!?][」』"'）\)]?)/).filter(s => s.trim())
     for (const s of sentences) {
       if (s.length > maxChars) {
-        // Sentence itself is absurdly long (e.g. no punctuation) — hard slice
         for (let i = 0; i < s.length; i += maxChars) {
           if (buffer.length >= targetChars) pushBuffer()
           const slice = s.slice(i, i + maxChars)

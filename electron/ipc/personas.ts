@@ -1639,9 +1639,15 @@ ${persona.content || '（资料为空）'}`
             const trustLabel = (t: string) => ({
               primary: '一手/原著', high: '权威', medium: '一般', low: '低权重(慎信)',
             } as Record<string, string>)[t] || t
-            const citations = r.chunks.map((c, i) =>
-              `[资料 ${i + 1}] 《${c.sourceTitle}》（${c.sourceType} · ${trustLabel(c.trust)} · 片段 ${c.chunkIdx + 1}）\n> ${c.text.replace(/\n/g, '\n> ')}`
-            ).join('\n\n')
+            const citations = r.chunks.map((c, i) => {
+              // 2026-04-28 · sectionPath 让 markdown 源的引用更可溯源
+              //   "《MENTAL_MODELS》 · 心智模型集 / 理念论 (Theory of Forms)"
+              //   而不是 "《MENTAL_MODELS》 · 片段 3"
+              const locStr = c.sectionPath
+                ? `${c.sourceType} · ${trustLabel(c.trust)} · ${c.sectionPath}`
+                : `${c.sourceType} · ${trustLabel(c.trust)} · 片段 ${c.chunkIdx + 1}`
+              return `[资料 ${i + 1}] 《${c.sourceTitle}》（${locStr}）\n> ${c.text.replace(/\n/g, '\n> ')}`
+            }).join('\n\n')
             const modeLabel = r.retrievalMode === 'embedding' ? '语义 (embedding)' : '关键词 (BM25)'
             // Wave-4: expanded "严格规则" with reverse-parse warning. The
             // numbered-range wording is intentionally redundant with the item
