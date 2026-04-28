@@ -22,6 +22,8 @@ import { cleanOcrText } from './cleanOcrText'
 import { collectTextNodes } from './highlights'
 import TranslateModal, { type TranslateModalProps } from './TranslateModal'
 import { useTranslationJobsStore } from '../../store/translationJobsStore'
+// 2026-04-28 · 局部 OCR 范围选择 modal 重新接入
+import OcrRangeModal, { type OcrRangeChoice } from '../BatchOcr/OcrRangeModal'
 // PERF-R8#7 · 共享 AI provider 配置 cache,免每个组件 mount 单独 IPC
 import { fetchAiConfig, subscribeAiConfig } from '../../utils/aiConfigCache'
 // BUG-FIX R8#8 · localStorage 数字读 NaN 防御
@@ -2457,14 +2459,26 @@ export default function PdfViewer() {
     return () => document.removeEventListener('keydown', handler)
   }, [currentEntry, viewMode, isPdf])
 
-  // ===== OCR: Send entire PDF file to GLM-OCR =====
-  const handleOcr = useCallback(async () => {
+  // 2026-04-28 · 局部 OCR · 弹 modal 让用户选范围,默认整本
+  const [ocrRangeOpen, setOcrRangeOpen] = useState(false)
+
+  // ===== OCR: 弹 modal 选范围,然后调 GLM-OCR =====
+  const handleOcr = useCallback(() => {
     if (!currentPdfMeta || !currentEntry) return
     if (glmApiKeyStatus !== 'set') { alert('请先在设置中填入 GLM API Key'); return }
-    setOcrProgress({ status: '正在上传 PDF 并识别文字...' })
+    if (!isPdf) { alert('OCR 仅支持 PDF 文件'); return }
+    setOcrRangeOpen(true)
+  }, [currentEntry, currentPdfMeta, glmApiKeyStatus, isPdf])
 
-    // Flag the entry as OCR-running so FileTree shows the spinner. Cleared on
-    // success/failure paths below.
+  // 真正发起 OCR,modal 确认后才调
+  const runOcrWithRange = useCallback(async (choice: OcrRangeChoice) => {
+    setOcrRangeOpen(false)
+    if (!currentEntry || !currentPdfMeta) return
+
+    const hasRange = typeof choice.startPage === 'number' && typeof choice.endPage === 'number'
+    const rangeLabel = hasRange ? `第 ${choice.startPage}-${choice.endPage} 页` : '整本'
+    setOcrProgress({ status: `正在 OCR ${rangeLabel}...` })
+
     await updateEntry(currentEntry.id, {
       ocrStatus: 'running',
       ocrStatusUpdatedAt: new Date().toISOString(),
@@ -2472,7 +2486,10 @@ export default function PdfViewer() {
     }).catch(() => {})
 
     try {
-      const result = await window.electronAPI.glmOcrPdf(currentEntry.absPath)
+      const result = await window.electronAPI.glmOcrPdf(currentEntry.absPath, {
+        entryId: currentEntry.id,
+        ...(hasRange ? { startPage: choice.startPage, endPage: choice.endPage } : {}),
+      })
 
       if (result.success && result.text) {
         // Build text with page markers if we have per-page data
@@ -3579,6 +3596,15 @@ export default function PdfViewer() {
             : numPages || 0
         }
         docTitle={currentEntry?.title}
+      />
+
+      {/* ===== OCR 范围选择 Modal (2026-04-28 局部 OCR 重新接入) ===== */}
+      <OcrRangeModal
+        open={ocrRangeOpen}
+        totalPages={numPages || 0}
+        currentPage={useUiStore.getState().currentVisiblePage || 1}
+        onConfirm={runOcrWithRange}
+        onCancel={() => setOcrRangeOpen(false)}
       />
     </div>
   )
