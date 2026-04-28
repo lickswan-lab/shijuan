@@ -229,6 +229,41 @@ function getModelLabel(modelSpec: string): string {
     .replace(/-\d{8,}$/, '') // remove date suffixes like -20250414
 }
 
+// 2026-04-28 · 检测 AI 输出是否疑似被截断(LLM max_tokens / idle timeout / 主动 abort)
+//   策略:看尾部 256 字符,触发条件之一即标 incomplete:
+//   1) 以 markdown heading 开头但下面没正文(出现 "## 总结" 然后没了)
+//   2) 结尾不是合理终止符号(中英标点 / 闭合符号 / 数字 / markdown 列表项),且字数 ≥ 100
+//   3) 结尾是中英文连接词("和 / 但 / 而 / 因为 / and / but" 等),明显话没说完
+//   误报成本低:多显示一个继续按钮;漏报成本高:用户以为输出完整结果产生错觉。
+const TRAILING_CONJUNCTIONS = ['和', '但', '而', '因为', '所以', '如果', '虽然', '然而', '不过', '另外', '此外', 'and', 'but', 'or', 'because', 'so', 'however']
+const VALID_ENDINGS = /[。！？.!?…」』"”’\)）\]】>]\s*$/
+function detectIncomplete(text: string): boolean {
+  if (!text || text.length < 100) return false  // 太短可能是用户主动停 / 简短回答
+  const tail = text.slice(-256).trim()
+  if (!tail) return false
+  // 1) markdown heading 后无内容
+  if (/^#{1,6}\s+\S+\s*$/m.test(tail.split(/\n/).slice(-2).join('\n')) === false) {
+    // 检查最后一行是否为 heading 但其后无非空内容
+    const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean)
+    const lastLine = lines[lines.length - 1] || ''
+    if (/^#{1,6}\s+\S/.test(lastLine)) return true
+    // 倒数第二行是 heading,最后一行是连接词或半句
+    if (lines.length >= 2 && /^#{1,6}\s+\S/.test(lines[lines.length - 2])) {
+      const last = lines[lines.length - 1]
+      if (last.length < 30 && !VALID_ENDINGS.test(last)) return true
+    }
+  }
+  // 2) 结尾不是合理终止符
+  if (!VALID_ENDINGS.test(tail)) {
+    // 3) 倒数 1-2 词是连接词
+    const lastWord = tail.split(/[\s,，、]/).filter(Boolean).pop() || ''
+    if (TRAILING_CONJUNCTIONS.includes(lastWord.toLowerCase())) return true
+    // 结尾是无标点的纯文字 → 可能截断,但要排除"列表项 - 项目"这种合法收尾
+    if (!/[\-\*\d]\s*[A-Za-z一-鿿]+\s*$/.test(tail)) return true
+  }
+  return false
+}
+
 function getTypeDisplay(type: HistoryEntry['type']) {
   const map: Record<string, { label: string; color: string; bgClass: string }> = {
     note: { label: '我', color: 'var(--accent)', bgClass: 'user-note' },
@@ -288,7 +323,7 @@ const HistoryEntryItem = React.memo(function HistoryEntryItem({
   return (
     <div className={`history-entry ${display.bgClass}`}>
       <div className="history-entry-header">
-        <span style={{ fontSize: 11, fontWeight: 500, color: entry.author === 'user' ? 'var(--accent)' : 'var(--success)', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 500, color: entry.author === 'user' ? 'var(--accent)' : 'var(--success)', display: 'inline-flex', alignItems: 'center', gap: 8, letterSpacing: '0.2px' }}>
           {entry.author === 'user' ? '我' : (entry.modelLabel || 'AI')}
           {/* AI job status chip: icon-in-circle + small label. Status chip
               uses 1px soft border + faint tinted bg — reads as a proper
@@ -799,10 +834,10 @@ export default function AnnotationPanel() {
   const [streamingText, setStreamingText] = useState('')
   // Annotation list search (filters both current and other-entries annotations)
   const [annSearch, setAnnSearch] = useState('')
-  // Socratic mode: AI asks guiding questions instead of direct answers
-  const [socraticMode, setSocraticMode] = useState(() => {
-    try { return localStorage.getItem('sj-socraticMode') === 'true' } catch { return false }
-  })
+  // 2026-04-28 · 苏格拉底模式彻底删除(用户决定下线,UI 按钮 batch 43 已删但
+  //   state/system prompt 切换逻辑残留 → 老用户 localStorage 里 sj-socraticMode='true'
+  //   会让 AI 反问而不是直接回答)。强制清 localStorage 防止幽灵复活。
+  useEffect(() => { try { localStorage.removeItem('sj-socraticMode') } catch {} }, [])
   // 2026-04-25 PERF · 选择性订阅
   const aiModel = useUiStore(s => s.selectedAiModel)
   const setAiModel = useUiStore(s => s.setSelectedAiModel)
@@ -1250,6 +1285,7 @@ export default function AnnotationPanel() {
       author: 'ai',
       createdAt: new Date().toISOString(),
       ...(newContextText ? { contextText: newContextText } : {}),
+      ...(result.success && detectIncomplete(entryContent) ? { incomplete: true } : {}),
     }
 
     if (displayAnnotation) {
@@ -1353,9 +1389,8 @@ export default function AnnotationPanel() {
       }
     } catch {}
 
-    let systemContent = socraticMode
-      ? `你是拾卷的学徒——一位陪读的学术研究伙伴，正在以苏格拉底式方法辅导学生阅读文献「${docTitle}」。\n\n核心原则：\n- 绝不直接给出答案，而是通过1-2个精准的追问引导学生自己思考\n- 追问要针对学生问题的核心假设、隐含前提或推理漏洞\n- 如果学生说"直接告诉我"，才给出正面回答\n- 可以引用用户在其他文献中的注释来建立关联\n\n用户选中的文本：\n「${contextForAi}」`
-      : `你是拾卷的学徒——一位陪读的学术研究伙伴。你非常熟悉文献「${docTitle}」，并且了解用户在整个文献库中的阅读历史和笔记。请基于文献上下文和跨文献关联回答用户的问题。如果发现用户的问题与其他文献的内容有关联，主动指出。\n\n用户选中的文本：\n「${contextForAi}」`
+    // 2026-04-28 · 苏格拉底分支已删,固定走"直接回答"路径
+    let systemContent = `你是拾卷的学徒——一位陪读的学术研究伙伴。你非常熟悉文献「${docTitle}」，并且了解用户在整个文献库中的阅读历史和笔记。请基于文献上下文和跨文献关联回答用户的问题。如果发现用户的问题与其他文献的内容有关联，主动指出。\n\n用户选中的文本：\n「${contextForAi}」`
     if (surroundingContext) {
       systemContent += `\n\n选中文本的前后上下文（来自同一篇文献）：\n${surroundingContext}`
     }
@@ -2095,9 +2130,8 @@ export default function AnnotationPanel() {
         />
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, gap: 6 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            {/* 2026-04-24 苏格拉底模式按钮已删（用户决定保留为内置 skill，不单独 UI）。
-                socraticMode state / system prompt 分支暂留——后续港到 skills/socrates/
-                或 skills/socratic-mode/ 作为召唤 skill。 */}
+            {/* 2026-04-28 · 苏格拉底模式彻底下线(state + 分支 + localStorage 全清)。
+                如果将来想做"苏格拉底式辅导"重新作为召唤 skill 蒸馏即可。 */}
             <select
               value={aiModel}
               onChange={e => setAiModel(e.target.value)}

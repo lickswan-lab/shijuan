@@ -139,6 +139,9 @@ export interface HistoryEntry {
   // annotation list. Used to auto-hide "completed ✓" / "failed !" markers
   // after the user has seen them (same pattern as translation badges).
   aiViewed?: boolean
+  // 2026-04-28 · AI 输出疑似不完整(LLM max_tokens 截断 / idle timeout 等)。
+  //   保存时通过启发式检测设置 true,UI 显示警告 + "继续生成" 按钮。
+  incomplete?: boolean
 }
 
 // ===== BlockRef: address for any piece of thinking =====
