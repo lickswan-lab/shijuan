@@ -1647,6 +1647,34 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
 }
 
 
+// 2026-04-28 · 卡载兜底组件:正常情况下 PDF 加载 1~2 秒,8 秒还卡在"加载中"
+//   多半是文件路径异常 / 不存在 / pdf.js worker 死锁,显示文件路径 + 重试按钮。
+function StuckLoadingHint({ absPath, onRetry }: { absPath: string; onRetry: () => void }) {
+  const [showStuck, setShowStuck] = useState(false)
+  useEffect(() => {
+    setShowStuck(false)
+    const t = setTimeout(() => setShowStuck(true), 8000)
+    return () => clearTimeout(t)
+  }, [absPath])
+  if (!showStuck) {
+    return <div className="empty-state"><span className="loading-spinner" /><span style={{ marginTop: 10 }}>加载中...</span></div>
+  }
+  return (
+    <div className="empty-state" style={{ maxWidth: 480, textAlign: 'center' }}>
+      <span style={{ fontSize: 28 }}>⏳</span>
+      <span style={{ marginTop: 8, fontSize: 13 }}>加载耗时较长</span>
+      <span style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)', wordBreak: 'break-all', fontFamily: 'monospace', maxWidth: '90%' }}>
+        {absPath || '(无路径)'}
+      </span>
+      <span style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+        如果文件存在且不大,可能是后台 PDF.js worker 卡住。<br />
+        点击重试,或切换到其它文献再切回。
+      </span>
+      <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={onRetry}>重试加载</button>
+    </div>
+  )
+}
+
 // ===== ImmersiveOcrReader / ImmersiveAnnotationBox 已删(2026-04-28 CLEAN · 沉浸式阅读下线) =====
 // 原本 ~400 行的两个 dormant 组件,toggle 入口早已移除 → 永远 unreachable,一并清掉。
 
@@ -3247,9 +3275,30 @@ export default function PdfViewer() {
           style={{ flex: 1 }}
         >
           {loadError ? (
-            <div className="empty-state"><span style={{ fontSize: 32 }}>❌</span><span>{loadError}</span></div>
+            <div className="empty-state">
+              <span style={{ fontSize: 32 }}>❌</span>
+              <span>{loadError}</span>
+              <button className="btn btn-sm" style={{ marginTop: 14 }}
+                onClick={() => {
+                  // 2026-04-28 · 重试:重置 loadError + 重置 pdfFileUrl,
+                  //   触发 effect 重跑(用 currentEntry?.id 当 key 强制 remount)
+                  setLoadError(null)
+                  if (currentEntry?.absPath) {
+                    setPdfFileUrl(null)
+                    setTimeout(() => {
+                      setPdfFileUrl('file:///' + currentEntry.absPath.replace(/\\/g, '/'))
+                    }, 50)
+                  }
+                }}>重试</button>
+            </div>
           ) : !pdfFileUrl ? (
-            <div className="empty-state"><span>加载中...</span></div>
+            // 2026-04-28 · 卡在"加载中..." 通常是 ext 检测失败 / 路径异常。
+            //   附上当前文件路径让用户能立刻判断,8s 后给重试按钮。
+            <StuckLoadingHint absPath={currentEntry?.absPath || ''} onRetry={() => {
+              if (currentEntry?.absPath) {
+                setPdfFileUrl('file:///' + currentEntry.absPath.replace(/\\/g, '/'))
+              }
+            }} />
           ) : (
             <Document
               key={`${currentEntry?.id}-single`}
