@@ -2173,9 +2173,8 @@ export default function PdfViewer() {
   }, [currentEntry?.id, currentPdfMeta?.entryId])
   const [ocrFullText, setOcrFullText] = useState<string | null>(null)
   const [ocrFilePath, setOcrFilePath] = useState<string | null>(null)
-  const [editMode, setEditMode] = useState(false)
-  const [editContent, setEditContent] = useState('')
-  const [editDirty, setEditDirty] = useState(false)
+  // 2026-04-28 CLEAN · "编辑"功能彻底删除(用户决定下线)。
+  //   editMode / editContent / editDirty state 全部移除;按钮 + textarea + cleanup 同步删。
   // Persisted reading preferences
   // BUG-FIX R8#8 · 走 readNumber 兜底 NaN(原 lsGet 没防,坏数据时 fontSize: NaN 导致 OCR 文本不可读)
   const lsGet = (key: string, def: number) => readNumber(key, def)
@@ -2436,9 +2435,6 @@ export default function PdfViewer() {
     setDocxHtml(null)
     setViewMode('pdf')
     setOcrProgress(null)
-    setEditMode(false)
-    setEditContent('')
-    setEditDirty(false)
     setRereadingReminder(null)
 
     if (!currentEntry) return
@@ -3535,64 +3531,8 @@ export default function PdfViewer() {
           />
         )}
 
-        {/* Edit button — for OCR text, TXT, MD, DOCX views */}
-        {(viewMode === 'ocr' || isText || ['docx', 'doc'].includes(fileExt)) && (
-          editMode ? (
-            <div style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
-              <button className="btn btn-sm btn-primary" style={{ fontSize: 11 }}
-                onClick={async () => {
-                  // Save as .edited.txt next to original file
-                  const editPath = currentEntry!.absPath.replace(/\.[^.]+$/, '.edited.txt')
-                  await window.electronAPI.exportFile(editPath, [], editContent)
-                  setEditDirty(false)
-                }}>
-                保存备份
-              </button>
-              <button className="btn btn-sm" style={{ fontSize: 11 }}
-                onClick={async () => {
-                  await window.electronAPI.exportFile(
-                    currentEntry!.title + '.txt',
-                    [{ name: '文本', extensions: ['txt', 'md'] }],
-                    editContent
-                  )
-                }}>
-                导出
-              </button>
-              <button className="btn btn-sm" style={{ fontSize: 11 }}
-                onClick={() => { setEditMode(false) }}>
-                退出编辑
-              </button>
-            </div>
-          ) : (
-            <button className="btn btn-sm" style={{ marginLeft: 8, fontSize: 11 }}
-              onClick={async () => {
-                if (ocrFullText) {
-                  setEditContent(cleanOcrText(ocrFullText))
-                } else if (isText && currentEntry) {
-                  try {
-                    const buf = await window.electronAPI.readFileBuffer(currentEntry.absPath)
-                    setEditContent(new TextDecoder('utf-8').decode(buf))
-                  } catch { setEditContent('') }
-                } else if (['docx', 'doc'].includes(fileExt) && currentEntry) {
-                  try {
-                    const mammoth = await import('mammoth')
-                    const buf = await window.electronAPI.readFileBuffer(currentEntry.absPath)
-                    const result = await mammoth.extractRawText({ arrayBuffer: buf.buffer })
-                    setEditContent(result.value || '')
-                  } catch { setEditContent('') }
-                } else {
-                  setEditContent('')
-                }
-                setEditMode(true)
-                setEditDirty(false)
-              }}>
-              编辑
-            </button>
-          )
-        )}
-
-        {/* 2026-04-28 CLEAN · "回顾"按钮删除(用户决定下线)。state / ref 同步已删。
-            closingPrompt.ts 留着不删,以防未来恢复或港成 skill。 */}
+        {/* 2026-04-28 CLEAN · "编辑" + "回顾" 两个按钮都已下线(用户决定)。
+            state / ref / textarea 同步全删。closingPrompt.ts 保留以防未来恢复。 */}
 
         {/* Immersive mode toggle removed — per user feedback it wasn't useful.
             The ImmersiveOcrReader / ImmersiveAnnotationBox code is kept for now as
@@ -3867,7 +3807,7 @@ export default function PdfViewer() {
       )}
 
       {/* ===== DOCX View ===== */}
-      {viewMode === 'pdf' && !editMode && ['docx', 'doc'].includes(fileExt) && (
+      {viewMode === 'pdf' && ['docx', 'doc'].includes(fileExt) && (
         immersiveMode && dualPageMode && docxHtml ? (
           /* Immersive dual-column DOCX */
           <div className="pdf-scroll-area" style={{
@@ -3903,7 +3843,7 @@ export default function PdfViewer() {
       )}
 
       {/* ===== Text View ===== */}
-      {viewMode === 'pdf' && !editMode && isText && (
+      {viewMode === 'pdf' && isText && (
         immersiveMode && dualPageMode && txtContent ? (
           /* Immersive dual-page TXT/MD via ImmersiveOcrReader */
           <div className="pdf-scroll-area" style={{
@@ -3952,34 +3892,10 @@ export default function PdfViewer() {
         )
       )}
 
-      {/* ===== Edit Mode ===== */}
-      {editMode && (
-        <div className="pdf-scroll-area" style={{
-          background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
-          padding: 0, display: 'flex', flexDirection: 'column',
-        }}>
-          <textarea
-            value={editContent}
-            onChange={e => { setEditContent(e.target.value); setEditDirty(true) }}
-            style={{
-              flex: 1, width: '100%', padding: '24px 48px',
-              border: 'none', outline: 'none', resize: 'none',
-              fontSize: ocrFontSize, fontWeight: ocrFontWeight,
-              lineHeight: 2, fontFamily: 'var(--font-serif)',
-              color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
-              background: 'transparent',
-            }}
-          />
-          {editDirty && (
-            <div style={{ padding: '4px 48px 8px', fontSize: 11, color: 'var(--accent)', flexShrink: 0 }}>
-              有未保存的更改
-            </div>
-          )}
-        </div>
-      )}
+      {/* ===== Edit Mode 区块已删(2026-04-28 CLEAN) ===== */}
 
       {/* ===== OCR Text View ===== */}
-      {viewMode === 'ocr' && !editMode && (
+      {viewMode === 'ocr' && (
         <div
           // Reuse scrollRef here so the page-jump's scrollToPage() can find OcrContent's
           // [data-page-number] elements. PDF/Edit/OCR scroll areas are mutually exclusive
