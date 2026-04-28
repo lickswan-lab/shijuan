@@ -9,6 +9,12 @@ import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
 import { openEntryById } from '../../utils/openEntryById'
 import type { BlockRef, HistoryEntry, Annotation, PdfMeta } from '../../types/library'
+import ImeInput from '../common/ImeInput'
+import { useConfirmDialog } from '../common/ConfirmDialog'
+// 2026-04-28 · MemoAiSection 接入 AI 模型选择 + 召唤功能(对齐 AnnotationPanel)
+import { fetchAiConfig, subscribeAiConfig, type ConfiguredProvider } from '../../utils/aiConfigCache'
+import { fetchPersonaList, subscribePersonaList, type PersonaListEntry } from '../../utils/personaListCache'
+import { humanizeAiError } from '../../utils/humanizeAiError'
 
 // ===== Clean OCR text for cite panel =====
 function cleanOcrTextForCite(raw: string): string {
@@ -129,7 +135,8 @@ function CiteAnnotationAccordion({ ann, onCite }: {
 
 // ===== CitePanel: cite from literature text or annotations =====
 function CitePanel({ memoId, onClose }: { memoId: string; onClose: () => void }) {
-  const { library, addBlockToMemo } = useLibraryStore()
+  const library = useLibraryStore(s => s.library)
+  const addBlockToMemo = useLibraryStore(s => s.addBlockToMemo)
   const entries = library?.entries || []
 
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
@@ -221,9 +228,13 @@ function CitePanel({ memoId, onClose }: { memoId: string; onClose: () => void })
     addBlockToMemo(memoId, block)
   }, [selectedEntry, memoId, addBlockToMemo])
 
-  const filteredEntries = searchQuery
-    ? entries.filter(e => e.title.toLowerCase().includes(searchQuery.toLowerCase()))
-    : entries
+  // 2026-04-25 PERF · useMemo 缓存
+  const filteredEntries = useMemo(
+    () => searchQuery
+      ? entries.filter(e => e.title.toLowerCase().includes(searchQuery.toLowerCase()))
+      : entries,
+    [searchQuery, entries],
+  )
 
   return (
     <div style={{
@@ -261,9 +272,9 @@ function CitePanel({ memoId, onClose }: { memoId: string; onClose: () => void })
           /* === Step 1: Entry list === */
           <div style={{ flex: 1, overflow: 'auto' }}>
             <div style={{ padding: '8px 12px' }}>
-              <input
-                type="text" placeholder="搜索文献..." value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
+              <ImeInput
+                placeholder="搜索文献..." value={searchQuery}
+                onChange={setSearchQuery}
                 style={{
                   width: '100%', padding: '6px 10px', border: '1px solid var(--border)',
                   borderRadius: 4, fontSize: 12, outline: 'none', background: 'var(--bg-warm)',
@@ -440,7 +451,7 @@ function LiveMemoEditor({ content, onChange, blocks, memoId, onJumpBlock }: {
   const [editing, setEditing] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const previewRef = useRef<HTMLDivElement>(null)
-  const { addBlockToMemo } = useLibraryStore()
+  const addBlockToMemo = useLibraryStore(s => s.addBlockToMemo)
   const [dropPickerData, setDropPickerData] = useState<any>(null)
 
   // Block refs now render via the Markdown `components.a` mapping below — no event
@@ -703,55 +714,223 @@ function MemoAiSection({ memoId, blocks, aiHistory }: {
   blocks: BlockRef[]
   aiHistory: HistoryEntry[]
 }) {
-  const { library } = useLibraryStore()
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [errorToast, setErrorToast] = useState<string | null>(null)
+
+  // 2026-04-28 · 接入用户选定的 AI 模型(对齐 AnnotationPanel),不再写死 glm-4-flash
+  const aiModel = useUiStore(s => s.selectedAiModel)
+  const setAiModel = useUiStore(s => s.setSelectedAiModel)
+  const [configuredProviders, setConfiguredProviders] = useState<ConfiguredProvider[]>([])
+
+  // 2026-04-28 · 思考强度 + 联网搜索(对齐 AgentPanel),仅当前 model 支持时生效
+  const aiReasoningEffort = useUiStore(s => s.aiReasoningEffort)
+  const setAiReasoningEffort = useUiStore(s => s.setAiReasoningEffort)
+  const aiWebSearch = useUiStore(s => s.aiWebSearch)
+  const setAiWebSearch = useUiStore(s => s.setAiWebSearch)
+  const [effortSupported, setEffortSupported] = useState(false)
+  const [webSearchSupported, setWebSearchSupported] = useState(false)
+
+  // 2026-04-28 · 接入召唤思想家(对齐 AnnotationPanel)
+  const [personaList, setPersonaList] = useState<PersonaListEntry[]>([])
+  const [personaPopoverOpen, setPersonaPopoverOpen] = useState(false)
+  const summonPopoverRef = useRef<HTMLDivElement | null>(null)
+
+  // BUG-FIX MEMO#1 · mountedRef + fresh-library read after await, so:
+  //   (a) setInput/setLoading don't fire after unmount
+  //   (b) saveLibrary uses the latest library (catches edits to other memos
+  //       that happened while the AI was thinking — previously the closure's
+  //       stale `library` would overwrite them on save).
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  // Subscribe configured providers + persona list(走共享 cache,与其它面板复用)
+  useEffect(() => {
+    let cancelled = false
+    fetchAiConfig().then(r => { if (!cancelled) setConfiguredProviders(r) })
+    const unsubAi = subscribeAiConfig(latest => { if (!cancelled) setConfiguredProviders(latest) })
+    fetchPersonaList().then(r => { if (!cancelled) setPersonaList(r) })
+    const unsubPersona = subscribePersonaList(latest => { if (!cancelled) setPersonaList(latest) })
+    return () => { cancelled = true; unsubAi(); unsubPersona() }
+  }, [])
+
+  // 2026-04-28 · 检测当前 model 是否支持 effort / web search(同 AgentPanel 模式)
+  useEffect(() => {
+    let cancelled = false
+    const [pid, mid] = aiModel.includes(':') ? aiModel.split(':', 2) : [aiModel, '']
+    if (!pid || !mid) { setEffortSupported(false); return }
+    window.electronAPI.aiModelSupportsEffort?.(pid, mid).then(ok => {
+      if (!cancelled) setEffortSupported(!!ok)
+    }).catch(() => { if (!cancelled) setEffortSupported(false) })
+    return () => { cancelled = true }
+  }, [aiModel])
+  useEffect(() => {
+    let cancelled = false
+    const [pid] = aiModel.includes(':') ? aiModel.split(':', 2) : [aiModel]
+    if (!pid) { setWebSearchSupported(false); return }
+    window.electronAPI.aiProviderSupportsWebSearch?.(pid).then(ok => {
+      if (!cancelled) setWebSearchSupported(!!ok)
+    }).catch(() => { if (!cancelled) setWebSearchSupported(false) })
+    return () => { cancelled = true }
+  }, [aiModel])
+
+  // Esc / 点击外部关闭 popover
+  useEffect(() => {
+    if (!personaPopoverOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (summonPopoverRef.current?.contains(e.target as Node)) return
+      setPersonaPopoverOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPersonaPopoverOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [personaPopoverOpen])
+
+  // Auto-dismiss error toast
+  useEffect(() => {
+    if (!errorToast) return
+    const t = setTimeout(() => setErrorToast(null), 5000)
+    return () => clearTimeout(t)
+  }, [errorToast])
+
+  // Build memo + cited blocks context shared by 提问 / 召唤
+  const buildContext = useCallback((): string => {
+    const libAtStart = useLibraryStore.getState().library
+    const memo = (libAtStart?.memos || []).find(m => m.id === memoId)
+    const memoContent = memo?.content || ''
+    const blocksContext = blocks.map(b =>
+      `[${b.entryTitle}, ${b.blockAuthor === 'ai' ? 'AI' : '用户'}] 原文「${b.selectedText.substring(0, 100)}」→ ${b.blockContent}`
+    ).join('\n')
+    return `用户的笔记内容：\n${memoContent.substring(0, 1500)}\n\n引用的信息块：\n${blocksContext}`
+  }, [memoId, blocks])
+
+  // Save AI response into memo.aiHistory(re-read latest library to avoid 覆写)
+  const appendAiHistoryEntry = useCallback(async (entry: HistoryEntry) => {
+    const currentLib = useLibraryStore.getState().library
+    if (!currentLib) return
+    const m = (currentLib.memos || []).find(m => m.id === memoId)
+    if (!m) return
+    m.aiHistory.push(entry)
+    m.updatedAt = new Date().toISOString()
+    await window.electronAPI.saveLibrary(currentLib)
+    if (!mountedRef.current) return
+    useLibraryStore.setState({ library: { ...currentLib } })
+  }, [memoId])
 
   const handleAsk = useCallback(async () => {
     if (!input.trim() || loading) return
     setLoading(true)
+    const userQuery = input.trim()
+    const context = buildContext()
 
-    // Get current memo content
-    const memo = (library?.memos || []).find(m => m.id === memoId)
-    const memoContent = memo?.content || ''
+    // 2026-04-28 · 走 aiChatStream(用户选定的 model),取代写死的 glmAsk
+    const streamId = uuid()
+    let fullText = ''
+    const cleanup = window.electronAPI.onAiStreamChunk((sid: string, chunk: string) => {
+      if (sid === streamId) fullText += chunk
+    })
+    let errMsg: string | null = null
+    try {
+      const messages: Array<{ role: string; content: string }> = [
+        { role: 'system', content: '你是学术文献阅读助手。请基于用户提供的笔记内容和引用信息块,简洁地回答问题。' },
+      ]
+      // 历史 ai_qa 转 messages
+      for (const h of aiHistory) {
+        if (h.type === 'ai_qa') {
+          if (h.userQuery) messages.push({ role: 'user', content: h.userQuery })
+          messages.push({ role: 'assistant', content: h.content })
+        }
+      }
+      messages.push({ role: 'user', content: `${context}\n\n问题: ${userQuery}` })
 
-    // Build context from cited blocks
-    const blocksContext = blocks.map(b =>
-      `[${b.entryTitle}, ${b.blockAuthor === 'ai' ? 'AI' : '用户'}] 原文「${b.selectedText.substring(0, 100)}」→ ${b.blockContent}`
-    ).join('\n')
+      const res = await window.electronAPI.aiChatStream(streamId, aiModel, messages, { effort: aiReasoningEffort, webSearch: aiWebSearch })
+      if (!res.success) errMsg = res.error || 'AI 调用失败'
+      else if ((res as any).text) fullText = (res as any).text
+    } catch (e: any) {
+      errMsg = e?.message || String(e)
+    } finally {
+      cleanup()
+    }
 
-    const result = await window.electronAPI.glmAsk(
-      input.trim(),
-      `用户的笔记内容：\n${memoContent.substring(0, 1500)}\n\n引用的信息块：\n${blocksContext}`,
-      aiHistory
-    )
+    if (!mountedRef.current) return
 
     const entry: HistoryEntry = {
       id: uuid(),
       type: 'ai_qa',
-      content: result.success ? result.text! : `错误：${result.error}`,
-      userQuery: input.trim(),
+      content: errMsg ? `错误：${errMsg}` : fullText.trim(),
+      userQuery,
       author: 'ai',
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
     }
-
-    // Save to memo's aiHistory
-    if (library) {
-      const m = (library.memos || []).find(m => m.id === memoId)
-      if (m) {
-        m.aiHistory.push(entry)
-        m.updatedAt = new Date().toISOString()
-        await window.electronAPI.saveLibrary(library)
-        useLibraryStore.setState({ library: { ...library } })
-      }
+    await appendAiHistoryEntry(entry)
+    if (errMsg) {
+      const h = humanizeAiError(errMsg)
+      if (!h.silent) setErrorToast(h.hint ? `${h.message}（${h.hint}）` : h.message)
     }
-
+    if (!mountedRef.current) return
     setInput('')
     setLoading(false)
-  }, [input, loading, memoId, blocks, aiHistory, library])
+  }, [input, loading, aiModel, aiReasoningEffort, aiWebSearch, aiHistory, buildContext, appendAiHistoryEntry])
+
+  // 召唤一位思想家来评论这条 memo
+  const handleSummon = useCallback(async (personaId: string, personaName: string) => {
+    if (loading) return
+    setPersonaPopoverOpen(false)
+    setLoading(true)
+    const context = buildContext()
+    const userPrompt = input.trim()
+      ? `请以你的视角审视下面这段笔记,并回应用户的追问。\n\n${context}\n\n【用户追问】${input.trim()}`
+      : `请以你的视角审视下面这段笔记——你会注意什么、挑剔什么、补充什么?\n\n${context}`
+    const streamId = uuid()
+    let fullText = ''
+    const cleanup = window.electronAPI.onAiStreamChunk((sid: string, chunk: string) => {
+      if (sid === streamId) fullText += chunk
+    })
+    let errMsg: string | null = null
+    try {
+      const sysRes = await window.electronAPI.personaGetSystemPrompt?.(personaId, userPrompt)
+      if (!sysRes?.success || !sysRes.systemPrompt) throw new Error(sysRes?.error || '无法加载 skill')
+      const res = await window.electronAPI.aiChatStream(streamId, aiModel, [
+        { role: 'system', content: sysRes.systemPrompt },
+        { role: 'user', content: userPrompt },
+      ], { effort: aiReasoningEffort, webSearch: aiWebSearch })
+      if (!res.success) errMsg = res.error || 'AI 调用失败'
+      else if ((res as any).text) fullText = (res as any).text
+    } catch (e: any) {
+      errMsg = e?.message || String(e)
+    } finally {
+      cleanup()
+    }
+
+    if (!mountedRef.current) return
+
+    const entry: HistoryEntry = {
+      id: uuid(),
+      type: 'ai_qa',
+      content: errMsg ? `错误：${errMsg}` : `**${personaName}**:\n\n${fullText.trim()}`,
+      userQuery: input.trim() ? `召唤 ${personaName}: ${input.trim()}` : `召唤 ${personaName}`,
+      author: 'ai',
+      createdAt: new Date().toISOString(),
+    }
+    await appendAiHistoryEntry(entry)
+    if (errMsg) {
+      const h = humanizeAiError(errMsg)
+      if (!h.silent) setErrorToast(h.hint ? `${h.message}（${h.hint}）` : h.message)
+    }
+    if (!mountedRef.current) return
+    setInput('')
+    setLoading(false)
+  }, [loading, input, aiModel, aiReasoningEffort, aiWebSearch, buildContext, appendAiHistoryEntry])
 
   return (
-    <div style={{ borderTop: '1px solid var(--border-light)', padding: '10px 0 0' }}>
+    <div style={{ borderTop: '1px solid var(--border-light)', padding: '10px 0 0', position: 'relative' }}>
       {aiHistory.length > 0 && (
         <div style={{ maxHeight: 200, overflow: 'auto', marginBottom: 8 }}>
           {aiHistory.map(entry => (
@@ -770,7 +949,7 @@ function MemoAiSection({ memoId, blocks, aiHistory }: {
           ))}
         </div>
       )}
-      <div style={{ display: 'flex', gap: 6 }}>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
         <input
           type="text"
           placeholder="让 AI 帮你审视这段思考..."
@@ -783,18 +962,156 @@ function MemoAiSection({ memoId, blocks, aiHistory }: {
             background: 'var(--bg-warm)', color: 'var(--text)'
           }}
         />
+        {/* 模型选择(对齐 AnnotationPanel) */}
+        <select
+          value={aiModel}
+          onChange={e => setAiModel(e.target.value)}
+          title="AI 模型"
+          style={{
+            fontSize: 10, padding: '4px 4px', border: '1px solid var(--border)',
+            borderRadius: 4, background: 'var(--bg-warm)', color: 'var(--text-secondary)',
+            outline: 'none', cursor: 'pointer', maxWidth: 100,
+          }}
+        >
+          {configuredProviders.length > 0 ? (
+            configuredProviders.map(p => (
+              <optgroup key={p.id} label={p.name}>
+                {p.models.map(m => (
+                  <option key={`${p.id}:${m.id}`} value={`${p.id}:${m.id}`}>{m.name}</option>
+                ))}
+              </optgroup>
+            ))
+          ) : (
+            <option value="glm:glm-4-flash">请先配置 Key</option>
+          )}
+        </select>
+        {/* 思考强度 effort:仅当 model 支持 reasoning 时显示 */}
+        {effortSupported && (
+          <select
+            value={aiReasoningEffort}
+            onChange={e => setAiReasoningEffort(e.target.value as 'low' | 'medium' | 'high')}
+            title="思考强度（仅支持 reasoning 的模型生效）"
+            style={{
+              flexShrink: 0, fontSize: 10, padding: '4px 4px',
+              border: '1px solid var(--border)', borderRadius: 4,
+              background: 'var(--bg-warm)', color: 'var(--text-secondary)',
+              outline: 'none', cursor: 'pointer',
+            }}
+          >
+            <option value="low">思考·低</option>
+            <option value="medium">思考·中</option>
+            <option value="high">思考·高</option>
+          </select>
+        )}
+        {/* 联网搜索:provider 不支持时灰掉 + tooltip */}
+        {(() => {
+          const effective = aiWebSearch && webSearchSupported
+          const tip = !webSearchSupported
+            ? '当前 provider 不支持联网搜索（仅 Ollama / Claude CLI 不支持）'
+            : (effective
+                ? '已开启联网搜索：AI 提问 / 召唤前可查时事 / 实时信息（关闭可省 quota）'
+                : '点击开启联网搜索')
+          return (
+            <button
+              type="button"
+              disabled={!webSearchSupported}
+              onClick={() => { if (webSearchSupported) setAiWebSearch(!aiWebSearch) }}
+              title={tip}
+              style={{
+                flexShrink: 0, padding: '4px 7px', fontSize: 10,
+                border: `1px solid ${effective ? 'var(--accent)' : 'var(--border)'}`,
+                borderRadius: 4,
+                background: effective ? 'var(--accent)' : 'var(--bg-warm)',
+                color: effective ? '#fff' : (webSearchSupported ? 'var(--text-secondary)' : 'var(--text-muted)'),
+                cursor: webSearchSupported ? 'pointer' : 'not-allowed',
+                opacity: webSearchSupported ? 1 : 0.5,
+                transition: 'background 180ms cubic-bezier(0.4, 0, 0.2, 1), color 180ms, border-color 180ms',
+              }}
+            >🌐</button>
+          )
+        })()}
         <button className="btn btn-sm btn-primary" onClick={handleAsk} disabled={loading || !input.trim()}>
           {loading ? '...' : '提问'}
         </button>
+        {/* 召唤思想家 */}
+        <div ref={summonPopoverRef} style={{ position: 'relative', display: 'inline-flex' }}>
+          <button
+            className="btn btn-sm"
+            disabled={loading}
+            onClick={() => setPersonaPopoverOpen(v => !v)}
+            title={personaList.length === 0 ? '还没导入思想家,去 Agent 面板召唤 tab 导一位' : '召唤一位思想家以其视角审视这条笔记'}
+            style={{
+              fontSize: 12, padding: '6px 10px', whiteSpace: 'nowrap',
+              color: personaList.length === 0 ? 'var(--text-muted)' : 'var(--accent-hover)',
+              opacity: personaList.length === 0 ? 0.7 : 1,
+            }}
+          >召唤</button>
+          {personaPopoverOpen && (
+            <div style={{
+              position: 'absolute', bottom: '100%', right: 0, marginBottom: 6,
+              minWidth: 180, maxHeight: 240, overflow: 'auto',
+              background: 'var(--bg)', border: '1px solid var(--border)',
+              borderRadius: 6, boxShadow: '0 6px 22px rgba(60,40,20,0.15)',
+              padding: '4px 0', zIndex: 100,
+              animation: 'sj-pop-in 0.16s cubic-bezier(.2,.9,.3,1.2)',
+            }}>
+              {personaList.length > 0 ? (
+                <>
+                  <div style={{ fontSize: 10, letterSpacing: '1.6px', color: 'var(--text-secondary)', padding: '8px 12px 4px', fontWeight: 500 }}>选一位审视这条笔记</div>
+                  {personaList.map(p => (
+                    <div
+                      key={p.id}
+                      onClick={() => handleSummon(p.id, p.canonicalName || p.name)}
+                      style={{
+                        padding: '7px 14px', fontSize: 12.5, cursor: 'pointer',
+                        color: 'var(--text)',
+                        transition: 'background 0.12s',
+                      }}
+                      onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                    >{p.canonicalName || p.name}</div>
+                  ))}
+                </>
+              ) : (
+                <div style={{ padding: '12px 14px', fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                  还没有导入思想家——
+                  <br />去 <span style={{ color: 'var(--accent-hover)' }}>Agent · 召唤社区</span> 挑一位
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
+      {errorToast && (
+        <div
+          onClick={() => setErrorToast(null)}
+          style={{
+            position: 'fixed', left: '50%', bottom: 32, zIndex: 9999,
+            transform: 'translateX(-50%)',
+            padding: '10px 18px', borderRadius: 6,
+            background: 'rgba(181,90,79,0.96)', color: '#fff',
+            fontSize: 12.5, lineHeight: 1.5, maxWidth: 420,
+            boxShadow: '0 6px 22px rgba(60,40,20,0.28)',
+            cursor: 'pointer',
+          }}
+          title="点击关闭"
+        >{errorToast}</div>
+      )}
     </div>
   )
 }
 
 // ===== Main Memo Editor =====
 export default function MemoEditor() {
-  const { library, updateMemo, deleteMemo, removeBlockFromMemo } = useLibraryStore()
-  const { activeMemoId, setActiveMemo } = useUiStore()
+  // Batch 43: 替换 window.confirm
+  const { ask: askConfirm, dialog: confirmDialog } = useConfirmDialog()
+  // 2026-04-25 PERF · 选择性订阅
+  const library = useLibraryStore(s => s.library)
+  const updateMemo = useLibraryStore(s => s.updateMemo)
+  const deleteMemo = useLibraryStore(s => s.deleteMemo)
+  const removeBlockFromMemo = useLibraryStore(s => s.removeBlockFromMemo)
+  const activeMemoId = useUiStore(s => s.activeMemoId)
+  const setActiveMemo = useUiStore(s => s.setActiveMemo)
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState('')
   const [showPreview, setShowPreview] = useState(false)
@@ -833,6 +1150,10 @@ export default function MemoEditor() {
   }, [])
 
   // Auto-save with debounce
+  // BUG-FIX MEMO#2 · `library` was closure-captured — a concurrent add-memo
+  // from another code path (AI auto-memo, apprentice write-observation) between
+  // renders would be reverted by the `setState({ library: {...library} })`
+  // shallow-clone. Use getState() so we always spread the latest library.
   const handleContentChange = useCallback((newContent: string) => {
     if (!activeMemo) return
     // If a save is pending for a DIFFERENT memo, flush it right away — otherwise the
@@ -844,7 +1165,8 @@ export default function MemoEditor() {
     }
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     activeMemo.content = newContent
-    useLibraryStore.setState({ library: library ? { ...library } : null })
+    const latestLib = useLibraryStore.getState().library
+    useLibraryStore.setState({ library: latestLib ? { ...latestLib } : null })
     pendingSaveRef.current = { memoId: activeMemo.id, content: newContent }
     saveTimerRef.current = setTimeout(() => {
       const p = pendingSaveRef.current
@@ -854,7 +1176,7 @@ export default function MemoEditor() {
       }
       saveTimerRef.current = null
     }, 800)
-  }, [activeMemo, library])
+  }, [activeMemo])
 
   // Memo switch: flush any pending write for the previous memo *before* we show the
   // new one, so we don't carry a stale pending save into a different editing session.
@@ -878,13 +1200,20 @@ export default function MemoEditor() {
 
   const handleDelete = useCallback(() => {
     if (!activeMemo) return
-    // Guard against accidental deletion — a note can represent hours of thought
-    // and there's no trash/undo for memos. Include the title so the user can
-    // sanity-check they're deleting the one they think they are.
-    if (!window.confirm(`删除笔记「${activeMemo.title || '无标题'}」？\n\n此操作无法撤销（笔记不进回收站）。`)) return
-    deleteMemo(activeMemo.id)
-    setActiveMemo(null)
-  }, [activeMemo, deleteMemo, setActiveMemo])
+    // Batch 43: window.confirm() → 暖金 ConfirmDialog
+    const title = activeMemo.title || '无标题'
+    const memoId = activeMemo.id
+    askConfirm({
+      title: '删除笔记',
+      message: `删除笔记「${title}」？\n\n此操作无法撤销（笔记不进回收站）。`,
+      confirmLabel: '删除',
+      danger: true,
+      onConfirm: () => {
+        deleteMemo(memoId)
+        setActiveMemo(null)
+      },
+    })
+  }, [activeMemo, deleteMemo, setActiveMemo, askConfirm])
 
   const handleJumpToBlock = useCallback(async (block: BlockRef) => {
     setActiveMemo(null)
@@ -1145,6 +1474,8 @@ export default function MemoEditor() {
           </div>
         )}
       </div>
+      {/* Batch 43: ConfirmDialog 替代 window.confirm */}
+      {confirmDialog}
     </div>
   )
 }
