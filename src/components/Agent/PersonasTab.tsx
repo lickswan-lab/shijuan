@@ -427,11 +427,34 @@ function DetailView({
           {skill?.frontmatter?.description && (
             <div style={{
               borderLeft: `2px solid ${C.accent}`,
-              padding: '4px 0 4px 22px', marginBottom: 44,
+              padding: '4px 0 4px 22px', marginBottom: 28,
               fontSize: 15, color: C.textMuted, lineHeight: 1.85,
               fontFamily: SERIF, fontStyle: 'italic', letterSpacing: '0.3px',
             }}>{skill.frontmatter.description}</div>
           )}
+
+          {/* 2026-04-28 · 作者声明 — 期望管理,frame "AI 模拟"非真人。 */}
+          <div style={{
+            background: C.bgWarm,
+            border: `1px solid ${C.border}`,
+            borderRadius: 4,
+            padding: '14px 18px',
+            marginBottom: 44,
+            fontSize: 12, color: C.textMuted, lineHeight: 1.75,
+          }}>
+            <div style={{
+              fontSize: 10, letterSpacing: '1.6px', color: C.textFaint,
+              textTransform: 'uppercase', marginBottom: 6, fontWeight: 500,
+            }}>关于本召唤</div>
+            <div>
+              我们尽力还原 <strong style={{ color: C.text }}>{persona.canonicalName || persona.name}</strong> 的思考方式 ——
+              基于其著作 / 心智模型 / 时代背景蒸馏。
+              但任何 AI 模拟都有局限。建议把它当
+              <strong style={{ color: C.accent }}>思考伙伴</strong>
+              而不是<strong style={{ color: C.accent }}>权威发言人</strong>。
+              重要论点请回到原文核对。
+            </div>
+          </div>
 
           {mentalModels.length > 0 && (
             <section style={{ marginBottom: 44 }}>

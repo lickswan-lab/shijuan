@@ -1251,6 +1251,24 @@ export default function AgentPanel() {
         </button>
       </div>
 
+      {/* 2026-04-28 · 期望管理 banner — 让用户清楚 persona 是 AI 模拟,
+          不是被召唤的人本人。点击 ⓘ 可看更详细的来源 / 局限说明。 */}
+      <div style={{
+        padding: '5px 12px',
+        background: 'var(--bg-warm)',
+        borderBottom: '1px solid var(--border-light)',
+        fontSize: 10.5,
+        color: 'var(--text-muted)',
+        letterSpacing: '0.2px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        flexShrink: 0,
+      }} title="召唤的人物是基于其著作和资料蒸馏的思维模型,非本人。建议把它当思考伙伴而非权威发言人。">
+        <span style={{ opacity: 0.7 }}>ⓘ</span>
+        <span>召唤人物为基于著作蒸馏的思维模型,非本人</span>
+      </div>
+
       {/* Tab bar — 2026-04-24 合并方案 A：移除"观察"tab（功能迁到对话输入栏的 ✍ 按钮）。
           保留"对话 / 召唤"两个 tab。"观察" view body 仍能通过 `tab === 'apprentice'`
           渲染，由对话工具栏的 ✍ 和 📖 按钮触发 setTab('apprentice') 进入。 */}
