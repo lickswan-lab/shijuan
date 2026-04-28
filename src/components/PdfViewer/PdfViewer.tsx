@@ -2197,11 +2197,9 @@ export default function PdfViewer() {
   // Save scroll position before entering immersive mode to restore on exit
   const savedScrollPos = useRef<number>(0)
 
-  // 回顾 generation state — without this, rapid clicks fan out parallel AI
-  // streams and create duplicate memos with no way to stop. The button now
-  // doubles as a stop control while a stream is in flight.
-  const [reviewing, setReviewing] = useState(false)
-  const reviewStreamIdRef = useRef<string | null>(null)
+  // 2026-04-28 CLEAN · "回顾"功能彻底删除(用户决定下线)。
+  //   原有 `reviewing` state + `reviewStreamIdRef` 已移除;按钮 JSX 也一并删。
+  //   `closingPrompt.ts` 留着不删,以防未来想恢复或港成 skill。
 
   // Track the "dominant visible page" inside the PDF scroll container so the
   // annotation panel's page-grouped list can auto-expand the right page.
@@ -3601,104 +3599,8 @@ export default function PdfViewer() {
           )
         )}
 
-        {/* 回顾 — AI-generated closing reflection memo from this book's annotations.
-            Fifth AI-companion surface alongside instant feedback / daily log /
-            weekly apprentice / reread greeting. Time scale: one book.
-            Earlier names tried: "反刍" (too literal) → "合上书" (too long) → "回顾". */}
-        {currentPdfMeta && currentPdfMeta.annotations.length >= 2 && (
-          <button
-            className="btn btn-sm"
-            style={{
-              marginLeft: 8, fontSize: 11,
-              // Visual feedback while generating: accent border + soft fill so it
-              // reads as "active task" rather than just a normal button. Also
-              // doubles as the affordance hint that clicking now means "stop".
-              ...(reviewing ? {
-                background: 'var(--accent-soft)',
-                borderColor: 'var(--accent)',
-                color: 'var(--accent)',
-              } : {}),
-            }}
-            title={reviewing
-              ? '正在生成回顾 — 点击中止'
-              : '读完这本之后，让同伴帮你回看这次留下了什么'}
-            onClick={async () => {
-              // STOP path: a stream is in flight — abort it instead of starting
-              // another one. Without this, rapid clicks would fan out parallel
-              // streams and silently create duplicate memos.
-              if (reviewing) {
-                const sid = reviewStreamIdRef.current
-                if (sid) {
-                  window.electronAPI.aiAbortStream?.(sid).catch(() => {})
-                  reviewStreamIdRef.current = null
-                }
-                setReviewing(false)
-                return
-              }
-
-              const annotations = currentPdfMeta.annotations
-              if (annotations.length < 2) return
-              const title = currentEntry?.title || '未知文献'
-
-              // Map annotations into the shape closingPrompt expects
-              const annData = annotations
-                .slice()
-                .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
-                .map(a => ({
-                  selectedText: a.anchor?.selectedText || '',
-                  pageNumber: a.anchor?.pageNumber || 0,
-                  createdAt: a.createdAt || '',
-                  userNotes: (a.historyChain || [])
-                    .filter(h => h.author === 'user')
-                    .map(h => h.content || ''),
-                }))
-
-              const { CLOSING_SYSTEM_PROMPT, buildClosingUserMessage } = await import('./closingPrompt')
-              const userMsg = buildClosingUserMessage({ entryTitle: title, annotations: annData })
-
-              const model = useUiStore.getState().selectedAiModel
-              const streamId = uuid()
-              reviewStreamIdRef.current = streamId
-              setReviewing(true)
-              let fullText = ''
-              const cleanup = window.electronAPI.onAiStreamChunk((sid: string, chunk: string) => { if (sid === streamId) fullText += chunk })
-
-              try {
-                await window.electronAPI.aiChatStream(streamId, model, [
-                  { role: 'system', content: CLOSING_SYSTEM_PROMPT },
-                  { role: 'user', content: userMsg },
-                ])
-              } catch { /* abort or network — fullText may be partial; just bail */ }
-              finally {
-                cleanup()
-                reviewStreamIdRef.current = null
-                setReviewing(false)
-              }
-
-              if (fullText.trim()) {
-                // Title is plain and editable — no "反刍：" prefix forced upon user.
-                // Content is the AI's prose directly — no "# 读后反刍" shell heading
-                // since the new prompt already produces natural paragraphs.
-                const { createMemo } = useLibraryStore.getState()
-                const memo = await createMemo()
-                if (memo) {
-                  await useLibraryStore.getState().updateMemo(memo.id, {
-                    content: fullText.trim(),
-                    title: `回顾《${title}》`,
-                  })
-                  useUiStore.getState().setActiveMemo(memo.id)
-                }
-              }
-            }}
-          >
-            {reviewing ? (
-              <>
-                <span className="loading-spinner" style={{ width: 10, height: 10, marginRight: 6, verticalAlign: -1 }} />
-                生成中 · 停止
-              </>
-            ) : '回顾'}
-          </button>
-        )}
+        {/* 2026-04-28 CLEAN · "回顾"按钮删除(用户决定下线)。state / ref 同步已删。
+            closingPrompt.ts 留着不删,以防未来恢复或港成 skill。 */}
 
         {/* Immersive mode toggle removed — per user feedback it wasn't useful.
             The ImmersiveOcrReader / ImmersiveAnnotationBox code is kept for now as
