@@ -100,11 +100,14 @@ html, body, #root {
 .app-body { display: flex; flex: 1; overflow: hidden; }
 
 /* ========== TOP BAR ========== */
+/* 2026-04-28 · top-bar 高度对齐 Windows titleBarOverlay (electron/main.ts 设的
+   是 44),原本 36 比窗口控件矮 8px,顶部边缘有视觉错位。提到 44 后两者顶/底
+   完全平齐,最小化/最大化/关闭按钮的纵向中线和图标按钮一致。 */
 .top-bar {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 36px;
+  height: 44px;
   padding: 0 16px;
   padding-right: 140px;  /* space for window controls overlay */
   background: var(--bg-sidebar);
