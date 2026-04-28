@@ -2825,13 +2825,7 @@ export default function PdfViewer() {
         )}
         {/* Page jump (PDF view + OCR view with page markers).
             totalPages handles both: PDF→numPages, OCR→count of "=== 第 N 页 ===" markers. */}
-        {totalPages > 0 && (
-          <span style={{
-            fontSize: 10, color: 'var(--text-muted)',
-            marginLeft: 10, flexShrink: 0, whiteSpace: 'nowrap',
-            letterSpacing: 0.5,
-          }}>跳转</span>
-        )}
+        {/* 2026-04-28 · 删独立的"跳转"标签,保留 placeholder 1-N + → 按钮即可 */}
         {totalPages > 0 && (
           // Pill-shaped page jump: input + arrow button in one container, preceded
           // by a "跳转" text label (rendered as a sibling span above so it sits to
