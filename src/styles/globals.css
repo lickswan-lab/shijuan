@@ -290,15 +290,43 @@ html, body, #root {
 :root.dark-mode .history-entry.ai-qa { background: #302c1a; border-left-color: var(--warning); }
 :root.dark-mode .history-entry.ai-feedback { background: #252c28; border-left-color: #9DB5B2; }
 
+/* 2026-04-28 · header 在窄面板里布局修复:
+   - 允许 wrap(原来固定 flex 一行,挤窄就模型名/日期/按钮三处都换行)
+   - 模型名 + 状态徽章一组,允许 ellipsis,占主轴剩余空间
+   - 日期 + 操作按钮一组,flex-shrink:0,绝对不被挤压
+   - 按钮 nowrap,确保'引用 编辑 删除'横排不竖排 */
 .history-entry-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
   margin-bottom: 6px;
   font-size: 11px;
   color: var(--text-muted);
 }
-.history-entry-actions { display: flex; gap: 4px; }
+.history-entry-header > span:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-entry-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  align-items: center;
+}
+.history-entry-actions > span {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.history-entry-actions .btn {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
 
 /* Chat input */
 /* Markdown in annotation entries */

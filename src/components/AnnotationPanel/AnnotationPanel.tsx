@@ -356,8 +356,16 @@ const HistoryEntryItem = React.memo(function HistoryEntryItem({
           )}
         </span>
         <div className="history-entry-actions">
-          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            {new Date(entry.createdAt).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+          {/* 2026-04-28 · 日期紧凑化 '4月28日 15:33' → '04/28 15:33',窄面板防换行 */}
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap', flexShrink: 0 }}>
+            {(() => {
+              const d = new Date(entry.createdAt)
+              const m = String(d.getMonth() + 1).padStart(2, '0')
+              const day = String(d.getDate()).padStart(2, '0')
+              const h = String(d.getHours()).padStart(2, '0')
+              const min = String(d.getMinutes()).padStart(2, '0')
+              return `${m}/${day} ${h}:${min}`
+            })()}
           </span>
           {!editing && !isRunning && (
             <>
