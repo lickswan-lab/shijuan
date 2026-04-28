@@ -2347,18 +2347,10 @@ export default function PdfViewer() {
   const [translateOpen, setTranslateOpen] = useState(false)
   const [translateInitialMode, setTranslateInitialMode] = useState<TranslateModalProps['initialMode']>('selection')
   const [translateSelectedText, setTranslateSelectedText] = useState<string>('')
-  // If the user switches entry (or closes the viewer) mid-generation, abort
-  // the in-flight stream so we don't quietly keep burning tokens in the
-  // background and dump a memo onto the wrong entry.
-  useEffect(() => {
-    return () => {
-      const sid = reviewStreamIdRef.current
-      if (sid) {
-        window.electronAPI.aiAbortStream?.(sid).catch(() => {})
-        reviewStreamIdRef.current = null
-      }
-    }
-  }, [currentEntry?.id])
+  // 2026-04-28 CLEAN · 这个 useEffect 原本是给"回顾"按钮用的:切文献 / 关 viewer 时
+  //   abort 在飞的 review stream。现在按钮已删,reviewStreamIdRef 也已删,这个 effect
+  //   就是死代码,跟着一起清掉。
+  //   (上一次 commit 6aac264d 漏了这一段,导致 reviewStreamIdRef is not defined 报错。)
 
   // Auto-switch OCR background when dark mode toggles
   useEffect(() => {
