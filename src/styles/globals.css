@@ -165,6 +165,12 @@ html, body, #root {
   border-radius: var(--radius-sm);
   margin: 2px 0;
   transition: background 0.15s, color 0.15s;
+  /* 2026-04-28 PERF · 文献多时(>100)整个 sidebar 渲染 paint 慢。
+     content-visibility: auto 让浏览器对 viewport 外的 entry 跳过 paint/layout
+     (Chrome/Edge 原生支持),contain-intrinsic-size 给个占位高度防止滚动条跳动。
+     对长列表 sidebar 滚动 + 初次渲染都有显著加速。 */
+  content-visibility: auto;
+  contain-intrinsic-size: 0 30px;
 }
 .tree-item:hover { background: var(--bg-hover); }
 .tree-item.active { background: var(--accent-soft); color: var(--accent-hover); font-weight: 500; }
