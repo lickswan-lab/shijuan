@@ -59,6 +59,12 @@ interface UiState {
 
   // AI model
   selectedAiModel: string
+  // Batch 43 · 思考强度（reasoning effort），仅对支持 thinking 的 model 生效
+  // 'low' | 'medium' | 'high'，前端 UI 仅当当前 model 支持时显示控件
+  aiReasoningEffort: 'low' | 'medium' | 'high'
+  // Batch 43 · 联网搜索开关（让 persona 辩论前能先查 2026 时事）
+  // 持久化到 localStorage，所有 AI 调用 site 共用
+  aiWebSearch: boolean
 
   // Annotation color (for next annotation to be created)
   annotationColor: string
@@ -67,10 +73,9 @@ interface UiState {
   rightPanel: 'annotation' | 'agent'
   hermesHasInsight: boolean  // notification badge
 
-  // Immersive reading
-  immersiveMode: boolean
+  // 2026-04-28 CLEAN · 沉浸式阅读模式已下线(用户反馈无用),immersiveMode + dualPageMode
+  //   两个 state + 配套 setter 全部移除。darkMode 保留(独立功能)。
   darkMode: boolean
-  dualPageMode: boolean  // true = dual-page spread in immersive; false = single-page + side annotation
 
   // Currently visible PDF page — tracked by the PdfViewer IntersectionObserver.
   // AnnotationPanel reads this to auto-expand the "current page" group in
@@ -120,12 +125,12 @@ interface UiState {
   setActiveLecture: (id: string | null) => void
   setIsRecording: (recording: boolean) => void
   setSelectedAiModel: (model: string) => void
+  setAiReasoningEffort: (effort: 'low' | 'medium' | 'high') => void
+  setAiWebSearch: (on: boolean) => void
   setAnnotationColor: (color: string) => void
   setRightPanel: (panel: 'annotation' | 'agent') => void
   setHermesHasInsight: (has: boolean) => void
-  setImmersiveMode: (on: boolean) => void
   toggleDarkMode: () => void
-  setDualPageMode: (on: boolean) => void
   setCurrentVisiblePage: (page: number) => void
   setCurrentDocTocLabels: (labels: string[] | null) => void
   setShowQuickOpen: (show: boolean) => void
@@ -155,14 +160,32 @@ export const useUiStore = create<UiState>((set, get) => ({
   currentDocText: null,
   activeLectureId: null,
   isRecording: false,
-  aiContextWindow: (() => { try { const v = localStorage.getItem('sj-aiContextWindow'); return v ? Number(v) : 2000 } catch { return 2000 } })(),
+  // BUG-FIX R5#3 · NaN 防御：如果 localStorage 值被手动改坏（比如存了非数字字符串）
+  // 原代码 `Number(v)` 会得 NaN，下游比较 `ctx > 1000` 全 false，AI 请求用不上上下文。
+  aiContextWindow: (() => {
+    try {
+      const v = localStorage.getItem('sj-aiContextWindow')
+      const n = v ? Number(v) : 2000
+      return Number.isFinite(n) && n > 0 ? n : 2000
+    } catch { return 2000 }
+  })(),
   selectedAiModel: 'glm:glm-4-flash',
+  // Batch 43 · effort 持久化到 localStorage（每次启动恢复用户上次的选择）
+  aiReasoningEffort: (() => {
+    try {
+      const v = localStorage.getItem('sj-aiReasoningEffort')
+      if (v === 'low' || v === 'medium' || v === 'high') return v
+      return 'medium'
+    } catch { return 'medium' }
+  })(),
+  // Batch 43 · 联网开关持久化（默认关 —— 大多数对话不需要时事，开了浪费 quota）
+  aiWebSearch: (() => {
+    try { return localStorage.getItem('sj-aiWebSearch') === 'true' } catch { return false }
+  })(),
   annotationColor: 'yellow',
   rightPanel: 'annotation',
   hermesHasInsight: false,
-  immersiveMode: false,
   darkMode: (() => { try { return localStorage.getItem('sj-darkMode') === 'true' } catch { return false } })(),
-  dualPageMode: (() => { try { const v = localStorage.getItem('sj-dualPageMode'); return v !== null ? v === 'true' : true } catch { return true } })(),
   currentVisiblePage: 1,
   currentDocTocLabels: null,
   showQuickOpen: false,
@@ -196,6 +219,14 @@ export const useUiStore = create<UiState>((set, get) => ({
   setActiveLecture: (id) => set({ activeLectureId: id, activeMemoId: null, activeReadingLogDate: null }),
   setIsRecording: (recording) => set({ isRecording: recording }),
   setSelectedAiModel: (model) => set({ selectedAiModel: model }),
+  setAiReasoningEffort: (effort) => {
+    try { localStorage.setItem('sj-aiReasoningEffort', effort) } catch { /* ignore */ }
+    set({ aiReasoningEffort: effort })
+  },
+  setAiWebSearch: (on) => {
+    try { localStorage.setItem('sj-aiWebSearch', String(on)) } catch { /* ignore */ }
+    set({ aiWebSearch: on })
+  },
   toggleDarkMode: () => set(s => {
     const next = !s.darkMode
     document.documentElement.classList.toggle('dark-mode', next)
@@ -205,23 +236,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     return { darkMode: next }
   }),
   setAnnotationColor: (color) => set({ annotationColor: color }),
-  setImmersiveMode: (on) => {
-    const { dualPageMode } = useUiStore.getState()
-    set({
-      immersiveMode: on,
-      sidebarCollapsed: on,
-      // In single-page mode (dualPageMode=false), keep annotation panel open for side annotation
-      annotationPanelCollapsed: on ? dualPageMode : true,
-      rightPanel: 'annotation' as const,
-    })
-    // Toggle browser fullscreen
-    if (on) {
-      document.documentElement.requestFullscreen?.().catch(() => {})
-    } else {
-      document.exitFullscreen?.().catch(() => {})
-    }
-  },
-  setDualPageMode: (on) => { set({ dualPageMode: on }); try { localStorage.setItem('sj-dualPageMode', String(on)) } catch {} },
+  // 2026-04-28 CLEAN · setImmersiveMode + setDualPageMode 已删(沉浸式阅读下线)。
   setCurrentVisiblePage: (page) => {
     const cur = get().currentVisiblePage
     if (cur !== page) set({ currentVisiblePage: page })

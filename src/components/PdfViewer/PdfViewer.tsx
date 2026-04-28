@@ -1638,408 +1638,9 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
   )
 }
 
-// ===== Immersive OCR Reader: page-flip, auto-fill, side page markers =====
-function ImmersiveOcrReader({ text, fontSize, fontWeight, bgHue, bgSat, bgLight, colorDepth,
-  annotations, marks, onAnnotationClick, onRemoveMark, activeSelectionText, onTextSelect }: {
-  text: string; fontSize: number; fontWeight: number;
-  bgHue: number; bgSat: number; bgLight: number; colorDepth: number;
-  annotations: Array<{ id: string; selectedText: string }>;
-  marks: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>;
-  onAnnotationClick: (id: string) => void; onRemoveMark: (id: string) => void;
-  activeSelectionText?: string;
-  onTextSelect?: (sel: { text: string; pageNumber: number; x: number; y: number }) => void;
-}) {
-  const [spread, setSpread] = useState(0)
-  const [flipDir, setFlipDir] = useState<'none' | 'left' | 'right'>('none')
 
-  // Clean text: strip LaTeX artifacts, parse page markers
-  const parsed = useMemo(() => {
-    const lines: Array<{ text: string; origPage?: number }> = []
-    let currentOrigPage = 1
-    for (let rawLine of text.split('\n')) {
-      const pageMatch = rawLine.match(/^=== 第 (\d+) 页 ===$/)
-      if (pageMatch) { currentOrigPage = parseInt(pageMatch[1]); continue }
-      lines.push({ text: rawLine, origPage: currentOrigPage })
-    }
-    return lines
-  }, [text])
-
-  // Calculate page capacity based on font size and viewport
-  const lineH = fontSize * 1.75
-  const pagePadV = 32
-  const pagePadH = 36
-  const pageH = window.innerHeight - 20  // nearly full screen
-  const pageW = (window.innerWidth / 2) - 1
-  const contentH = pageH - pagePadV * 2
-  const contentW = pageW - pagePadH * 2
-  const charsPerLine = Math.max(10, Math.floor(contentW / fontSize))
-  // Fill page more aggressively — allow slight overflow which CSS will clip
-  const linesPerPage = Math.max(5, Math.floor(contentH / lineH) + 1)
-
-  // Split into visual pages
-  const visualPages = useMemo(() => {
-    const pages: Array<Array<{ text: string; origPage?: number }>> = []
-    let cur: typeof pages[0] = []
-    let count = 0
-    for (const line of parsed) {
-      // Skip pure empty lines at page start
-      if (cur.length === 0 && !line.text.trim()) continue
-      const wrap = Math.max(1, Math.ceil((line.text.length || 1) / charsPerLine))
-      if (count + wrap > linesPerPage && cur.length > 0) {
-        // Don't create a page with less than 3 lines of real content
-        const realLines = cur.filter(l => l.text.trim()).length
-        if (realLines < 3 && pages.length > 0) {
-          // Merge with previous page (allow overflow)
-          pages[pages.length - 1].push(...cur)
-        } else {
-          pages.push(cur)
-        }
-        cur = []; count = 0
-      }
-      cur.push(line); count += wrap
-    }
-    if (cur.length > 0) pages.push(cur)
-    return pages
-  }, [parsed, linesPerPage, charsPerLine])
-
-  const totalSpreads = Math.ceil(visualPages.length / 2)
-
-  // Navigation with animation
-  const goNext = useCallback(() => {
-    if (spread >= totalSpreads - 1) return
-    setFlipDir('right'); setTimeout(() => { setSpread(s => s + 1); setFlipDir('none') }, 250)
-  }, [spread, totalSpreads])
-
-  const goPrev = useCallback(() => {
-    if (spread <= 0) return
-    setFlipDir('left'); setTimeout(() => { setSpread(s => s - 1); setFlipDir('none') }, 250)
-  }, [spread])
-
-  // Keyboard + click navigation
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); goNext() }
-      else if (e.key === 'ArrowLeft') { e.preventDefault(); goPrev() }
-    }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [goNext, goPrev])
-
-  // Handle text selection inside the reader (direct, no event bubbling needed)
-  const handleInternalMouseUp = useCallback(() => {
-    if (!onTextSelect) return
-    const selection = window.getSelection()
-    if (!selection || selection.isCollapsed) return
-    const text = selection.toString().trim()
-    if (!text || text.length < 2) return
-
-    // Find page number from DOM
-    let el: HTMLElement | null = selection.getRangeAt(0).startContainer.parentElement
-    let pageNumber = 0
-    while (el) {
-      const pn = el.getAttribute('data-page-number')
-      if (pn) { pageNumber = parseInt(pn); break }
-      el = el.parentElement
-    }
-
-    const rect = selection.getRangeAt(0).getBoundingClientRect()
-    onTextSelect({ text, pageNumber: pageNumber || 1, x: rect.left + rect.width / 2, y: rect.bottom + 8 })
-  }, [onTextSelect])
-
-  const leftPage = visualPages[spread * 2]
-  const rightPage = spread * 2 + 1 < visualPages.length ? visualPages[spread * 2 + 1] : null
-
-  const bgColor = `hsl(${bgHue}, ${bgSat}%, ${bgLight}%)`
-  const textColor = bgLight < 50
-    ? `hsl(40, 15%, ${60 + (100 - colorDepth) / 3}%)`
-    : `hsl(30, 20%, ${100 - colorDepth}%)`
-  const markerColor = bgLight < 50 ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.15)'
-
-  // Flip animation style
-  const animStyle = flipDir === 'none' ? {} : {
-    transition: 'transform 0.25s ease, opacity 0.25s ease',
-    transform: flipDir === 'right' ? 'translateX(-20px)' : 'translateX(20px)',
-    opacity: 0.7,
-  }
-
-  const renderPage = (lines: Array<{ text: string; origPage?: number }>, side: 'left' | 'right') => {
-    // Find original page markers for side labels
-    const pageMarkers: Array<{ lineIdx: number; origPage: number }> = []
-    let lastOrig = -1
-    lines.forEach((line, i) => {
-      if (line.origPage !== undefined && line.origPage !== lastOrig) {
-        pageMarkers.push({ lineIdx: i, origPage: line.origPage })
-        lastOrig = line.origPage
-      }
-    })
-
-    // Join lines into markdown text for proper rendering
-    const mdText = lines.map(l => l.text).join('\n')
-
-    return (
-      <div data-page-number={spread * 2 + (side === 'left' ? 1 : 2)} style={{
-        flex: 1, padding: `${pagePadV}px ${pagePadH}px`,
-        background: bgColor, fontSize, fontWeight, color: textColor,
-        lineHeight: 1.75, height: '100vh', overflow: 'hidden', position: 'relative',
-        borderLeft: side === 'right' ? `1px solid ${markerColor}` : 'none',
-        ...animStyle,
-      }}>
-        {/* Original page markers */}
-        {pageMarkers.map(m => (
-          <span key={m.origPage} style={{
-            position: 'absolute', left: 6, top: `${pagePadV + m.lineIdx * lineH}px`,
-            fontSize: 8, color: markerColor, fontWeight: 400,
-            userSelect: 'none', fontStyle: 'italic',
-          }}>
-            {m.origPage}
-          </span>
-        ))}
-        {/* Rendered content */}
-        <div className="ocr-markdown-content" style={{ fontSize, lineHeight: 1.75 }}>
-          <Markdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{mdText}</Markdown>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div onMouseUp={handleInternalMouseUp} style={{ width: '100%', height: '100%', background: bgColor, overflow: 'hidden', userSelect: 'text', position: 'relative' }}>
-      {/* Two-page spread */}
-      <div style={{ display: 'flex', width: '100%', height: '100%' }}>
-        {/* Left click zone — pointer-events only when not selecting text */}
-        <div onClick={goPrev} onMouseDown={e => { if (window.getSelection()?.toString()) e.stopPropagation() }}
-          style={{ position: 'absolute', left: 0, top: 0, width: '12%', height: '100%', zIndex: 10, cursor: spread > 0 ? 'w-resize' : 'default', pointerEvents: 'auto' }} />
-        {/* Right click zone */}
-        <div onClick={goNext} onMouseDown={e => { if (window.getSelection()?.toString()) e.stopPropagation() }}
-          style={{ position: 'absolute', right: 0, top: 0, width: '12%', height: '100%', zIndex: 10, cursor: spread < totalSpreads - 1 ? 'e-resize' : 'default', pointerEvents: 'auto' }} />
-
-        {leftPage && renderPage(leftPage, 'left')}
-        {rightPage ? renderPage(rightPage, 'right') : (
-          <div style={{ flex: 1, background: bgColor, borderLeft: `1px solid ${markerColor}` }} />
-        )}
-      </div>
-
-      {/* Page indicator — overlaid at bottom center, minimal */}
-      <div style={{
-        position: 'absolute', bottom: 4, left: '50%', transform: 'translateX(-50%)',
-        fontSize: 9, color: markerColor, padding: '2px 8px',
-        borderRadius: 8, background: 'rgba(0,0,0,0.05)',
-      }}>
-        {spread * 2 + 1}{rightPage ? `-${spread * 2 + 2}` : ''} / {visualPages.length}
-      </div>
-    </div>
-  )
-}
-
-// ===== Immersive mode: floating annotation box with note + AI =====
-function ImmersiveAnnotationBox({ toolbar, textSelection, annotations, onAnnotate, onBold, onUnderline, onClose }: {
-  toolbar: { x: number; y: number; text: string; pageNumber: number }
-  textSelection: any
-  annotations: any[]
-  onAnnotate: () => void
-  onBold: () => void
-  onUnderline: (color: string) => void
-  onClose: () => void
-}) {
-  const [noteText, setNoteText] = useState('')
-  const [aiResponse, setAiResponse] = useState('')
-  const [aiLoading, setAiLoading] = useState(false)
-  // PERF-R8#7 · zustand 全量解构 → selectors,只对实际用的字段订阅
-  const updatePdfMeta = useLibraryStore(s => s.updatePdfMeta)
-  const selectedAiModel = useUiStore(s => s.selectedAiModel)
-  const setSelectedAiModel = useUiStore(s => s.setSelectedAiModel)
-  const [configuredProviders, setConfiguredProviders] = useState<Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>>([])
-
-  // Load configured AI providers
-  // PERF-R8#7 · 走 fetchAiConfig 共享 cache(对照 AnnotationPanel/AgentPanel 模式),
-  //   并订阅 invalidate 通知 → API key 在 Settings 改了立即响应,不用重开浮动框
-  useEffect(() => {
-    let cancelled = false
-    fetchAiConfig().then(r => { if (!cancelled) setConfiguredProviders(r) })
-    const unsub = subscribeAiConfig(latest => { if (!cancelled) setConfiguredProviders(latest) })
-    return () => { cancelled = true; unsub() }
-  }, [])
-
-  const existingAnn = annotations.find((a: any) => a.anchor?.selectedText === textSelection.text)
-  const history = existingAnn?.historyChain || []
-
-  // Save note to annotation
-  const handleSaveNote = async () => {
-    if (!noteText.trim()) return
-    const entry: any = {
-      id: uuid(), type: 'note', content: noteText.trim(),
-      author: 'user', createdAt: new Date().toISOString(),
-    }
-    if (existingAnn) {
-      await updatePdfMeta(meta => ({
-        ...meta,
-        annotations: meta.annotations.map((a: any) =>
-          a.id === existingAnn.id ? { ...a, historyChain: [...a.historyChain, entry], updatedAt: new Date().toISOString() } : a
-        ),
-      }))
-    } else {
-      const newAnn = {
-        id: uuid(),
-        anchor: { pageNumber: toolbar.pageNumber, startOffset: 0, endOffset: textSelection.text.length, selectedText: textSelection.text },
-        historyChain: [entry], style: { color: 'yellow' },
-        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      }
-      await updatePdfMeta(meta => ({ ...meta, annotations: [...meta.annotations, newAnn] }))
-    }
-    setNoteText('')
-  }
-
-  // Ask AI
-  const handleAskAi = async () => {
-    if (!noteText.trim()) return
-    setAiLoading(true); setAiResponse('')
-    try {
-      const model = useUiStore.getState().selectedAiModel
-      const docTitle = useLibraryStore.getState().currentEntry?.title || ''
-      const streamId = uuid()
-      let fullText = ''
-      const cleanup = window.electronAPI.onAiStreamChunk((sid: string, chunk: string) => { if (sid === streamId) { fullText += chunk; setAiResponse(fullText) } })
-      try {
-        await window.electronAPI.aiChatStream(streamId, model, [
-          { role: 'system', content: `你是文献「${docTitle}」的学术导师。简洁回答。` },
-          { role: 'user', content: `选中文本：「${textSelection.text.slice(0, 200)}」\n\n问题：${noteText}` },
-        ])
-      } finally { cleanup() }
-      // Save AI response as annotation
-      if (fullText) {
-        const userEntry: any = { id: uuid(), type: 'question', content: noteText.trim(), author: 'user', createdAt: new Date().toISOString() }
-        const aiEntry: any = { id: uuid(), type: 'ai_qa', content: fullText, userQuery: noteText.trim(), author: 'ai', createdAt: new Date().toISOString(), aiModel: model }
-        if (existingAnn) {
-          await updatePdfMeta(meta => ({
-            ...meta,
-            annotations: meta.annotations.map((a: any) =>
-              a.id === existingAnn.id ? { ...a, historyChain: [...a.historyChain, userEntry, aiEntry], updatedAt: new Date().toISOString() } : a
-            ),
-          }))
-        } else {
-          const newAnn = {
-            id: uuid(),
-            anchor: { pageNumber: toolbar.pageNumber, startOffset: 0, endOffset: textSelection.text.length, selectedText: textSelection.text },
-            historyChain: [userEntry, aiEntry], style: { color: 'yellow' },
-            createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-          }
-          await updatePdfMeta(meta => ({ ...meta, annotations: [...meta.annotations, newAnn] }))
-        }
-      }
-      setNoteText('')
-    } catch (err) {
-      console.error('[ImmersiveAnnotationBox] AI error:', err)
-      setAiResponse('AI 调用失败，请检查 API Key 设置')
-    }
-    setAiLoading(false)
-  }
-
-  // Model display name
-  const modelLabel = (() => {
-    const [pid, mid] = selectedAiModel.split(':')
-    const p = configuredProviders.find(p => p.id === pid)
-    const m = p?.models.find(m => m.id === mid)
-    return m?.name || mid || selectedAiModel
-  })()
-
-  return (
-    <div style={{
-      position: 'fixed',
-      left: Math.max(10, Math.min(toolbar.x - 220, window.innerWidth - 460)),
-      top: Math.min(toolbar.y + 20, window.innerHeight - 480),
-      width: 440, padding: '14px', background: 'var(--bg)', border: '1px solid var(--border)',
-      borderRadius: 12, boxShadow: '0 8px 32px rgba(0,0,0,0.25)', zIndex: 200,
-    }} className="immersive-annotation-box">
-      {/* Header: selected text + close */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
-        <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '0 2px', flex: 1, lineHeight: 1.5 }}>
-          「{textSelection.text.slice(0, 80)}{textSelection.text.length > 80 ? '...' : ''}」
-        </div>
-        <button onClick={onClose} style={{ padding: '2px 6px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 4, background: 'none', cursor: 'pointer', color: 'var(--text-muted)', flexShrink: 0, marginLeft: 8 }}>x</button>
-      </div>
-
-      {/* History chain */}
-      {history.length > 0 && (
-        <div style={{ maxHeight: 200, overflow: 'auto', marginBottom: 8 }}>
-          {history.slice(-6).map((h: any) => (
-            <div key={h.id} style={{
-              padding: '6px 10px', marginBottom: 4, borderRadius: 6, fontSize: 12, lineHeight: 1.6,
-              background: h.author === 'user' ? 'var(--accent-soft)' : 'var(--bg-warm)',
-              color: 'var(--text)', borderLeft: h.author === 'ai' ? '2px solid var(--accent)' : 'none',
-            }}>
-              <span style={{ fontSize: 10, color: 'var(--text-muted)', marginRight: 4 }}>{h.author === 'user' ? '我' : 'AI'}</span>
-              {h.content.slice(0, 300)}{h.content.length > 300 ? '...' : ''}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* AI response streaming */}
-      {aiResponse && (
-        <div style={{ padding: '8px 10px', marginBottom: 8, borderRadius: 8, background: 'var(--bg-warm)', border: '1px solid var(--border-light)', fontSize: 13, lineHeight: 1.7, maxHeight: 240, overflow: 'auto' }}>
-          <ReactMarkdown>{aiResponse}</ReactMarkdown>
-          {aiLoading && <span className="streaming-cursor" />}
-        </div>
-      )}
-
-      {/* Input */}
-      <textarea
-        autoFocus value={noteText} onChange={e => setNoteText(e.target.value)}
-        placeholder="写笔记 / 向 AI 提问..."
-        rows={3}
-        style={{
-          width: '100%', padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 8,
-          fontSize: 13, outline: 'none', resize: 'none', fontFamily: 'var(--font)',
-          background: 'var(--bg-warm)', color: 'var(--text)', lineHeight: 1.6,
-        }}
-        onFocus={e => e.currentTarget.style.borderColor = 'var(--accent)'}
-        onBlur={e => e.currentTarget.style.borderColor = 'var(--border)'}
-        onKeyDown={e => {
-          if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); handleSaveNote() }
-          if (e.key === 'Escape') onClose()
-        }}
-      />
-
-      {/* Action buttons */}
-      <div style={{ display: 'flex', gap: 6, marginTop: 8, justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-          <button onClick={onBold} style={{ padding: '4px 10px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 4, background: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>高亮</button>
-          <button onClick={() => onUnderline('yellow')} style={{ padding: '4px 10px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 4, background: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>划线</button>
-          {/* Model selector */}
-          <select
-            value={selectedAiModel}
-            onChange={e => setSelectedAiModel(e.target.value)}
-            style={{
-              fontSize: 10, padding: '4px 4px', border: '1px solid var(--border)',
-              borderRadius: 4, background: 'var(--bg-warm)', color: 'var(--text-secondary)',
-              outline: 'none', cursor: 'pointer', maxWidth: 110,
-            }}
-          >
-            {configuredProviders.length > 0 ? (
-              configuredProviders.map(p => (
-                <optgroup key={p.id} label={p.name}>
-                  {p.models.map(m => (
-                    <option key={`${p.id}:${m.id}`} value={`${p.id}:${m.id}`}>{m.name}</option>
-                  ))}
-                </optgroup>
-              ))
-            ) : (
-              <option value="glm:glm-4-flash">请先配置 Key</option>
-            )}
-          </select>
-        </div>
-        <div style={{ display: 'flex', gap: 4 }}>
-          <button onClick={handleSaveNote} disabled={!noteText.trim()} style={{ padding: '4px 12px', fontSize: 11, border: 'none', borderRadius: 4, background: noteText.trim() ? 'var(--accent)' : 'var(--border)', color: '#fff', cursor: 'pointer' }}>
-            保存笔记
-          </button>
-          <button onClick={handleAskAi} disabled={!noteText.trim() || aiLoading} style={{ padding: '4px 12px', fontSize: 11, border: '1px solid var(--accent)', borderRadius: 4, background: 'var(--accent-soft)', cursor: 'pointer', color: 'var(--accent-hover)' }}>
-            {aiLoading ? '...' : '问 AI'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
+// ===== ImmersiveOcrReader / ImmersiveAnnotationBox 已删(2026-04-28 CLEAN · 沉浸式阅读下线) =====
+// 原本 ~400 行的两个 dormant 组件,toggle 入口早已移除 → 永远 unreachable,一并清掉。
 
 type ViewMode = 'pdf' | 'ocr'
 
@@ -2127,9 +1728,9 @@ export default function PdfViewer() {
   const setTextSelection = useUiStore(s => s.setTextSelection)
   const setActiveAnnotation = useUiStore(s => s.setActiveAnnotation)
   const glmApiKeyStatus = useUiStore(s => s.glmApiKeyStatus)
-  const immersiveMode = useUiStore(s => s.immersiveMode)
+  // 2026-04-28 CLEAN · immersiveMode + dualPageMode 已下线,所有 immersive 分支
+  //   都按"非沉浸式"路径执行(等价于 immersiveMode 永远 false)。
   const darkMode = useUiStore(s => s.darkMode)
-  const dualPageMode = useUiStore(s => s.dualPageMode)
   const searchHighlight = useUiStore(s => s.searchHighlight)
   const setSearchHighlight = useUiStore(s => s.setSearchHighlight)
   const [numPages, setNumPages] = useState(0)
@@ -2921,16 +2522,9 @@ export default function PdfViewer() {
     const range = selection.getRangeAt(0)
     const rect = range.getBoundingClientRect()
 
-    const isImmersive = useUiStore.getState().immersiveMode
-    if (isImmersive) {
-      // In immersive mode: set toolbar position for the floating annotation box,
-      // and set textSelection directly (no floating toolbar needed)
-      setToolbar({ x: rect.left + rect.width / 2, y: rect.bottom + 8, text, pageNumber: pageNumber || 1 })
-      setTextSelection({ pageNumber: pageNumber || 1, text, startOffset: 0, endOffset: text.length })
-    } else {
-      setToolbar({ x: rect.left + rect.width / 2, y: rect.top - 8, text, pageNumber: pageNumber || 1 })
-      setToolbarMode('main')
-    }
+    // 2026-04-28 CLEAN · 沉浸式分支已删,固定走"非沉浸式"路径(toolbar 在选区上方)
+    setToolbar({ x: rect.left + rect.width / 2, y: rect.top - 8, text, pageNumber: pageNumber || 1 })
+    setToolbarMode('main')
   }, [])
 
   // Dismiss toolbar on click outside (but not when clicking immersive annotation box)
@@ -2945,45 +2539,10 @@ export default function PdfViewer() {
     return () => document.removeEventListener('mousedown', handler)
   }, [toolbar])
 
-  // Save/restore scroll position on immersive mode toggle
-  useEffect(() => {
-    if (immersiveMode) {
-      // Entering immersive: save current scroll position
-      if (scrollRef.current) {
-        savedScrollPos.current = scrollRef.current.scrollTop
-      }
-    } else {
-      // Exiting immersive: restore scroll position after layout settles
-      setTimeout(() => {
-        if (scrollRef.current && savedScrollPos.current > 0) {
-          scrollRef.current.scrollTop = savedScrollPos.current
-        }
-      }, 100)
-    }
-  }, [immersiveMode])
-
-  // ESC to exit immersive mode. Read state via getState() so the handler stays current
-  // even though we only want to attach the listener once.
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && useUiStore.getState().immersiveMode) {
-        useUiStore.getState().setImmersiveMode(false)
-      }
-    }
-    document.addEventListener('keydown', handleKey)
-    return () => document.removeEventListener('keydown', handleKey)
-  }, [])
-
-  // Also listen for fullscreen exit (browser ESC exits fullscreen before our handler)
-  useEffect(() => {
-    const handleFsChange = () => {
-      if (!document.fullscreenElement && useUiStore.getState().immersiveMode) {
-        useUiStore.getState().setImmersiveMode(false)
-      }
-    }
-    document.addEventListener('fullscreenchange', handleFsChange)
-    return () => document.removeEventListener('fullscreenchange', handleFsChange)
-  }, [])
+  // 2026-04-28 CLEAN · 删除三个 useEffect:沉浸式 scroll save/restore + ESC/fullscreen
+  //   exit 监听。沉浸式已下线 → 这些 effect 全部 unreachable (immersiveMode 永远
+  //   是 falsy / undefined)。savedScrollPos ref 由 OCR/PDF 视图切换的滚动恢复路径
+  //   独立维护,不依赖这里。
 
   // Toolbar action: create annotation with color
   const handleToolbarAnnotate = useCallback((color: string) => {
@@ -2995,11 +2554,7 @@ export default function PdfViewer() {
     setToolbar(null)
   }, [setTextSelection, setActiveAnnotation])
 
-  // Handle text selection from ImmersiveOcrReader (direct callback, no event bubbling)
-  const handleImmersiveTextSelect = useCallback((sel: { text: string; pageNumber: number; x: number; y: number }) => {
-    setToolbar({ x: sel.x, y: sel.y, text: sel.text, pageNumber: sel.pageNumber })
-    setTextSelection({ pageNumber: sel.pageNumber, text: sel.text, startOffset: 0, endOffset: sel.text.length })
-  }, [setTextSelection])
+  // 2026-04-28 CLEAN · handleImmersiveTextSelect 已删(沉浸式 ImmersiveOcrReader 不再调用)
 
   // Toolbar action: append to existing annotation
   const handleToolbarAppend = useCallback((annotationId: string) => {
@@ -3063,8 +2618,8 @@ export default function PdfViewer() {
       marks: [...(meta.marks || []), mark],
     }))
     window.getSelection()?.removeAllRanges()
-    // In immersive mode, keep annotation box open (no floating toolbar to dismiss)
-    if (!useUiStore.getState().immersiveMode) setToolbar(null)
+    // 2026-04-28 CLEAN · 沉浸式分支已删,固定 setToolbar(null)
+    setToolbar(null)
   }, [currentEntry, updatePdfMeta])
 
   // Toolbar action: add bold mark
@@ -3083,8 +2638,8 @@ export default function PdfViewer() {
       marks: [...(meta.marks || []), mark],
     }))
     window.getSelection()?.removeAllRanges()
-    // In immersive mode, keep annotation box open
-    if (!useUiStore.getState().immersiveMode) setToolbar(null)
+    // 2026-04-28 CLEAN · 沉浸式分支已删,固定 setToolbar(null)
+    setToolbar(null)
   }, [currentEntry, updatePdfMeta])
 
   // ===== RENDER =====
@@ -3534,12 +3089,8 @@ export default function PdfViewer() {
         {/* 2026-04-28 CLEAN · "编辑" + "回顾" 两个按钮都已下线(用户决定)。
             state / ref / textarea 同步全删。closingPrompt.ts 保留以防未来恢复。 */}
 
-        {/* Immersive mode toggle removed — per user feedback it wasn't useful.
-            The ImmersiveOcrReader / ImmersiveAnnotationBox code is kept for now as
-            dormant (unreachable) code; a follow-up cleanup can strip those components
-            + the dualPageMode state entirely. uiStore.immersiveMode defaults to false,
-            so existing users who had it on will auto-exit on next load via the effect
-            that re-evaluates it. */}
+        {/* 2026-04-28 CLEAN · 沉浸式阅读完全下线 — toggle / state / dormant
+            组件 / 全部分支均已清理。 */}
       </div>
 
       {/* Re-reading greeting. Two display modes:
@@ -3667,7 +3218,7 @@ export default function PdfViewer() {
           </div>
         )}
         <div className="pdf-scroll-area" ref={scrollRef} onMouseUp={handleMouseUp}
-          style={{ ...(immersiveMode ? { background: 'var(--bg)', padding: 0 } : {}), flex: 1 }}
+          style={{ flex: 1 }}
         >
           {loadError ? (
             <div className="empty-state"><span style={{ fontSize: 32 }}>❌</span><span>{loadError}</span></div>
@@ -3675,7 +3226,7 @@ export default function PdfViewer() {
             <div className="empty-state"><span>加载中...</span></div>
           ) : (
             <Document
-              key={`${currentEntry?.id}-${immersiveMode ? 'dual' : 'single'}`}
+              key={`${currentEntry?.id}-single`}
               file={pdfFileUrl}
               onLoadSuccess={onDocumentLoadSuccess}
               onLoadError={onDocumentLoadError}
@@ -3697,59 +3248,29 @@ export default function PdfViewer() {
               }
               error={<div className="empty-state"><span>PDF 解析失败</span></div>}
             >
-              {immersiveMode && dualPageMode ? (
-                /* Dual-page layout for immersive mode */
-                (() => {
-                  const pairs: Array<[number, number | null]> = []
-                  for (let i = 1; i <= numPages; i += 2) {
-                    pairs.push([i, i + 1 <= numPages ? i + 1 : null])
-                  }
-                  const immScale = Math.min((window.innerWidth / 2 - 40) / 600, (window.innerHeight - 60) / 800)
-                  return pairs.map(([left, right]) => (
-                    <div key={left} style={{
-                      display: 'flex', justifyContent: 'center', gap: 4,
-                      minHeight: '100vh', alignItems: 'center', padding: '20px 0',
-                    }}>
-                      <div className="pdf-page-wrapper" data-page-number={left} style={{ position: 'relative', boxShadow: '0 2px 16px rgba(0,0,0,0.3)' }}>
-                        <div style={{ position: 'absolute', top: 4, right: 8, fontSize: 10, color: '#999', background: 'rgba(255,255,255,0.85)', padding: '1px 6px', borderRadius: 4, zIndex: 5 }}>{left}</div>
-                        <Page pageNumber={left} scale={immScale} renderTextLayer={true} renderAnnotationLayer={false}
-                          loading={<div style={{ width: 600 * immScale, height: 800 * immScale, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666' }}>第 {left} 页...</div>} />
-                      </div>
-                      {right && (
-                        <div className="pdf-page-wrapper" data-page-number={right} style={{ position: 'relative', boxShadow: '0 2px 16px rgba(0,0,0,0.3)' }}>
-                          <div style={{ position: 'absolute', top: 4, right: 8, fontSize: 10, color: '#999', background: 'rgba(255,255,255,0.85)', padding: '1px 6px', borderRadius: 4, zIndex: 5 }}>{right}</div>
-                          <Page pageNumber={right} scale={immScale} renderTextLayer={true} renderAnnotationLayer={false}
-                            loading={<div style={{ width: 600 * immScale, height: 800 * immScale, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666' }}>第 {right} 页...</div>} />
-                        </div>
-                      )}
-                    </div>
-                  ))
-                })()
-              ) : (
-                /* Normal single-page scroll layout */
-                Array.from({ length: numPages }, (_, i) => {
-                  const pageNum = i + 1
-                  // Render real <Page> only for pages near the current range
-                  // (±2 around pageRenderRange), placeholder for others. This
-                  // prevents react-pdf from instantiating every Page canvas
-                  // for huge PDFs, which was the main source of load+resize lag.
-                  const inRange = pageNum >= pageRenderRange.start - 2 && pageNum <= pageRenderRange.end + 2
-                  return (
-                    <LazyPdfPage
-                      key={pageNum}
-                      pageNum={pageNum}
-                      scale={debouncedScale}
-                      inRange={inRange}
-                      onVisible={(n) => {
-                        setPageRenderRange(prev => ({
-                          start: Math.min(prev.start, n),
-                          end: Math.max(prev.end, n),
-                        }))
-                      }}
-                    />
-                  )
-                })
-              )}
+              {/* 2026-04-28 CLEAN · 沉浸式 dual-page 分支已删,固定走单列滚动布局 */}
+              {Array.from({ length: numPages }, (_, i) => {
+                const pageNum = i + 1
+                // Render real <Page> only for pages near the current range
+                // (±2 around pageRenderRange), placeholder for others. This
+                // prevents react-pdf from instantiating every Page canvas
+                // for huge PDFs, which was the main source of load+resize lag.
+                const inRange = pageNum >= pageRenderRange.start - 2 && pageNum <= pageRenderRange.end + 2
+                return (
+                  <LazyPdfPage
+                    key={pageNum}
+                    pageNum={pageNum}
+                    scale={debouncedScale}
+                    inRange={inRange}
+                    onVisible={(n) => {
+                      setPageRenderRange(prev => ({
+                        start: Math.min(prev.start, n),
+                        end: Math.max(prev.end, n),
+                      }))
+                    }}
+                  />
+                )
+              })}
             </Document>
           )}
         </div>
@@ -3807,89 +3328,51 @@ export default function PdfViewer() {
       )}
 
       {/* ===== DOCX View ===== */}
+      {/* 2026-04-28 CLEAN · 沉浸式 dual-column 分支已删,固定走单列 */}
       {viewMode === 'pdf' && ['docx', 'doc'].includes(fileExt) && (
-        immersiveMode && dualPageMode && docxHtml ? (
-          /* Immersive dual-column DOCX */
-          <div className="pdf-scroll-area" style={{
-            alignItems: 'stretch', padding: 0,
-            background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
-          }} onMouseUp={handleMouseUp}>
-            <div style={{
-              columnCount: 2, columnGap: '48px', columnRule: `1px solid ${ocrBgLight < 50 ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`,
-              padding: '40px 48px', minHeight: '100vh',
-              fontSize: ocrFontSize, fontWeight: ocrFontWeight, lineHeight: 2,
-              fontFamily: 'var(--font-serif)',
-              color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
-            }} className="ocr-markdown-content" dangerouslySetInnerHTML={{ __html: docxHtml }} />
-          </div>
-        ) : (
-          /* Normal single-column DOCX */
-          <div className="pdf-scroll-area" style={{
-            alignItems: 'stretch', padding: 0,
-            background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
-            fontSize: ocrFontSize, fontWeight: ocrFontWeight,
-            color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
-          }} onMouseUp={handleMouseUp}>
-            <DocxViewer key={currentEntry?.id} absPath={absPath} onTextSelect={setTextSelection}
-              annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
-              onAnnotationClick={(id) => setActiveAnnotation(id)}
-              marks={memoizedMarks}
-              onRemoveMark={handleRemoveMark}
-              activeSelectionText={textSelection?.text}
-              searchHighlight={searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight.query : null}
-            />
-          </div>
-        )
+        <div className="pdf-scroll-area" style={{
+          alignItems: 'stretch', padding: 0,
+          background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
+          fontSize: ocrFontSize, fontWeight: ocrFontWeight,
+          color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
+        }} onMouseUp={handleMouseUp}>
+          <DocxViewer key={currentEntry?.id} absPath={absPath} onTextSelect={setTextSelection}
+            annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
+            onAnnotationClick={(id) => setActiveAnnotation(id)}
+            marks={memoizedMarks}
+            onRemoveMark={handleRemoveMark}
+            activeSelectionText={textSelection?.text}
+            searchHighlight={searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight.query : null}
+          />
+        </div>
       )}
 
       {/* ===== Text View ===== */}
+      {/* 2026-04-28 CLEAN · 沉浸式 dual-page TXT/MD 分支已删,固定走单列 */}
       {viewMode === 'pdf' && isText && (
-        immersiveMode && dualPageMode && txtContent ? (
-          /* Immersive dual-page TXT/MD via ImmersiveOcrReader */
-          <div className="pdf-scroll-area" style={{
-            alignItems: 'stretch', padding: 0,
-            background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
-          }} onMouseUp={handleMouseUp}>
-            <ImmersiveOcrReader
-              text={txtContent}
+        <div className="pdf-scroll-area" style={{
+          alignItems: 'stretch', padding: 0,
+          background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
+        }} onMouseUp={handleMouseUp}>
+          <div style={{
+            maxWidth: 'min(95%, 1400px)', margin: '0 auto',
+            padding: '40px clamp(32px, 4vw, 80px)', minHeight: '100%',
+          }} data-page-number="1">
+            <TextFileContent
+              key={currentEntry?.id}
+              absPath={absPath}
+              annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
+              onAnnotationClick={(id) => setActiveAnnotation(id)}
+              marks={currentPdfMeta?.marks?.map(m => ({ id: m.id, type: m.type, color: m.color, selectedText: m.selectedText })) || []}
+              onRemoveMark={handleRemoveMark}
+              activeSelectionText={textSelection?.text}
               fontSize={ocrFontSize}
               fontWeight={ocrFontWeight}
-              bgHue={ocrBgHue} bgSat={ocrBgSat} bgLight={ocrBgLight}
-              colorDepth={ocrColorDepth}
-              annotations={memoizedAnnotations}
-              marks={memoizedMarks}
-              onAnnotationClick={(id) => setActiveAnnotation(id)}
-              onRemoveMark={handleRemoveMark}
-              activeSelectionText={toolbar?.text || textSelection?.text || undefined}
-              onTextSelect={handleImmersiveTextSelect}
+              color={ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`}
+              searchHighlight={searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight.query : null}
             />
           </div>
-        ) : (
-          /* Normal single-column TXT/MD — respect OCR font/background settings */
-          <div className="pdf-scroll-area" style={{
-            alignItems: 'stretch', padding: 0,
-            background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
-          }} onMouseUp={handleMouseUp}>
-            <div style={{
-              maxWidth: 'min(95%, 1400px)', margin: '0 auto',
-              padding: '40px clamp(32px, 4vw, 80px)', minHeight: '100%',
-            }} data-page-number="1">
-              <TextFileContent
-                key={currentEntry?.id}
-                absPath={absPath}
-                annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
-                onAnnotationClick={(id) => setActiveAnnotation(id)}
-                marks={currentPdfMeta?.marks?.map(m => ({ id: m.id, type: m.type, color: m.color, selectedText: m.selectedText })) || []}
-                onRemoveMark={handleRemoveMark}
-                activeSelectionText={textSelection?.text}
-                fontSize={ocrFontSize}
-                fontWeight={ocrFontWeight}
-                color={ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`}
-                searchHighlight={searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight.query : null}
-              />
-            </div>
-          </div>
-        )
+        </div>
       )}
 
       {/* ===== Edit Mode 区块已删(2026-04-28 CLEAN) ===== */}
@@ -3903,71 +3386,47 @@ export default function PdfViewer() {
           ref={scrollRef}
           className="pdf-scroll-area"
           style={{
-            background: immersiveMode ? `hsl(${ocrBgHue}, ${Math.max(ocrBgSat - 10, 0)}%, ${Math.max(ocrBgLight - 8, 10)}%)` : `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
+            background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
             alignItems: 'stretch', padding: 0,
           }}
           onMouseUp={handleMouseUp}
         >
-          {immersiveMode && dualPageMode ? (
-            <ImmersiveOcrReader
-              text={ocrFullText || ''}
-              fontSize={ocrFontSize}
-              fontWeight={ocrFontWeight}
-              bgHue={ocrBgHue} bgSat={ocrBgSat} bgLight={ocrBgLight}
-              colorDepth={ocrColorDepth}
-              annotations={memoizedAnnotations}
-              marks={memoizedMarks}
-              onAnnotationClick={(id) => setActiveAnnotation(id)}
-              onRemoveMark={handleRemoveMark}
-              activeSelectionText={toolbar?.text || textSelection?.text || undefined}
-              onTextSelect={handleImmersiveTextSelect}
-            />
-          ) : (
-            /* Normal single-column OCR layout — uses min(95%, 1400px) so the
-               column fills wide-screen / fullscreen panels (used to leave huge
-               empty bands on both sides at 800px) while still capping line
-               length on very wide displays for readability. Horizontal padding
-               uses clamp() so it scales with viewport — narrow windows get a
-               tighter 32px gutter, wide windows breathe with up to 80px. */
+          {/* 2026-04-28 CLEAN · 沉浸式 dual-page OCR 分支已删,固定走单列 */}
+          <div style={{
+            maxWidth: 'min(95%, 1400px)', margin: '0 auto',
+            padding: '40px clamp(32px, 4vw, 80px) 80px',
+            background: 'transparent', minHeight: '100%',
+            fontSize: ocrFontSize, fontWeight: ocrFontWeight,
+            color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
+          }}>
             <div style={{
-              maxWidth: 'min(95%, 1400px)', margin: '0 auto',
-              padding: '40px clamp(32px, 4vw, 80px) 80px',
-              background: 'transparent', minHeight: '100%',
-              fontSize: ocrFontSize, fontWeight: ocrFontWeight,
-              color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
+              textAlign: 'center', marginBottom: 32, paddingBottom: 20,
+              borderBottom: '2px solid var(--border)',
             }}>
-              <div style={{
-                textAlign: 'center', marginBottom: 32, paddingBottom: 20,
-                // Was hardcoded #333 — invisible in dark mode and too harsh in
-                // light mode. var(--border) adapts; opacity tones it down so it
-                // still reads as "subtle divider" not "rule line."
-                borderBottom: '2px solid var(--border)',
-              }}>
-                <h2 style={{ fontSize: ocrFontSize + 4, lineHeight: 1.4, marginBottom: 6 }}>
-                  {currentEntry?.title || ''}
-                </h2>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 400 }}>
-                  OCR 识别文本
-                  {ocrFilePath && <span> · {ocrFilePath.split(/[/\\]/).pop()}</span>}
-                </div>
+              <h2 style={{ fontSize: ocrFontSize + 4, lineHeight: 1.4, marginBottom: 6 }}>
+                {currentEntry?.title || ''}
+              </h2>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 400 }}>
+                OCR 识别文本
+                {ocrFilePath && <span> · {ocrFilePath.split(/[/\\]/).pop()}</span>}
               </div>
-
-              <OcrContent
-                text={ocrFullText || ''}
-                annotations={memoizedAnnotations}
-                onAnnotationClick={(id) => setActiveAnnotation(id)}
-                activeSelectionText={toolbar?.text || textSelection?.text || undefined}
-                marks={memoizedMarks}
-                onRemoveMark={handleRemoveMark}
-                searchHighlight={searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight.query : null}
-              />
             </div>
-          )}
+
+            <OcrContent
+              text={ocrFullText || ''}
+              annotations={memoizedAnnotations}
+              onAnnotationClick={(id) => setActiveAnnotation(id)}
+              activeSelectionText={toolbar?.text || textSelection?.text || undefined}
+              marks={memoizedMarks}
+              onRemoveMark={handleRemoveMark}
+              searchHighlight={searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight.query : null}
+            />
+          </div>
         </div>
       )}
 
-      {/* ===== Floating Toolbar (hidden in immersive mode — annotation box takes over) ===== */}
-      {toolbar && !immersiveMode && (
+      {/* ===== Floating Toolbar ===== */}
+      {toolbar && (
         <div className="floating-toolbar" style={{ left: toolbar.x, top: toolbar.y, transform: 'translateX(-50%) translateY(-100%)' }}>
           {toolbarMode === 'main' && (
             <>
@@ -4019,18 +3478,7 @@ export default function PdfViewer() {
         </div>
       )}
 
-      {/* ===== Immersive Mode: floating annotation panel ===== */}
-      {immersiveMode && textSelection && toolbar && (
-        <ImmersiveAnnotationBox
-          toolbar={toolbar}
-          textSelection={textSelection}
-          annotations={currentPdfMeta?.annotations || []}
-          onAnnotate={() => handleToolbarAnnotate('yellow')}
-          onBold={() => handleToolbarBold()}
-          onUnderline={(color) => handleToolbarUnderline(color)}
-          onClose={() => { setToolbar(null); setTextSelection(null) }}
-        />
-      )}
+      {/* ===== Immersive Annotation Box 已删(2026-04-28 CLEAN) ===== */}
 
       {/* ===== Translate Modal ===== */}
       <TranslateModal

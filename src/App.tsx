@@ -107,8 +107,7 @@ export default function App() {
   const activeMemoId = useUiStore(s => s.activeMemoId)
   const activeReadingLogDate = useUiStore(s => s.activeReadingLogDate)
   const rightPanel = useUiStore(s => s.rightPanel)
-  const immersiveMode = useUiStore(s => s.immersiveMode)
-  const dualPageMode = useUiStore(s => s.dualPageMode)
+  // 2026-04-28 CLEAN · immersiveMode + dualPageMode 已删(沉浸式阅读下线)
   const [dropActive, setDropActive] = useState(false)
   const dropCounter = useRef(0)  // track nested drag enter/leave
 
@@ -410,13 +409,11 @@ export default function App() {
           </div>
         </div>
       )}
-      {!immersiveMode && <TopBar />}
+      <TopBar />
       <div className="app-body">
-        {!immersiveMode && (
-          <ErrorBoundary fallbackLabel="侧栏">
-            <FileTree />
-          </ErrorBoundary>
-        )}
+        <ErrorBoundary fallbackLabel="侧栏">
+          <FileTree />
+        </ErrorBoundary>
 
         {/* Main content: Reading log / Memo editor / PDF viewer (lazy-loaded) */}
         <Suspense fallback={<div className="empty-state"><span className="loading-spinner" /></div>}>
@@ -448,17 +445,17 @@ export default function App() {
             <ErrorBoundary fallbackLabel="PDF 阅读器">
               <PdfViewer />
             </ErrorBoundary>
-            {(!immersiveMode || !dualPageMode) && !annotationPanelCollapsed && rightPanel === 'annotation' && (
+            {!annotationPanelCollapsed && rightPanel === 'annotation' && (
               <ErrorBoundary fallbackLabel="注释面板">
                 <AnnotationPanel />
               </ErrorBoundary>
             )}
-            {(!immersiveMode || !dualPageMode) && !annotationPanelCollapsed && rightPanel === 'agent' && (
+            {!annotationPanelCollapsed && rightPanel === 'agent' && (
               <ErrorBoundary fallbackLabel="学徒面板">
                 <AgentPanel />
               </ErrorBoundary>
             )}
-            {annotationPanelCollapsed && (!immersiveMode || !dualPageMode) && (
+            {annotationPanelCollapsed && (
               <DraggableToggle onClick={toggleAnnotationPanel} />
             )}
           </>
