@@ -2492,27 +2492,61 @@ export default function PdfViewer() {
       })
 
       if (result.success && result.text) {
-        // Build text with page markers if we have per-page data
-        let textToSave = result.text
-        if (result.pageTexts && result.pageTexts.length > 1) {
-          textToSave = result.pageTexts
-            .map((t, i) => `=== 第 ${i + 1} 页 ===\n\n${t}`)
+        // 2026-04-28 · 增量 OCR merge
+        //
+        // 用户场景:先 OCR 1-10 页,再 OCR 8-15 页 → 期望最终是 1-15 页(8-10 重做覆盖,
+        // 11-15 新补,1-7 保留)。后端 result.pageTexts[i] 对应 PDF 第
+        // (actualStartPage + i) 页(absolute, 1-indexed),所以我们用 pageNumber 作 key,
+        // 把新结果 merge 进 currentPdfMeta.pages。整本 OCR 走同一条路径——它的
+        // actualStartPage = 1,实际上覆盖所有旧 pages,效果等同于"全替换"。
+        const incomingPageTexts = result.pageTexts || []
+        const newStartPage = (result as any).actualStartPage
+          || (hasRange ? choice.startPage! : 1)
+
+        const incomingPages = incomingPageTexts.map((t, i) => ({
+          pageNumber: newStartPage + i,
+          ocrText: t,
+          ocrTimestamp: new Date().toISOString(),
+        }))
+
+        // Merge: 新覆盖旧,按 pageNumber 排序
+        const existingPages = currentPdfMeta.pages || []
+        const merged = new Map<number, { pageNumber: number; ocrText: string; ocrTimestamp: string }>()
+        for (const p of existingPages) {
+          if (p.ocrText != null) {
+            merged.set(p.pageNumber, {
+              pageNumber: p.pageNumber,
+              ocrText: p.ocrText,
+              ocrTimestamp: p.ocrTimestamp || new Date().toISOString(),
+            })
+          }
+        }
+        for (const p of incomingPages) {
+          merged.set(p.pageNumber, p)
+        }
+        const sortedPages = [...merged.values()].sort((a, b) => a.pageNumber - b.pageNumber)
+
+        // 重建完整 ocr text:多页加 page markers,单页直接用文本
+        let textToSave: string
+        if (sortedPages.length > 1) {
+          textToSave = sortedPages
+            .map(p => `=== 第 ${p.pageNumber} 页 ===\n\n${p.ocrText}`)
             .join('\n\n')
+        } else if (sortedPages.length === 1) {
+          textToSave = sortedPages[0].ocrText
+        } else {
+          // 兜底:incomingPageTexts 为空(layout_details 缺失之类),只能用整段 text
+          textToSave = result.text
         }
 
         // Save OCR text to local file
         const savedPath = await window.electronAPI.saveOcrText(currentEntry.absPath, textToSave)
 
         // Update meta
-        const pageTexts = result.pageTexts || []
         await updatePdfMeta(meta => ({
           ...meta,
           ocrStatus: 'complete' as const,
-          pages: pageTexts.map((t, i) => ({
-            pageNumber: i + 1,
-            ocrText: t,
-            ocrTimestamp: new Date().toISOString()
-          }))
+          pages: sortedPages,
         }))
 
         setOcrFullText(textToSave)
@@ -2524,8 +2558,16 @@ export default function PdfViewer() {
           ocrStatusUpdatedAt: new Date().toISOString(),
           ocrError: undefined,
         })
-        setOcrProgress({ status: 'OCR 完成！' })
-        setTimeout(() => setOcrProgress(null), 2000)
+
+        // 提示信息区分场景:增量 merge / 全替换 / 首次
+        const wasMerge = hasRange && existingPages.length > 0
+          && existingPages.some(p => p.pageNumber < newStartPage
+            || p.pageNumber > newStartPage + incomingPages.length - 1)
+        const statusMsg = wasMerge
+          ? `OCR 完成 · 合并到现有文本(共 ${sortedPages.length} 页)`
+          : 'OCR 完成！'
+        setOcrProgress({ status: statusMsg })
+        setTimeout(() => setOcrProgress(null), wasMerge ? 3500 : 2000)
       } else {
         await updateEntry(currentEntry.id, {
           ocrStatus: 'failed',
