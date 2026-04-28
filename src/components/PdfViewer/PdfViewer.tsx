@@ -2918,8 +2918,8 @@ export default function PdfViewer() {
               }}
               placeholder={totalPages > 0 ? `1-${totalPages}` : '跳转到'}
               title={totalPages > 0
-                ? `输入页码后按回车或点 → 跳转，范围 1-${totalPages} (Ctrl+G 聚焦)`
-                : '输入页码后按回车或点 → 跳转 (Ctrl+G 聚焦)'}
+                ? `输入页码后按回车或点"跳转"，范围 1-${totalPages} (Ctrl+G 聚焦)`
+                : '输入页码后按回车或点"跳转" (Ctrl+G 聚焦)'}
               style={{
                 width: 48, padding: '4px 7px', fontSize: 11,
                 border: 'none', background: 'transparent',
@@ -2942,10 +2942,7 @@ export default function PdfViewer() {
                 transition: 'background 0.15s',
               }}
             >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
-                <line x1="5" y1="12" x2="19" y2="12"/>
-                <polyline points="12 5 19 12 12 19"/>
-              </svg>
+              跳转
             </button>
           </div>
         )}
