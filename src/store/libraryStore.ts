@@ -10,6 +10,11 @@ import { parseBibTeX, splitAuthors, splitKeywords, parseYear, extractFilePath } 
 // racing. Entries self-clean on settle.
 const updatePdfMetaByEntryId_queue: Record<string, Promise<void>> = {}
 
+// BUG-FIX R2#δ · track the post-init background scan timer so a second
+// initLibrary call (future "switch workspace" UI) doesn't double-run, and
+// callbacks read fresh state from the store instead of a stale closure.
+let initPostBootTimer: ReturnType<typeof setTimeout> | null = null
+
 // Background PDF metadata enrichment. Called after import finishes — reads each
 // newly-imported PDF's Info dict and updates its title / authors / year when
 // present and non-garbage. Never blocks the import flow; runs sequentially with
@@ -161,16 +166,28 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     // Show UI immediately
     set({ library, isLoading: false })
 
+    // BUG-FIX R2#δ · clear any stale timer from a prior initLibrary call
+    // (defensive — re-init isn't wired up today, but "switch workspace" was
+    // already on the backlog). Callback re-reads library from the store so
+    // anything the midnight scheduler or another action wrote in the 100ms
+    // gap is not overwritten.
+    if (initPostBootTimer !== null) {
+      clearTimeout(initPostBootTimer)
+      initPostBootTimer = null
+    }
     // All saves and scans happen in background, don't block UI
-    setTimeout(async () => {
+    initPostBootTimer = setTimeout(async () => {
+      initPostBootTimer = null
+      const current = get().library
+      if (!current) return  // user tore down before timer fired
       try {
-        await window.electronAPI.saveLibrary(library)
+        await window.electronAPI.saveLibrary(current)
       } catch (err) {
         console.error('[library] Failed to save library on init:', err)
       }
 
       // Scan OCR files in parallel
-      const unchecked = library.entries.filter(e => e.ocrStatus !== 'complete' && e.absPath)
+      const unchecked = current.entries.filter(e => e.ocrStatus !== 'complete' && e.absPath)
       if (unchecked.length > 0) {
         const results = await Promise.allSettled(
           unchecked.map(async entry => {
@@ -184,8 +201,11 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
           })
         )
         if (results.some(r => r.status === 'fulfilled' && r.value)) {
-          set({ library: { ...library } })
-          try { await window.electronAPI.saveLibrary(library) } catch (err) {
+          // Re-read again — scan took a while, state may have moved
+          const latest = get().library
+          if (!latest) return
+          set({ library: { ...latest } })
+          try { await window.electronAPI.saveLibrary(latest) } catch (err) {
             console.error('[library] Failed to save after OCR scan:', err)
           }
         }
@@ -200,8 +220,11 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const { library } = get()
     if (!library) return 0
 
+    // Batch 43 · 修 bug "新导入不显示"：之前 push 是原地 mutate 数组，
+    // set 后 library.entries 引用没变 → FolderItem useMemo 不重算 → UI 看不到新 entry。
+    // 改成 immutable：先收集新 entries 再一次性新建数组。
     const newIds: string[] = []
-    let added = 0
+    const newEntries: LibraryEntry[] = []
     for (const absPath of paths) {
       if (library.entries.some(e => e.absPath === absPath)) continue
       const fileName = absPath.split(/[/\\]/).pop()?.replace(/\.(pdf|docx?|epub|html?|txt|md)$/i, '') || ''
@@ -209,13 +232,14 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         id: uuid(), absPath, title: fileName, authors: [], tags: [], notes: '',
         folderId, ocrStatus: 'none', addedAt: new Date().toISOString()
       }
-      library.entries.push(entry)
+      newEntries.push(entry)
       newIds.push(entry.id)
-      added++
     }
+    const added = newEntries.length
+    const updatedLibrary = { ...library, entries: [...library.entries, ...newEntries] }
 
-    await window.electronAPI.saveLibrary(library)
-    set({ library: { ...library } })
+    await window.electronAPI.saveLibrary(updatedLibrary)
+    set({ library: updatedLibrary })
 
     // Kick off PDF metadata enrichment in the background (non-blocking)
     if (newIds.length > 0) {
@@ -241,9 +265,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       id: uuid(), absPath, title, authors: [], tags: [], notes: '',
       folderId, ocrStatus: 'none', addedAt: new Date().toISOString(),
     }
-    library.entries.push(entry)
-    await window.electronAPI.saveLibrary(library)
-    set({ library: { ...library } })
+    // Batch 43 · immutable update（同 importFiles 修复）
+    const updatedLibrary = { ...library, entries: [...library.entries, entry] }
+    await window.electronAPI.saveLibrary(updatedLibrary)
+    set({ library: updatedLibrary })
     return entry
   },
 
@@ -254,8 +279,11 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const { library } = get()
     if (!library) return 0
 
+    // Batch 43 · 修 bug "新导入不显示"：之前 push 是原地 mutate 数组，
+    // set 后 library.entries 引用没变 → FolderItem useMemo 不重算 → UI 看不到新 entry。
+    // 改成 immutable：先收集新 entries 再一次性新建数组。
     const newIds: string[] = []
-    let added = 0
+    const newEntries: LibraryEntry[] = []
     for (const absPath of paths) {
       if (library.entries.some(e => e.absPath === absPath)) continue
       const fileName = absPath.split(/[/\\]/).pop()?.replace(/\.(pdf|docx?|epub|html?|txt|md)$/i, '') || ''
@@ -263,13 +291,14 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         id: uuid(), absPath, title: fileName, authors: [], tags: [], notes: '',
         folderId, ocrStatus: 'none', addedAt: new Date().toISOString()
       }
-      library.entries.push(entry)
+      newEntries.push(entry)
       newIds.push(entry.id)
-      added++
     }
+    const added = newEntries.length
+    const updatedLibrary = { ...library, entries: [...library.entries, ...newEntries] }
 
-    await window.electronAPI.saveLibrary(library)
-    set({ library: { ...library } })
+    await window.electronAPI.saveLibrary(updatedLibrary)
+    set({ library: updatedLibrary })
 
     if (newIds.length > 0) {
       enrichPdfMetadataInBackground(
@@ -295,6 +324,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (!library) return { added: 0, skipped: 0, missingFile: 0, parseErrors: errors.length }
 
     const newIds: string[] = []
+    const newEntries: LibraryEntry[] = []
     let added = 0
     let skipped = 0
     let missingFile = 0
@@ -349,18 +379,20 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         ocrStatus: 'none',
         addedAt: new Date().toISOString(),
       }
-      library.entries.push(entry)
+      newEntries.push(entry)
       newIds.push(entry.id)
       added++
     }
 
     if (added > 0) {
-      await window.electronAPI.saveLibrary(library)
-      set({ library: { ...library } })
+      // Batch 43 · immutable update
+      const updatedLibrary = { ...library, entries: [...library.entries, ...newEntries] }
+      await window.electronAPI.saveLibrary(updatedLibrary)
+      set({ library: updatedLibrary })
 
       // Only enrich entries with real files — metadata-only ones have nothing to read from disk
       const withFiles = newIds.filter(id => {
-        const e = library.entries.find(x => x.id === id)
+        const e = updatedLibrary.entries.find(x => x.id === id)
         return !!e?.absPath
       })
       if (withFiles.length > 0) {
@@ -382,8 +414,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const { library } = get()
     if (!library) return 0
 
+    // Batch 43 · immutable update（同 importFiles 修复，避免 push mutate 让 UI 不更新）
     const newIds: string[] = []
-    let added = 0
+    const newEntries: LibraryEntry[] = []
     for (const absPath of paths) {
       if (library.entries.some(e => e.absPath === absPath)) continue
       const fileName = absPath.split(/[/\\]/).pop()?.replace(/\.(pdf|docx?|epub|html?|txt|md)$/i, '') || ''
@@ -391,14 +424,15 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         id: uuid(), absPath, title: fileName, authors: [], tags: [], notes: '',
         folderId, ocrStatus: 'none', addedAt: new Date().toISOString()
       }
-      library.entries.push(entry)
+      newEntries.push(entry)
       newIds.push(entry.id)
-      added++
     }
+    const added = newEntries.length
 
     if (added > 0) {
-      await window.electronAPI.saveLibrary(library)
-      set({ library: { ...library } })
+      const updatedLibrary = { ...library, entries: [...library.entries, ...newEntries] }
+      await window.electronAPI.saveLibrary(updatedLibrary)
+      set({ library: updatedLibrary })
 
       enrichPdfMetadataInBackground(
         newIds,
@@ -473,12 +507,19 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     }
 
     // Update last opened
+    // 2026-04-28 · 同 moveEntryToFolder 修法,改 immutable。`recently opened` 排序
+    //   的视图(QuickOpen / OcrStatusBadge 排序等)依赖 entries 数组引用变化才会重算。
     const { library } = get()
     if (library) {
       const idx = library.entries.findIndex(e => e.id === entry.id)
       if (idx >= 0) {
-        library.entries[idx].lastOpenedAt = new Date().toISOString()
-        await window.electronAPI.saveLibrary(library)
+        const newEntry = { ...library.entries[idx], lastOpenedAt: new Date().toISOString() }
+        const newEntries = library.entries.slice()
+        newEntries[idx] = newEntry
+        const newLibrary = { ...library, entries: newEntries }
+        await window.electronAPI.saveLibrary(newLibrary)
+        set({ library: newLibrary, currentEntry: newEntry, currentPdfMeta: meta })
+        return
       }
     }
 
@@ -492,14 +533,18 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const idx = library.entries.findIndex(e => e.id === id)
     if (idx < 0) return
 
-    library.entries[idx] = { ...library.entries[idx], ...updates }
-    await window.electronAPI.saveLibrary(library)
-    set({ library: { ...library } })
-
-    // If it's the currently open entry, update that too
-    if (get().currentEntry?.id === id) {
-      set({ currentEntry: library.entries[idx] })
-    }
+    // Batch 43 · 修 bug "OCR 完成后图标不更新"：之前 `library.entries[idx] = {...}`
+    // 是原地 mutate 数组，set 后 library.entries 引用没变 → FolderItem 的
+    // useMemo([library?.entries, folder.id]) 不重算 → 下游 EntryItem 看到旧 entry。
+    // 改成 immutable：新建 entry 对象 + 新建 entries 数组 + 新建 library 对象。
+    const newEntry = { ...library.entries[idx], ...updates }
+    const newEntries = library.entries.slice()
+    newEntries[idx] = newEntry
+    const newLibrary = { ...library, entries: newEntries }
+    await window.electronAPI.saveLibrary(newLibrary)
+    const patch: { library: typeof newLibrary; currentEntry?: LibraryEntry } = { library: newLibrary }
+    if (get().currentEntry?.id === id) patch.currentEntry = newEntry
+    set(patch)
   },
 
   savePdfMeta: async (meta: PdfMeta) => {
@@ -579,15 +624,26 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     set({ library: { ...library } })
   },
 
+  // 2026-04-28 · 同 Batch 43 updateEntry 的修法 —— 原版 `entry.folderId = ...` 是
+  //   原地 mutate,set({ library: { ...library } }) 只刷顶层 ref,但 entries 数组
+  //   引用和 entries[idx] 对象引用都没变 → FolderItem 的 useMemo([entries, folderId])
+  //   认为 entries 没变跳过重算 → 拖拽完不重渲,要刷新一下才显示。改 immutable。
   moveEntryToFolder: async (entryId: string, folderId: string | undefined) => {
     const { library } = get()
     if (!library) return
-    const entry = library.entries.find(e => e.id === entryId)
-    if (entry) entry.folderId = folderId
-    await window.electronAPI.saveLibrary(library)
-    set({ library: { ...library } })
+    const idx = library.entries.findIndex(e => e.id === entryId)
+    if (idx < 0) return
+    const newEntry = { ...library.entries[idx], folderId }
+    const newEntries = library.entries.slice()
+    newEntries[idx] = newEntry
+    const newLibrary = { ...library, entries: newEntries }
+    await window.electronAPI.saveLibrary(newLibrary)
+    set({ library: newLibrary })
   },
 
+  // 2026-04-28 · reorderEntry 同样改 immutable。除了拖动的 entry 自身的
+  //   folderId/sortIndex 变,被它挤走的兄弟节点的 sortIndex 也都要重排,所以一次
+  //   性把 newEntries 数组重建,涉及到的 entry 各自换新对象引用。
   reorderEntry: async (entryId: string, targetId: string, position: 'before' | 'after') => {
     const { library } = get()
     if (!library) return
@@ -597,26 +653,35 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const target = library.entries.find(e => e.id === targetId)
     if (!entry || !target) return
 
-    // Put dragged entry in same folder as target
-    entry.folderId = target.folderId
+    const newFolderId = target.folderId
 
-    // Get siblings in the same folder, sorted by current sortIndex
+    // Build the ordered sibling list in the destination folder
     const siblings = library.entries
-      .filter(e => e.folderId === target.folderId)
+      .filter(e => e.folderId === newFolderId && e.id !== entryId)
       .sort((a, b) => (a.sortIndex ?? 9999) - (b.sortIndex ?? 9999))
+    const targetIdxInSiblings = siblings.findIndex(e => e.id === targetId)
+    const insertIdx = position === 'before' ? targetIdxInSiblings : targetIdxInSiblings + 1
+    const orderedIds = siblings.map(e => e.id)
+    orderedIds.splice(insertIdx, 0, entryId)
 
-    // Remove the dragged entry from the list
-    const without = siblings.filter(e => e.id !== entryId)
-    // Find target position
-    const targetIdx = without.findIndex(e => e.id === targetId)
-    const insertIdx = position === 'before' ? targetIdx : targetIdx + 1
-    // Insert
-    without.splice(insertIdx, 0, entry)
-    // Reassign sortIndex
-    without.forEach((e, i) => { e.sortIndex = i })
+    // Map: entryId → new sortIndex
+    const newSortIndex = new Map<string, number>()
+    orderedIds.forEach((id, i) => newSortIndex.set(id, i))
 
-    await window.electronAPI.saveLibrary(library)
-    set({ library: { ...library } })
+    // Rebuild entries array — touched entries get new object refs, others unchanged
+    const newEntries = library.entries.map(e => {
+      if (e.id === entryId) {
+        return { ...e, folderId: newFolderId, sortIndex: newSortIndex.get(e.id) ?? 0 }
+      }
+      if (newSortIndex.has(e.id)) {
+        return { ...e, sortIndex: newSortIndex.get(e.id)! }
+      }
+      return e
+    })
+
+    const newLibrary = { ...library, entries: newEntries }
+    await window.electronAPI.saveLibrary(newLibrary)
+    set({ library: newLibrary })
   },
 
   // ===== Memo actions =====
