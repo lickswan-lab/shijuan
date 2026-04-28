@@ -98,6 +98,7 @@ interface LibraryState {
   renameFolder: (id: string, name: string) => Promise<void>
   deleteFolder: (id: string) => Promise<void>
   moveEntryToFolder: (entryId: string, folderId: string | undefined) => Promise<void>
+  moveEntriesToFolder: (entryIds: string[], folderId: string | undefined) => Promise<void>
   reorderEntry: (entryId: string, targetId: string, position: 'before' | 'after') => Promise<void>
 
   // Memo actions
@@ -624,10 +625,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     set({ library: { ...library } })
   },
 
-  // 2026-04-28 · 同 Batch 43 updateEntry 的修法 —— 原版 `entry.folderId = ...` 是
-  //   原地 mutate,set({ library: { ...library } }) 只刷顶层 ref,但 entries 数组
-  //   引用和 entries[idx] 对象引用都没变 → FolderItem 的 useMemo([entries, folderId])
-  //   认为 entries 没变跳过重算 → 拖拽完不重渲,要刷新一下才显示。改 immutable。
+  // 2026-04-28 · 同 Batch 43 updateEntry 的修法 + 乐观更新:
+  //   1) 不再 mutate,新建 entry/entries/library 三层(让 React/zustand 看到引用变化)。
+  //   2) **state 先 set,再 await saveLibrary** —— 之前是 await 完成才 set,
+  //      磁盘 IO 200~500ms 大库时用户感知到"拖完延迟一下才挪过去"。
+  //      乐观更新让 UI 立即响应,磁盘异步写。saveLibrary 失败也不回滚
+  //      (拖拽 race 概率极低,且用户可以再拖一次)。
   moveEntryToFolder: async (entryId: string, folderId: string | undefined) => {
     const { library } = get()
     if (!library) return
@@ -637,13 +640,30 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const newEntries = library.entries.slice()
     newEntries[idx] = newEntry
     const newLibrary = { ...library, entries: newEntries }
-    await window.electronAPI.saveLibrary(newLibrary)
     set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
   },
 
-  // 2026-04-28 · reorderEntry 同样改 immutable。除了拖动的 entry 自身的
-  //   folderId/sortIndex 变,被它挤走的兄弟节点的 sortIndex 也都要重排,所以一次
-  //   性把 newEntries 数组重建,涉及到的 entry 各自换新对象引用。
+  // 2026-04-28 · 批量移入/移出分组的**原子**版本。
+  //   原 handleBatchMove 用 selectedIds.forEach(id => moveEntryToFolder(id, ...)),
+  //   N 个 async 调用并行,虽然每个 sync 段都正确 set 了累积状态(理论上 OK),
+  //   但 N 个 await saveLibrary 在主进程并发写盘时 last-write-wins,
+  //   磁盘留下最后一个 set 的快照(只移了一个) → 重启后 UI 回到只移一个的状态;
+  //   而且实际观察"轮流移入,只剩一个"暗示 UI 也被某个回流路径污染。
+  //   彻底解决:一次 set 一次 save,所有 entry 在同一个 newLibrary 里都改完。
+  moveEntriesToFolder: async (entryIds: string[], folderId: string | undefined) => {
+    const { library } = get()
+    if (!library || entryIds.length === 0) return
+    const idSet = new Set(entryIds)
+    const newEntries = library.entries.map(e => idSet.has(e.id) ? { ...e, folderId } : e)
+    const newLibrary = { ...library, entries: newEntries }
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  // 2026-04-28 · reorderEntry 同样改 immutable + 乐观更新。除了拖动的 entry 自身
+  //   folderId/sortIndex 变,被挤动的兄弟节点的 sortIndex 也都要重排,一次性
+  //   重建 newEntries 数组,涉及到的 entry 各自换新对象引用。
   reorderEntry: async (entryId: string, targetId: string, position: 'before' | 'after') => {
     const { library } = get()
     if (!library) return
@@ -680,8 +700,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     })
 
     const newLibrary = { ...library, entries: newEntries }
-    await window.electronAPI.saveLibrary(newLibrary)
     set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
   },
 
   // ===== Memo actions =====
