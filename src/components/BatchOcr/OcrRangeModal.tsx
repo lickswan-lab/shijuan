@@ -100,6 +100,10 @@ export default function OcrRangeModal({
       setErrorMsg('起始页必须是 ≥ 1 的整数')
       return
     }
+    if (totalPages > 0 && start > totalPages) {
+      setErrorMsg(`起始页不能超过总页数 ${totalPages}`)
+      return
+    }
     if (!Number.isFinite(end) || end < start) {
       setErrorMsg('结束页必须 ≥ 起始页')
       return
@@ -111,14 +115,33 @@ export default function OcrRangeModal({
     onConfirm({ startPage: start, endPage: end })
   }
 
+  // 输入失焦时把越界值 clamp 回合法区间——避免用户输完后还以为 200 页能 OCR
+  function clampPage(s: string): string {
+    const n = parseInt(s, 10)
+    if (!Number.isFinite(n)) return s  // 空字符串/非数字保留,让用户继续输
+    if (n < 1) return '1'
+    if (totalPages > 0 && n > totalPages) return String(totalPages)
+    return String(n)
+  }
+
   if (!open) return null
 
   // 估算费用 / 时长——粗略提示
+  //
+  // 旧公式 estChunks * 0.5min + Math.round 让 1-3 个 chunk 全部显示成 1 分钟,
+  // 完全抹平了大小差异。重新校准:
+  //   - 单 chunk 实际 GLM-OCR 处理 ≈ 50-70s(80 页大 batch)
+  //   - GLM 4 RPM 节流 → 每个新 chunk 至少要等 15s 才能发起
+  //   - 网络/启动 buffer ~15s
+  // 公式: max(45, chunks * 60 + 15),小于 60s 显示秒,否则显示分钟。
   const pageCount = mode === 'full'
     ? totalPages || 0
     : Math.max(0, (parseInt(endStr, 10) || 0) - (parseInt(startStr, 10) || 0) + 1)
   const estChunks = Math.ceil(pageCount / 80)
-  const estMinutes = Math.max(1, Math.round(estChunks * 0.5)) // 每 chunk ~30s 粗估
+  const estSeconds = pageCount > 0 ? Math.max(45, estChunks * 60 + 15) : 0
+  const estTimeLabel = estSeconds < 60
+    ? `${estSeconds} 秒`
+    : `${Math.ceil(estSeconds / 60)} 分钟`
 
   return (
     <div
@@ -183,6 +206,7 @@ export default function OcrRangeModal({
               type="number"
               value={startStr}
               onChange={(e) => { setStartStr(e.target.value); if (mode !== 'range') setMode('range') }}
+              onBlur={(e) => setStartStr(clampPage(e.target.value))}
               min={1}
               max={totalPages || undefined}
               style={inputStyle}
@@ -192,6 +216,7 @@ export default function OcrRangeModal({
               type="number"
               value={endStr}
               onChange={(e) => { setEndStr(e.target.value); if (mode !== 'range') setMode('range') }}
+              onBlur={(e) => setEndStr(clampPage(e.target.value))}
               min={1}
               max={totalPages || undefined}
               style={inputStyle}
@@ -208,7 +233,7 @@ export default function OcrRangeModal({
             borderRadius: 6, lineHeight: 1.55,
           }}>
             将处理 <strong style={{ color: 'var(--accent)' }}>{pageCount}</strong> 页，
-            约 {estChunks} 个分片，预计 {estMinutes} 分钟（GLM 4 RPM 节流，实际可能更长）。
+            约 {estChunks} 个分片，预计 {estTimeLabel}（GLM 4 RPM 节流，实际可能更长）。
           </div>
         )}
 
