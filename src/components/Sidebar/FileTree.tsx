@@ -453,7 +453,14 @@ function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep,
 // 2026-04-25 PERF · 用 memo 包裹 —— folder prop 是 LibraryFolder 对象
 // （引用稳定除非内容变化），其他 props 没有，library subscription 内部独立
 // 2026-04-28 · 嵌套子分组:FolderItem 递归渲染 child folders + 接收 folder drop
-const FolderItem = memo(function FolderItem({ folder }: { folder: VirtualFolder }) {
+// 2026-04-28 · 多选透传:把 multiSelect / selectedIds / onToggleSelect 传给
+//   分组内的 EntryItem,否则分组内的文献没有选中框(用户报)
+const FolderItem = memo(function FolderItem({ folder, multiSelect, selectedIds, onToggleSelect }: {
+  folder: VirtualFolder
+  multiSelect?: boolean
+  selectedIds?: Set<string>
+  onToggleSelect?: (id: string) => void
+}) {
   // Batch 43: 替换 window.confirm
   const { ask: askConfirm, dialog: confirmDialog } = useConfirmDialog()
   // 2026-04-25 PERF · 选择性订阅替代全量解构 —— 之前任何 store 字段变化都触发
@@ -611,9 +618,27 @@ const FolderItem = memo(function FolderItem({ folder }: { folder: VirtualFolder 
               />
             </div>
           )}
-          {/* 子分组先于本层 entries 显示,跟根级 folder/entry 排版一致 */}
-          {childFolders.map(cf => <FolderItem key={cf.id} folder={cf} />)}
-          {entries.map(entry => <EntryItem key={entry.id} entry={entry} />)}
+          {/* 子分组先于本层 entries 显示,跟根级 folder/entry 排版一致。
+              2026-04-28 · multiSelect props 沿 FolderItem 递归传下去,让分组内的
+              文献也能在多选模式下出现选中框。 */}
+          {childFolders.map(cf => (
+            <FolderItem
+              key={cf.id}
+              folder={cf}
+              multiSelect={multiSelect}
+              selectedIds={selectedIds}
+              onToggleSelect={onToggleSelect}
+            />
+          ))}
+          {entries.map(entry => (
+            <EntryItem
+              key={entry.id}
+              entry={entry}
+              multiSelect={multiSelect}
+              selected={selectedIds?.has(entry.id)}
+              onToggleSelect={onToggleSelect}
+            />
+          ))}
         </div>
       )}
       {/* Batch 43: ConfirmDialog 替代 window.confirm */}
@@ -904,27 +929,61 @@ function LibraryPanel() {
             </button>
             {showMoveMenu && (
               <div style={{
-                position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100,
+                // 2026-04-28 polish · 加宽到 220px(原继承父按钮宽度 ~80px,深嵌套挤
+                //   到换行)。max-height + overflow:auto 防分组很多时溢出屏幕。
+                position: 'absolute', top: '100%', left: 0, zIndex: 100,
+                minWidth: 220, maxHeight: 320, overflow: 'auto',
                 background: 'var(--bg)', border: '1px solid var(--border)',
-                borderRadius: 6, boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
-                padding: '2px 0', marginTop: 2,
+                borderRadius: 8, boxShadow: '0 6px 18px rgba(60,40,20,0.15)',
+                padding: '4px 0', marginTop: 4,
+                whiteSpace: 'nowrap',
               }}>
                 <div onClick={() => handleBatchMove(undefined)}
-                  style={{ padding: '5px 10px', fontSize: 11, cursor: 'pointer' }}
+                  style={{
+                    padding: '7px 14px', fontSize: 12, cursor: 'pointer',
+                    color: 'var(--text-secondary)',
+                    transition: 'background 0.12s',
+                  }}
                   onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
                   onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
                   根目录
                 </div>
-                {/* 2026-04-28 · 移入分组下拉:展平 folder 树,按深度缩进显示嵌套关系 */}
-                {flattenFoldersWithDepth(allFolders).map(({ folder: f, depth }) => (
-                  <div key={f.id} onClick={() => handleBatchMove(f.id)}
-                    style={{ padding: '5px 10px', paddingLeft: 10 + depth * 14, fontSize: 11, cursor: 'pointer' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                    {depth > 0 && <span style={{ color: 'var(--text-muted)', marginRight: 4 }}>↳</span>}
-                    {f.name}
-                  </div>
-                ))}
+                {(() => {
+                  const flat = flattenFoldersWithDepth(allFolders)
+                  if (flat.length === 0) return null
+                  return (
+                    <>
+                      <div style={{ height: 1, background: 'var(--border-light)', margin: '2px 0' }} />
+                      {/* 2026-04-28 polish · 嵌套层级靠 padding-left + 左侧细线表达,
+                            不用 ↳ 这种字符前缀(深嵌套时一连串看着乱)。第一层 12px,
+                            每深一级 +12px,左侧加 1px 暖灰竖线作为视觉锚点。 */}
+                      {flat.map(({ folder: f, depth }) => (
+                        <div key={f.id} onClick={() => handleBatchMove(f.id)}
+                          style={{
+                            padding: '7px 14px', paddingLeft: 14 + depth * 12,
+                            fontSize: 12, cursor: 'pointer',
+                            color: 'var(--text)',
+                            position: 'relative',
+                            transition: 'background 0.12s',
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                          {/* depth>0 时画一条左侧细线表示是子级 */}
+                          {depth > 0 && (
+                            <span style={{
+                              position: 'absolute',
+                              left: 8 + (depth - 1) * 12 + 6, top: 4, bottom: 4,
+                              width: 1,
+                              background: 'var(--border-light)',
+                              pointerEvents: 'none',
+                            }} />
+                          )}
+                          {f.name}
+                        </div>
+                      ))}
+                    </>
+                  )
+                })()}
               </div>
             )}
           </div>
@@ -970,7 +1029,15 @@ function LibraryPanel() {
                 />
               </div>
             )}
-            {!searchQuery && rootFolders.map(f => <FolderItem key={f.id} folder={f} />)}
+            {!searchQuery && rootFolders.map(f => (
+              <FolderItem
+                key={f.id}
+                folder={f}
+                multiSelect={multiSelect}
+                selectedIds={selectedIds}
+                onToggleSelect={toggleSelect}
+              />
+            ))}
             {sorted.map(entry => (
               <EntryItem
                 key={entry.id}
