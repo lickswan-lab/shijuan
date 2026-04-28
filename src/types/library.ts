@@ -23,6 +23,8 @@ export interface VirtualFolder {
   id: string
   name: string
   createdAt: string
+  // 2026-04-28 · 嵌套子分组支持。null/undefined = 根级。库里旧 folder 自动 = 根级。
+  parentId?: string
 }
 
 export interface LibraryEntry {
@@ -237,6 +239,13 @@ export interface AgentMessage {
   toolName?: string
   toolArgs?: string
   timestamp: string
+  // 2026-04-24 · 消息发送时召唤的人物 · 让历史头像不被"最新 persona"污染
+  personaAtMoment?: {
+    id: string
+    name: string
+  }
+  // 2026-04-24 多重召唤 · 标记此消息属于哪一轮辩论（1-based），debate mode 才有
+  debateRound?: number
 }
 
 export interface AgentConversation {
@@ -254,6 +263,16 @@ export interface AgentConversation {
   /** Cached display name so header shows "正在以 XXX 视角对话" without an
    *  extra persona-load roundtrip. Updated when summon is toggled. */
   summonedPersonaName?: string
+  // 2026-04-24 多重召唤 · 扩展 summonedPersonaId 为数组版（最多 3 位）
+  //   - 主持者（第一位）= 以前的 summonedPersonaId 语义
+  //   - [id, name] 各自缓存以免每次加载
+  //   - 未设置 / 空数组 = 老数据 / 单人模式（仍走 summonedPersonaId）
+  summonedPersonas?: Array<{ id: string; name: string }>
+  // 辩论模式：true 时按 "A 答 → B 回应 → A 回应 B..." 轮番对话（每次 send
+  // 触发 N 轮交锋），false 时每位各自独立回答一次（圆桌模式）
+  debateMode?: boolean
+  // 辩论轮数 · 2026-04-25 用户可调（1-5）；未设置时默认 2
+  debateRounds?: number
 }
 
 export interface HermesSkill {

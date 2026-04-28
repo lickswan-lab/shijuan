@@ -29,6 +29,31 @@ function plainTextCitation(entry: LibraryEntry): string {
   return parts.join(' ').trim()
 }
 
+// 2026-04-28 · 嵌套子分组:把 folder 树按 DFS 展平为 (folder, depth) 列表,
+//   用于"移入分组"下拉菜单的缩进显示。父级在子级前面。坏 parentId(指向不存在
+//   的 folder)的当作根级处理,避免数据损坏导致整棵树丢失。
+function flattenFoldersWithDepth(folders: VirtualFolder[]): Array<{ folder: VirtualFolder; depth: number }> {
+  if (!folders || folders.length === 0) return []
+  const ids = new Set(folders.map(f => f.id))
+  const childrenOf = new Map<string | undefined, VirtualFolder[]>()
+  for (const f of folders) {
+    const key = f.parentId && ids.has(f.parentId) ? f.parentId : undefined
+    const arr = childrenOf.get(key) || []
+    arr.push(f)
+    childrenOf.set(key, arr)
+  }
+  const out: Array<{ folder: VirtualFolder; depth: number }> = []
+  const dfs = (parentId: string | undefined, depth: number) => {
+    const kids = childrenOf.get(parentId) || []
+    for (const f of kids) {
+      out.push({ folder: f, depth })
+      dfs(f.id, depth + 1)
+    }
+  }
+  dfs(undefined, 0)
+  return out
+}
+
 // ===== Context Menu =====
 interface MenuPos { x: number; y: number }
 interface MenuItem { label: string; danger?: boolean; onClick: () => void }
@@ -427,6 +452,7 @@ function EntryContextMenu({ pos, confirmDelete, onClose, onRemove, onDeleteStep,
 // ===== Virtual folder =====
 // 2026-04-25 PERF · 用 memo 包裹 —— folder prop 是 LibraryFolder 对象
 // （引用稳定除非内容变化），其他 props 没有，library subscription 内部独立
+// 2026-04-28 · 嵌套子分组:FolderItem 递归渲染 child folders + 接收 folder drop
 const FolderItem = memo(function FolderItem({ folder }: { folder: VirtualFolder }) {
   // Batch 43: 替换 window.confirm
   const { ask: askConfirm, dialog: confirmDialog } = useConfirmDialog()
@@ -434,6 +460,8 @@ const FolderItem = memo(function FolderItem({ folder }: { folder: VirtualFolder 
   // 所有 FolderItem 重渲，文件多时显著卡顿
   const library = useLibraryStore(s => s.library)
   const moveEntryToFolder = useLibraryStore(s => s.moveEntryToFolder)
+  const moveFolderToParent = useLibraryStore(s => s.moveFolderToParent)
+  const createFolder = useLibraryStore(s => s.createFolder)
   const renameFolder = useLibraryStore(s => s.renameFolder)
   const deleteFolder = useLibraryStore(s => s.deleteFolder)
   const [expanded, setExpanded] = useState(true)
@@ -441,6 +469,8 @@ const FolderItem = memo(function FolderItem({ folder }: { folder: VirtualFolder 
   const [editing, setEditing] = useState(false)
   const [editName, setEditName] = useState(folder.name)
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null)
+  // 2026-04-28 · 新建子分组的 inline 输入态(同根目录新建分组的体验)
+  const [newSubName, setNewSubName] = useState<string | null>(null)
 
   // 2026-04-25 PERF · useMemo 缓存 filter+sort，library 不变时复用
   const entries = useMemo(
@@ -448,6 +478,18 @@ const FolderItem = memo(function FolderItem({ folder }: { folder: VirtualFolder 
       .sort((a, b) => (a.sortIndex ?? 9999) - (b.sortIndex ?? 9999)),
     [library?.entries, folder.id],
   )
+  // 2026-04-28 · 子分组列表(下面会递归 render)
+  const childFolders = useMemo(
+    () => (library?.folders || []).filter(f => f.parentId === folder.id),
+    [library?.folders, folder.id],
+  )
+
+  const handleDragStart = (e: DragEvent) => {
+    // 2026-04-28 · 让 folder 自身可拖动到其它 folder 形成嵌套
+    e.dataTransfer.setData('folder-id', folder.id)
+    e.dataTransfer.effectAllowed = 'move'
+    e.stopPropagation()
+  }
 
   const handleDragOver = (e: DragEvent) => {
     e.preventDefault()
@@ -459,13 +501,27 @@ const FolderItem = memo(function FolderItem({ folder }: { folder: VirtualFolder 
     e.preventDefault()
     e.stopPropagation()
     setDragOver(false)
+    // 2026-04-28 · 既支持 entry drop(移入分组)也支持 folder drop(嵌套子分组)
     const entryId = e.dataTransfer.getData('entry-id')
-    if (entryId) moveEntryToFolder(entryId, folder.id)
+    if (entryId) { moveEntryToFolder(entryId, folder.id); return }
+    const draggedFolderId = e.dataTransfer.getData('folder-id')
+    if (draggedFolderId && draggedFolderId !== folder.id) {
+      moveFolderToParent(draggedFolderId, folder.id)
+    }
   }
 
   const handleRename = () => {
     if (editName.trim()) renameFolder(folder.id, editName.trim())
     setEditing(false)
+  }
+
+  const confirmNewSub = () => {
+    const name = (newSubName || '').trim()
+    if (name) {
+      void createFolder(name, folder.id)
+      setExpanded(true)  // 父分组确保展开,看得见新子分组
+    }
+    setNewSubName(null)
   }
 
   const handleContextMenu = (e: MouseEvent) => {
@@ -478,6 +534,8 @@ const FolderItem = memo(function FolderItem({ folder }: { folder: VirtualFolder 
     <div>
       <div
         className={`tree-item tree-folder ${dragOver ? 'active' : ''}`}
+        draggable
+        onDragStart={handleDragStart}
         onClick={() => setExpanded(!expanded)}
         onDragOver={handleDragOver}
         onDragLeave={() => setDragOver(false)}
@@ -511,11 +569,13 @@ const FolderItem = memo(function FolderItem({ folder }: { folder: VirtualFolder 
           pos={menuPos}
           onClose={() => setMenuPos(null)}
           items={[
+            // 2026-04-28 · 新建子分组入口
+            { label: '新建子分组', onClick: () => { setExpanded(true); setNewSubName('') } },
             { label: '重命名', onClick: () => { setEditing(true); setEditName(folder.name) } },
             { label: '删除分组', danger: true, onClick: () => {
-              const childCount = entries.length
+              const childCount = entries.length + childFolders.length
               const msg = childCount > 0
-                ? `删除分组「${folder.name}」？\n\n分组内的 ${childCount} 篇文献会移回根目录（文件本身不会被删除）。`
+                ? `删除分组「${folder.name}」？\n\n分组内的 ${entries.length} 篇文献和 ${childFolders.length} 个子分组会被提到上一层（文件本身不会被删除）。`
                 : `删除空分组「${folder.name}」？`
               askConfirm({
                 title: '删除分组',
@@ -530,6 +590,29 @@ const FolderItem = memo(function FolderItem({ folder }: { folder: VirtualFolder 
       )}
       {expanded && (
         <div style={{ paddingLeft: 14 }}>
+          {/* 2026-04-28 · 新建子分组的 inline 输入框 */}
+          {newSubName !== null && (
+            <div className="tree-item tree-folder" style={{ gap: 6 }}>
+              <span className="icon" style={{ fontSize: 10 }}>▸</span>
+              <input
+                value={newSubName}
+                onChange={e => setNewSubName(e.target.value)}
+                onBlur={confirmNewSub}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') confirmNewSub()
+                  if (e.key === 'Escape') setNewSubName(null)
+                }}
+                placeholder="子分组名称..."
+                autoFocus
+                style={{
+                  flex: 1, border: '1px solid var(--accent)', borderRadius: 4,
+                  padding: '1px 6px', fontSize: 13, outline: 'none', background: 'var(--bg)',
+                }}
+              />
+            </div>
+          )}
+          {/* 子分组先于本层 entries 显示,跟根级 folder/entry 排版一致 */}
+          {childFolders.map(cf => <FolderItem key={cf.id} folder={cf} />)}
           {entries.map(entry => <EntryItem key={entry.id} entry={entry} />)}
         </div>
       )}
@@ -601,7 +684,9 @@ function LibraryPanel() {
   const [confirmBatchDelete, setConfirmBatchDelete] = useState(false)
 
   const entries = library?.entries || []
-  const folders = library?.folders || []
+  // 2026-04-28 · 嵌套子分组:LibraryPanel 只渲染根级 folder,子级递归在 FolderItem 内部
+  const allFolders = library?.folders || []
+  const rootFolders = allFolders.filter(f => !f.parentId)
 
   // 2026-04-25 PERF · useCallback 稳定引用 —— inline arrow 会让所有 EntryItem
   // 的 memo 失效，列表多时显著浪费。函数式 setSelectedIds 让 deps 为空。
@@ -701,10 +786,14 @@ function LibraryPanel() {
     setNewFolderName(null)
   }
 
+  const moveFolderToParent = useLibraryStore(s => s.moveFolderToParent)
   const handleRootDrop = (e: DragEvent) => {
     e.preventDefault()
+    // 2026-04-28 · 同时支持 entry / folder drop 到根
     const entryId = e.dataTransfer.getData('entry-id')
-    if (entryId) moveEntryToFolder(entryId, undefined)
+    if (entryId) { moveEntryToFolder(entryId, undefined); return }
+    const folderId = e.dataTransfer.getData('folder-id')
+    if (folderId) moveFolderToParent(folderId, undefined)
   }
 
   return (
@@ -826,11 +915,13 @@ function LibraryPanel() {
                   onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
                   根目录
                 </div>
-                {folders.map(f => (
+                {/* 2026-04-28 · 移入分组下拉:展平 folder 树,按深度缩进显示嵌套关系 */}
+                {flattenFoldersWithDepth(allFolders).map(({ folder: f, depth }) => (
                   <div key={f.id} onClick={() => handleBatchMove(f.id)}
-                    style={{ padding: '5px 10px', fontSize: 11, cursor: 'pointer' }}
+                    style={{ padding: '5px 10px', paddingLeft: 10 + depth * 14, fontSize: 11, cursor: 'pointer' }}
                     onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                    {depth > 0 && <span style={{ color: 'var(--text-muted)', marginRight: 4 }}>↳</span>}
                     {f.name}
                   </div>
                 ))}
@@ -879,7 +970,7 @@ function LibraryPanel() {
                 />
               </div>
             )}
-            {!searchQuery && folders.map(f => <FolderItem key={f.id} folder={f} />)}
+            {!searchQuery && rootFolders.map(f => <FolderItem key={f.id} folder={f} />)}
             {sorted.map(entry => (
               <EntryItem
                 key={entry.id}

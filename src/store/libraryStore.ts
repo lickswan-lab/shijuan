@@ -94,9 +94,12 @@ interface LibraryState {
   updatePdfMetaByEntryId: (targetEntryId: string, updater: (meta: PdfMeta) => PdfMeta) => Promise<void>
 
   // Folder actions
-  createFolder: (name: string) => Promise<VirtualFolder>
+  createFolder: (name: string, parentId?: string) => Promise<VirtualFolder>
   renameFolder: (id: string, name: string) => Promise<void>
   deleteFolder: (id: string) => Promise<void>
+  // 2026-04-28 · 把 folder 移到另一个 folder 之下(或 parentId=undefined 移回根)。
+  //   防自环 / 防做自己后代的 child(那会让 deleteFolder 找不到边界)。失败静默返回。
+  moveFolderToParent: (folderId: string, parentId: string | undefined) => Promise<void>
   moveEntryToFolder: (entryId: string, folderId: string | undefined) => Promise<void>
   moveEntriesToFolder: (entryIds: string[], folderId: string | undefined) => Promise<void>
   reorderEntry: (entryId: string, targetId: string, position: 'before' | 'after') => Promise<void>
@@ -593,36 +596,73 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     await next
   },
 
-  createFolder: async (name: string) => {
+  // 2026-04-28 · 新增 parentId 入参(创建子分组用)。同步换 immutable + 乐观更新。
+  createFolder: async (name: string, parentId?: string) => {
     const { library } = get()
     if (!library) throw new Error('Library not loaded')
-    if (!library.folders) library.folders = []
-    const folder: VirtualFolder = { id: uuid(), name, createdAt: new Date().toISOString() }
-    library.folders.push(folder)
-    await window.electronAPI.saveLibrary(library)
-    set({ library: { ...library } })
+    const folder: VirtualFolder = { id: uuid(), name, createdAt: new Date().toISOString(), parentId }
+    const newFolders = [...(library.folders || []), folder]
+    const newLibrary = { ...library, folders: newFolders }
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
     return folder
   },
 
+  // 2026-04-28 · immutable + 乐观更新
   renameFolder: async (id: string, name: string) => {
     const { library } = get()
     if (!library) return
-    const f = library.folders?.find(f => f.id === id)
-    if (f) f.name = name
-    await window.electronAPI.saveLibrary(library)
-    set({ library: { ...library } })
+    const newFolders = (library.folders || []).map(f => f.id === id ? { ...f, name } : f)
+    const newLibrary = { ...library, folders: newFolders }
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
   },
 
+  // 2026-04-28 · immutable + 乐观更新 + 子分组层级保留:
+  //   删 A 时它的 child folder 不能也跟着删,把它们的 parentId 改成 A 的 parentId
+  //   (相当于"提升一级")。entries 同样:被删 folder 内的 entry 也提升到该层。
   deleteFolder: async (id: string) => {
     const { library } = get()
     if (!library) return
-    library.folders = (library.folders || []).filter(f => f.id !== id)
-    // Move entries in this folder back to root
-    for (const e of library.entries) {
-      if (e.folderId === id) e.folderId = undefined
+    const target = (library.folders || []).find(f => f.id === id)
+    const grandParentId = target?.parentId
+    const newFolders = (library.folders || [])
+      .filter(f => f.id !== id)
+      .map(f => f.parentId === id ? { ...f, parentId: grandParentId } : f)
+    const newEntries = library.entries.map(e =>
+      e.folderId === id ? { ...e, folderId: grandParentId } : e
+    )
+    const newLibrary = { ...library, folders: newFolders, entries: newEntries }
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  // 2026-04-28 · 把 folder 嵌入另一个 parent(或抬回根)。
+  //   防自环:parentId 不能 = folderId 自身,也不能是 folderId 的后代
+  //   (会形成循环引用,deleteFolder 找祖父也会无限循环)。
+  moveFolderToParent: async (folderId: string, parentId: string | undefined) => {
+    const { library } = get()
+    if (!library || folderId === parentId) return
+
+    // 防成为自己的后代
+    if (parentId) {
+      const folders = library.folders || []
+      let cur: string | undefined = parentId
+      const seen = new Set<string>()
+      while (cur) {
+        if (cur === folderId) return  // would form cycle
+        if (seen.has(cur)) return     // 防数据已损坏的环导致死循环
+        seen.add(cur)
+        cur = folders.find(f => f.id === cur)?.parentId
+      }
     }
-    await window.electronAPI.saveLibrary(library)
-    set({ library: { ...library } })
+
+    const newFolders = (library.folders || []).map(f =>
+      f.id === folderId ? { ...f, parentId } : f
+    )
+    const newLibrary = { ...library, folders: newFolders }
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
   },
 
   // 2026-04-28 · 同 Batch 43 updateEntry 的修法 + 乐观更新:
