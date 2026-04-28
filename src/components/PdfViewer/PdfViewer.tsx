@@ -2924,7 +2924,7 @@ export default function PdfViewer() {
                 width: 48, padding: '4px 7px', fontSize: 11,
                 border: 'none', background: 'transparent',
                 color: 'var(--text)', outline: 'none',
-                textAlign: 'right',
+                textAlign: 'left',
               }}
             />
             <button
