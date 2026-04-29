@@ -671,6 +671,7 @@ function HtmlViewer({
   fontSize = 16, fontWeight = 400, colorDepth = 80,
   bgHue = 38, bgSat = 55, bgLight = 92,
   onToolbarShow,
+  onToolbarDismiss,
 }: {
   absPath: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
@@ -686,6 +687,7 @@ function HtmlViewer({
   // panel" behavior (onTextSelect(sel)) with the PDF-style "show floating
   // toolbar, user clicks to open panel".
   onToolbarShow?: (x: number, y: number, text: string) => void
+  onToolbarDismiss?: () => void
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
 
@@ -828,7 +830,7 @@ function EpubViewer({
   fontSize = 17, fontWeight = 400, colorDepth = 80,
   bgHue = 38, bgSat = 55, bgLight = 92,
   onToolbarShow,
-  activeSelectionText,
+  onToolbarDismiss,
 }: {
   absPath: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
@@ -848,9 +850,7 @@ function EpubViewer({
   // Floating toolbar trigger — when user selects text inside the iframe,
   // translate coords to parent document and ask parent to show its toolbar.
   onToolbarShow?: (x: number, y: number, text: string) => void
-  // Active selection text — highlighted persistently via epub.js annotations
-  // API (no raw DOM manipulation that would trigger re-renders).
-  activeSelectionText?: string
+  onToolbarDismiss?: () => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const bookRef = useRef<any>(null)
@@ -892,9 +892,8 @@ function EpubViewer({
   styleRef.current = { fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight }
   const onToolbarRef = useRef(onToolbarShow)
   onToolbarRef.current = onToolbarShow
-  // Active selection CFI — saved when user selects text, used to highlight
-  // via epub.js annotations API.
-  const activeCfiRef = useRef<string | null>(null)
+  const onToolbarDismissRef = useRef<(() => void) | null>(null)
+  onToolbarDismissRef.current = onToolbarDismiss
 
   // Compute the body text color from background lightness — matches the
   // formula used by OCR / DOCX viewers so EPUB feels consistent.
@@ -949,7 +948,6 @@ function EpubViewer({
       }
       img { max-width: 100% !important; height: auto !important; display: block !important; margin: 1em auto !important; }
       ::selection { background: rgba(200, 149, 108, 0.35); }
-      .active-sel { background: rgba(200,149,108,0.3) !important; border-radius: 2px; }
       /* 6-color underline marks + bold highlight, kept in sync with globals.css */
       .mark-underline-yellow { text-decoration: underline; text-decoration-color: #FFD43B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
       .mark-underline-red    { text-decoration: underline; text-decoration-color: #FF6B6B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
@@ -1061,31 +1059,6 @@ function EpubViewer({
     })
   }
 
-  // Persistent selection highlight: add/remove via epub.js annotations API
-  // whenever activeSelectionText changes. Uses epub.js's own annotation
-  // layer — no raw DOM manipulation that would trigger re-renders.
-  useEffect(() => {
-    const r = renditionRef.current
-    if (!r) return
-    // Clear previous highlight
-    if (activeCfiRef.current) {
-      try { r.annotations.remove(activeCfiRef.current, 'active-sel') } catch {}
-    }
-    // Add new highlight if text is selected
-    if (activeSelectionText && activeSelectionText.length >= 2 && activeCfiRef.current) {
-      try {
-        r.annotations.highlight(
-          activeCfiRef.current,
-          {},
-          () => {},
-          'active-sel',
-          { fill: 'rgba(200,149,108,0.3)' }
-        )
-      } catch {}
-    }
-    if (!activeSelectionText) activeCfiRef.current = null
-  }, [activeSelectionText])
-
   // Re-apply whenever annotations OR typography props change. Iterate all
   // iframes we've seen so far. New sections rendered later will apply on
   // their own 'rendered' event with the latest values via styleRef.
@@ -1156,15 +1129,12 @@ function EpubViewer({
       // contract (matching PDF/OCR/DOCX) is: selecting just shows the
       // toolbar; the annotation side-panel only opens when the user clicks
       // the toolbar's "注释" button.
-      rendition.on('selected', (cfiRange: string, contents: any) => {
+      rendition.on('selected', (_cfiRange: string, contents: any) => {
         const win = contents?.window as Window | undefined
         const sel = win?.getSelection()
         if (!sel || sel.rangeCount === 0) return
         const text = sel.toString().trim()
         if (!text || text.length < 2) return
-
-        // Save CFI for persistent highlight via epub.js annotations API
-        activeCfiRef.current = cfiRange
 
         try {
           const range = sel.getRangeAt(0)
@@ -1199,6 +1169,16 @@ function EpubViewer({
           const list = rendition.getContents() as any[]
           list.forEach((c) => {
             if (c?.cfiBase) contentsMapRef.current.set(c.cfiBase, c)
+            // Inject click-to-dismiss: clicks inside the iframe that don't hit
+            // a selection bubble up to parent's toolbar dismiss handler.
+            const doc = c?.document as Document | undefined
+            if (doc && !(doc as any).__sjDismissBound) {
+              (doc as any).__sjDismissBound = true
+              doc.addEventListener('click', () => {
+                const s = doc.defaultView?.getSelection()
+                if (!s || s.isCollapsed) onToolbarDismissRef.current?.()
+              })
+            }
             applyHighlights(c)
           })
           // Update chapter label from the spine item's nearest TOC entry
@@ -2631,6 +2611,11 @@ export default function PdfViewer() {
       const el = e.target as HTMLElement
       if (el.closest('.floating-toolbar') || el.closest('.immersive-annotation-box')) return
       setToolbar(null)
+      // When toolbar is dismissed without opening the annotation panel,
+      // also clear the active selection so the persistent highlight goes away.
+      if (useUiStore.getState().annotationPanelCollapsed) {
+        setTextSelection(null)
+      }
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
@@ -3437,7 +3422,7 @@ export default function PdfViewer() {
               setToolbar({ x, y, text, pageNumber: useUiStore.getState().currentVisiblePage })
               setToolbarMode('main')
             }}
-            activeSelectionText={textSelection?.text}
+            onToolbarDismiss={() => setToolbar(null)}
           />
         </div>
       )}
