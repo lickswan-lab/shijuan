@@ -828,6 +828,7 @@ function EpubViewer({
   fontSize = 17, fontWeight = 400, colorDepth = 80,
   bgHue = 38, bgSat = 55, bgLight = 92,
   onToolbarShow,
+  activeSelectionText,
 }: {
   absPath: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
@@ -847,6 +848,9 @@ function EpubViewer({
   // Floating toolbar trigger — when user selects text inside the iframe,
   // translate coords to parent document and ask parent to show its toolbar.
   onToolbarShow?: (x: number, y: number, text: string) => void
+  // Active selection text — highlighted persistently via epub.js annotations
+  // API (no raw DOM manipulation that would trigger re-renders).
+  activeSelectionText?: string
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const bookRef = useRef<any>(null)
@@ -888,6 +892,9 @@ function EpubViewer({
   styleRef.current = { fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight }
   const onToolbarRef = useRef(onToolbarShow)
   onToolbarRef.current = onToolbarShow
+  // Active selection CFI — saved when user selects text, used to highlight
+  // via epub.js annotations API.
+  const activeCfiRef = useRef<string | null>(null)
 
   // Compute the body text color from background lightness — matches the
   // formula used by OCR / DOCX viewers so EPUB feels consistent.
@@ -942,6 +949,7 @@ function EpubViewer({
       }
       img { max-width: 100% !important; height: auto !important; display: block !important; margin: 1em auto !important; }
       ::selection { background: rgba(200, 149, 108, 0.35); }
+      .active-sel { background: rgba(200,149,108,0.3) !important; border-radius: 2px; }
       /* 6-color underline marks + bold highlight, kept in sync with globals.css */
       .mark-underline-yellow { text-decoration: underline; text-decoration-color: #FFD43B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
       .mark-underline-red    { text-decoration: underline; text-decoration-color: #FF6B6B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
@@ -1053,6 +1061,31 @@ function EpubViewer({
     })
   }
 
+  // Persistent selection highlight: add/remove via epub.js annotations API
+  // whenever activeSelectionText changes. Uses epub.js's own annotation
+  // layer — no raw DOM manipulation that would trigger re-renders.
+  useEffect(() => {
+    const r = renditionRef.current
+    if (!r) return
+    // Clear previous highlight
+    if (activeCfiRef.current) {
+      try { r.annotations.remove(activeCfiRef.current, 'active-sel') } catch {}
+    }
+    // Add new highlight if text is selected
+    if (activeSelectionText && activeSelectionText.length >= 2 && activeCfiRef.current) {
+      try {
+        r.annotations.highlight(
+          activeCfiRef.current,
+          {},
+          () => {},
+          'active-sel',
+          { fill: 'rgba(200,149,108,0.3)' }
+        )
+      } catch {}
+    }
+    if (!activeSelectionText) activeCfiRef.current = null
+  }, [activeSelectionText])
+
   // Re-apply whenever annotations OR typography props change. Iterate all
   // iframes we've seen so far. New sections rendered later will apply on
   // their own 'rendered' event with the latest values via styleRef.
@@ -1123,12 +1156,15 @@ function EpubViewer({
       // contract (matching PDF/OCR/DOCX) is: selecting just shows the
       // toolbar; the annotation side-panel only opens when the user clicks
       // the toolbar's "注释" button.
-      rendition.on('selected', (_cfiRange: string, contents: any) => {
+      rendition.on('selected', (cfiRange: string, contents: any) => {
         const win = contents?.window as Window | undefined
         const sel = win?.getSelection()
         if (!sel || sel.rangeCount === 0) return
         const text = sel.toString().trim()
         if (!text || text.length < 2) return
+
+        // Save CFI for persistent highlight via epub.js annotations API
+        activeCfiRef.current = cfiRange
 
         try {
           const range = sel.getRangeAt(0)
@@ -1139,7 +1175,9 @@ function EpubViewer({
             contents.iframe || (contents.document?.defaultView?.frameElement as HTMLIFrameElement | null)
           const iframeRect = iframeEl?.getBoundingClientRect() || { left: 0, top: 0 }
           const x = iframeRect.left + rect.left + rect.width / 2
-          const y = iframeRect.top + rect.bottom + 6
+          // Toolbar uses translateY(-100%), so y is its bottom edge.
+          // Place above the selection (same as PDF/OCT behavior).
+          const y = iframeRect.top + rect.top - 8
           onToolbarRef.current?.(x, y, text)
         } catch (err) {
           console.warn('[epub] toolbar bridge failed', err)
@@ -1300,62 +1338,10 @@ function EpubViewer({
     }
   }, [absPath, onTextSelect])
 
-  // Layout-change resize: when annotation panel / sidebar toggles, the
-  // container width changes but epub.js doesn't auto-detect it and leaves
-  // a blank strip on the right. Triggered after a 350 ms delay so CSS
-  // transitions have settled, then call rendition.resize() with no args
-  // (epub.js reads container dimensions itself). The earlier ResizeObserver
-  // approach fired too often and fought with epub.js internal layout,
-  // producing a blank page; this debounced listen-to-state approach is
-  // gentler.
-  const annotationPanelCollapsed = useUiStore(s => s.annotationPanelCollapsed)
-  const sidebarCollapsed = useUiStore(s => s.sidebarCollapsed)
-  const rightPanel = useUiStore(s => s.rightPanel)
-  useEffect(() => {
-    const t = setTimeout(() => {
-      const r = renditionRef.current
-      const el = containerRef.current
-      if (!r) return
-      try {
-        if (el?.clientWidth && el?.clientHeight) {
-          r.resize(el.clientWidth, el.clientHeight)
-        } else {
-          r.resize()
-        }
-      } catch (err) { console.warn('[epub] resize failed', err) }
-      // Nudge epub.js internal window-resize listeners. overflow-anchor on
-      // the container keeps reading position pinned, so we no longer need
-      // the heavy display(cfi) round-trip.
-      try { window.dispatchEvent(new Event('resize')) } catch {}
-    }, 200)
-    return () => clearTimeout(t)
-  }, [annotationPanelCollapsed, sidebarCollapsed, rightPanel])
-
-  // Container-width ResizeObserver: catches user dragging the annotation
-  // panel divider (which doesn't change uiStore state, so the toggling
-  // effect doesn't fire). Short debounce — long values made dragging feel
-  // unresponsive ("拖完还要等 0.5 秒才动"). 150ms strikes a balance: brief
-  // pause after the user stops moving, then reflow.
-  useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
-    let lastW = el.clientWidth
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const ro = new ResizeObserver(() => {
-      const w = el.clientWidth
-      if (Math.abs(w - lastW) < 5) return  // ignore tiny noise
-      lastW = w
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => {
-        const r = renditionRef.current
-        if (!r) return
-        try { r.resize(el.clientWidth, el.clientHeight) } catch {}
-        try { window.dispatchEvent(new Event('resize')) } catch {}
-      }, 150)
-    })
-    ro.observe(el)
-    return () => { ro.disconnect(); if (timer) clearTimeout(timer) }
-  }, [])
+  // No explicit resize on layout change — epub.js scrolled mode + CSS
+  // width:100% iframe handles reflow without losing scroll position.
+  // The legacy r.resize() + window.dispatchEvent('resize') paths both
+  // triggered iframe rebuilds that reset scrollTop.
 
   // Keyboard: ← previous chapter · → next chapter. Attached at the wrapper
   // level so focus inside the iframe doesn't need to bubble for it to work
@@ -3448,12 +3434,10 @@ export default function PdfViewer() {
             bgSat={ocrBgSat}
             bgLight={ocrBgLight}
             onToolbarShow={(x, y, text) => {
-              // Use current "visible page" from uiStore so new annotations
-              // land in the right chapter/page group even for EPUB / HTML /
-              // DOCX / TXT / MD where there's no real pageNumber.
               setToolbar({ x, y, text, pageNumber: useUiStore.getState().currentVisiblePage })
               setToolbarMode('main')
             }}
+            activeSelectionText={textSelection?.text}
           />
         </div>
       )}
