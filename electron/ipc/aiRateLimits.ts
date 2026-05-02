@@ -36,7 +36,13 @@ export interface ProviderRateLimit {
 
 export const PROVIDER_RATE_LIMITS: Record<string, ProviderRateLimit> = {
   glm: {
-    rpm: 3,
+    // 2026-04-28 · 3 → 30 提速:之前按 GLM-4-Flash 免费 4 RPM 设的极保守值,
+    //   导致付费用户(GLM-5.1 / GLM-4-Plus 通常 60+ RPM)被无谓限速,召唤对话
+    //   每次都"请求过于频繁"。改 30 RPM 平衡两端:付费用户立刻享受 30 RPM,
+    //   免费 Flash 用户撞墙后自适应 ×0.7 降挡会自动收紧到 ~9-15 RPM(仍比
+    //   原来 3 RPM 流畅得多)。理想的修法是按 model 区分 RPM(Flash=4 / 5.1=60),
+    //   待后续 schedule() 加 modelId 参数支持。
+    rpm: 30,
     maxConcurrency: 1,
     initialBackoffMs: 500,
     displayName: '智谱 GLM',

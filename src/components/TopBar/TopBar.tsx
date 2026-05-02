@@ -4,6 +4,8 @@ import { useLibraryStore } from '../../store/libraryStore'
 import { generateBibTeX, generateRIS } from '../../utils/citations'
 import { invalidateAiConfigCache } from '../../utils/aiConfigCache'
 
+const ONLINE_SEARCH_LOCKED = true
+
 // ===== Auto Update Panel =====
 function UpdatePanel() {
   const [status, setStatus] = useState<'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error'>('idle')
@@ -477,6 +479,11 @@ export default function TopBar() {
   const hermesHasInsight = useUiStore(s => s.hermesHasInsight)
   const darkMode = useUiStore(s => s.darkMode)
   const toggleDarkMode = useUiStore(s => s.toggleDarkMode)
+  // 2026-04-28 · AI 上下文范围按钮:之前用 useUiStore.getState() 读快照不订阅
+  //   store 变更,导致用户点击按钮后高亮不切换(必须刷新页面)。改订阅式读取
+  //   让 React 响应 state 变化重新渲染。
+  const aiContextWindow = useUiStore(s => s.aiContextWindow)
+  const setAiContextWindow = useUiStore(s => s.setAiContextWindow)
   const updateAvailable = useUiStore(s => s.updateAvailable)
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({})
@@ -556,6 +563,19 @@ export default function TopBar() {
       <div className="top-bar">
         <span className="logo">拾卷</span>
         <div style={{ flex: 1 }} />
+        {!ONLINE_SEARCH_LOCKED && (
+          <button
+            className="btn btn-sm btn-icon"
+            onClick={() => setLockedHint('在线搜索模式暂时关闭')}
+            title="在线搜索并导入文献"
+            style={{ padding: '6px 9px', marginRight: 4, color: 'var(--text-muted)' }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+          </button>
+        )}
         {/* Dark mode toggle */}
         <button
           className="btn btn-sm btn-icon"
@@ -951,11 +971,11 @@ export default function TopBar() {
                   { label: '10000字', value: 10000 },
                   { label: '全文', value: -1 },
                 ].map(opt => {
-                  const active = useUiStore.getState().aiContextWindow === opt.value
+                  const active = aiContextWindow === opt.value
                   return (
                     <button
                       key={opt.value}
-                      onClick={() => useUiStore.getState().setAiContextWindow(opt.value)}
+                      onClick={() => setAiContextWindow(opt.value)}
                       style={{
                         padding: '5px 12px', fontSize: 12, borderRadius: 6, cursor: 'pointer',
                         border: active ? '1.5px solid var(--accent)' : '1px solid var(--border)',

@@ -8,10 +8,16 @@ import { registerUpdaterIpc } from './updater'
 import { registerAgentIpc } from './ipc/agent'  // Needed for Hermes memory + knowledge map
 import { registerApprenticeIpc } from './ipc/apprentice'  // Hermes apprentice log (weekly observation)
 import { registerDiagnosticIpc, appendCrashLog } from './ipc/diagnostic'
+import { registerOnlineSearchIpc } from './ipc/onlineSearch'
 import { registerPersonasIpc } from './ipc/personas'  // 召唤 — persona archives with multi-source web search
 import { registerPersonaPortraitIpc } from './ipc/personaPortrait'  // 召唤 — resolves bundled / user persona portraits to data URLs
 import { registerCitationVerifierIpc } from './ipc/citationVerifier'  // Wave-4 — reverse-parse [资料 N] in AI output
 import { registerSummonSessionIpc } from './ipc/summonSession'  // 召唤对话会话持久化（per-persona session history）
+
+const remoteDebuggingPort = process.env['SHIJUAN_REMOTE_DEBUGGING_PORT']
+if (remoteDebuggingPort) {
+  app.commandLine.appendSwitch('remote-debugging-port', remoteDebuggingPort)
+}
 
 // Fire-and-forget startup logger. main.ts can't reliably emit IPC during
 // boot, so we just write straight to ~/.lit-manager/crash.log. Errors are
@@ -193,7 +199,11 @@ process.on('unhandledRejection', (reason) => {
 logStartup(`boot v${app.getVersion?.() ?? '?'} pid=${process.pid} platform=${process.platform} arch=${process.arch}`)
 
 // ===== Single instance lock =====
-const gotTheLock = app.requestSingleInstanceLock()
+// Preview/user builds often need to run beside older portable copies during
+// handoff testing. Keep a private env override to restore single-instance
+// behavior for release QA if needed.
+const allowMultiInstance = process.env['SHIJUAN_FORCE_SINGLE_INSTANCE'] !== '1'
+const gotTheLock = allowMultiInstance || app.requestSingleInstanceLock()
 if (!gotTheLock) {
   // Another instance is running — it will auto-focus its window via second-instance event
   app.quit()
@@ -229,6 +239,7 @@ if (!gotTheLock) {
   safeRegister('personaPortrait', registerPersonaPortraitIpc)
   safeRegister('citationVerifier', registerCitationVerifierIpc)
   safeRegister('summonSession', registerSummonSessionIpc)
+  safeRegister('onlineSearch', registerOnlineSearchIpc)
   safeRegister('updater', registerUpdaterIpc)
   safeRegister('diagnostic', registerDiagnosticIpc)
 

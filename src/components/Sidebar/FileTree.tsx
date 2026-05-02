@@ -491,6 +491,28 @@ const FolderItem = memo(function FolderItem({ folder, multiSelect, selectedIds, 
     [library?.folders, folder.id],
   )
 
+  // 2026-04-28 · 主分组右侧数字应为「自身 + 所有子孙分组」内的文献总数;
+  //   原先只显示 entries.length(直接子文献)导致主分组显示 0 即使下层
+  //   有大量文献(用户报:"西方社会思想史"显示 0,但 第9周 子分组里有 3 篇)。
+  //   BFS 从当前 folder.id 收集所有子孙 folder id,再统计 entries 落在
+  //   这个集合里的总数。
+  const totalEntryCount = useMemo(() => {
+    const allFolders = library?.folders || []
+    const allEntries = library?.entries || []
+    const descendantIds = new Set<string>([folder.id])
+    const queue: string[] = [folder.id]
+    while (queue.length) {
+      const parentId = queue.shift()!
+      for (const f of allFolders) {
+        if (f.parentId === parentId && !descendantIds.has(f.id)) {
+          descendantIds.add(f.id)
+          queue.push(f.id)
+        }
+      }
+    }
+    return allEntries.filter(e => e.folderId && descendantIds.has(e.folderId)).length
+  }, [library?.entries, library?.folders, folder.id])
+
   const handleDragStart = (e: DragEvent) => {
     // 2026-04-28 · 让 folder 自身可拖动到其它 folder 形成嵌套
     e.dataTransfer.setData('folder-id', folder.id)
@@ -567,7 +589,7 @@ const FolderItem = memo(function FolderItem({ folder, multiSelect, selectedIds, 
         ) : (
           <>
             <span style={{ flex: 1 }}>{folder.name}</span>
-            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{entries.length}</span>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{totalEntryCount}</span>
           </>
         )}
       </div>
@@ -918,7 +940,6 @@ function LibraryPanel() {
           </>
         )}
       </div>
-
       {/* Batch actions bar */}
       {multiSelect && selectedIds.size > 0 && (
         <div style={{ padding: '5px 10px', display: 'flex', gap: 4, borderBottom: '1px solid var(--border-light)', background: 'var(--accent-soft)' }}>

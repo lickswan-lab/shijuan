@@ -34,6 +34,17 @@
 
   --font: "Segoe UI", -apple-system, "Microsoft YaHei", sans-serif;
   --font-serif: "Source Han Serif SC", "Noto Serif CJK SC", "SimSun", Georgia, serif;
+  /* Long-form reading: prefer screen-optimized/familiar CJK fonts before the
+     older SimSun fallback, whose thin strokes can feel scratchy on Windows. */
+  --font-reading: "Noto Serif SC", "Source Han Serif SC", "LXGW WenKai Screen",
+    "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB",
+    Georgia, serif;
+  --reader-max-width: 760px;
+  --reader-line-height: 1.85;
+  --reader-paragraph-gap: 0.9em;
+  --pdf-page-filter: sepia(0.035) saturate(0.96) brightness(0.965) contrast(0.985);
+  --reader-content-filter: sepia(0.03) saturate(0.97) brightness(0.975) contrast(0.99);
+  --ocr-content-filter: sepia(0.045) saturate(0.95) brightness(0.95) contrast(0.985);
 }
 
 /* Dark mode */
@@ -218,9 +229,12 @@ html, body, #root {
 
 .pdf-page-wrapper {
   background: white;
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-md);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 22px rgba(60,50,30,0.10);
   overflow: hidden;
+}
+.pdf-page-wrapper canvas {
+  filter: var(--pdf-page-filter);
 }
 
 /* ========== RIGHT: ANNOTATION PANEL ========== */
@@ -455,14 +469,14 @@ html, body, #root {
   width: 36px; height: 36px;
   border-radius: 50%;
   border: 1px solid var(--border);
-  background: var(--bg);
+  background: var(--bg-warm);
   box-shadow: var(--shadow-sm);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 14px;
-  color: var(--text-secondary);
+  color: var(--text);
   transition: all 0.2s;
 }
 .floating-toggle:hover {
@@ -542,12 +556,12 @@ html, body, #root {
 .ocr-markdown-content {
   font-size: inherit;
   font-weight: inherit;
-  line-height: 2.0;
+  line-height: var(--reader-line-height);
   color: inherit;
-  font-family: var(--font-serif);
-  text-align: justify;
+  font-family: var(--font-reading);
+  text-align: start;
   word-break: break-word;
-  max-width: 720px;
+  max-width: var(--reader-max-width);
   margin: 0 auto;
 }
 .ocr-page-section { position: relative; }
@@ -575,7 +589,7 @@ html, body, #root {
 .ocr-markdown-content h2 { font-size: 18px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
 .ocr-markdown-content h3 { font-size: 16px; }
 
-.ocr-markdown-content p { margin-bottom: 8px; }
+.ocr-markdown-content p { margin-bottom: var(--reader-paragraph-gap); }
 .ocr-markdown-content strong { font-weight: 700; color: var(--text); }
 .ocr-markdown-content em { font-style: italic; }
 

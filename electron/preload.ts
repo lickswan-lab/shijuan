@@ -1,6 +1,16 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 // 2026-04-28 · ReadingLog 类型移除(readingLog 功能下线)
 import type { Library, PdfMeta, HistoryEntry, Persona, PersonaSource } from '../src/types/library'
+import type {
+  OnlineDownloadRequest,
+  OnlineDownloadResponse,
+  OnlineSearchRequest,
+  OnlineSearchResponse,
+  OnlineSiteLoginRequest,
+  OnlineSiteLoginResponse,
+  OnlineSiteSessionRequest,
+  OnlineSiteSessionStatus,
+} from '../src/types/onlineSearch'
 
 const electronAPI = {
   // Library (central storage)
@@ -52,6 +62,16 @@ const electronAPI = {
     ipcRenderer.invoke('export-full-backup'),
   pickAndReadBibFile: (): Promise<{ success: boolean; content?: string; path?: string; canceled?: boolean; error?: string }> =>
     ipcRenderer.invoke('pick-and-read-bib-file'),
+  onlineSearch: (request: OnlineSearchRequest): Promise<OnlineSearchResponse> =>
+    ipcRenderer.invoke('online-search', request),
+  onlineDownloadFile: (request: OnlineDownloadRequest): Promise<OnlineDownloadResponse> =>
+    ipcRenderer.invoke('online-download-file', request),
+  onlineSiteLogin: (request: OnlineSiteLoginRequest): Promise<OnlineSiteLoginResponse> =>
+    ipcRenderer.invoke('online-site-login', request),
+  onlineSiteSessionStatus: (request: OnlineSiteSessionRequest): Promise<OnlineSiteSessionStatus> =>
+    ipcRenderer.invoke('online-site-session-status', request),
+  onlineSiteSessionClear: (request: OnlineSiteSessionRequest): Promise<OnlineSiteSessionStatus> =>
+    ipcRenderer.invoke('online-site-session-clear', request),
 
   // OCR files
   saveOcrText: (pdfAbsPath: string, text: string): Promise<string> =>

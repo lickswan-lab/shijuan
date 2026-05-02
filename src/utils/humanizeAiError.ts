@@ -98,7 +98,7 @@ export function humanizeAiError(input: unknown): HumanizedError {
   if (hasAny(lower, RATE_LIMIT_KEYWORDS)) {
     return {
       message: '请求过于频繁，请稍后重试',
-      hint: '免费 tier 通常 4 RPM；拾卷已自动节流，你可以稍等一会再试',
+      hint: '拾卷已根据当前 provider 速率自动节流并自适应降挡。如长期触发可在设置里手动调高 RPM 或切换其他 provider。',
     }
   }
 

@@ -4,6 +4,133 @@
 
 ---
 
+## 2026-05-02 · 1.3.2 发布准备 · 在线搜索封锁 / 召唤社区上线
+
+主题：**把当前版本定为 1.3.2，暂时关闭在线搜索，并只开放六位人物 skill**
+
+### 修了什么
+
+`package.json` / `package-lock.json`
+1. 版本号定为 `1.3.2`。
+
+`src/components/TopBar/TopBar.tsx` / `electron/ipc/onlineSearch.ts`
+1. 顶部在线搜索入口暂时隐藏。
+2. 在线搜索、下载、登录、会话状态、清理会话 IPC 增加兜底封锁，统一返回“在线搜索模式暂时关闭”。
+
+`electron/ipc/personaPortrait.ts` / `electron/ipc/personas.ts` / `src/components/Agent/PersonasTab.tsx`
+1. 召唤人物头像识别补齐孔子、老子、墨子、苏格拉底、柏拉图、亚里士多德六位。
+2. skill 导入时会把 skill 文件夹内的 `portrait.png/jpeg/jpg/webp` 同步到本地 persona 目录。
+3. 社区首批六位人物头像使用新生成的 `png` 肖像资源。
+
+### 配套资产
+
+1. 已更新 `skills/<slug>/portrait.png` 与 `community_preview/assets/portraits/<slug>.png`。
+2. 已重新打包 `community_preview/assets/skills/{confucius,laozi,mozi,plato,socrates,aristotle}.zip`，zip 内包含 `portrait.png`。
+3. 已生成 `C:\Users\18475\OneDrive\Desktop\拾卷开发\v1.3.2\app.asar` 与 `app.asar.gz`，用于 1.3.1 → 1.3.2 应用内更新。
+4. GitHub Actions 发布流同步上传 `app.asar.gz`，tag 发布时会带上压缩更新资产。
+5. 官网仓库已加入 `community/` 静态页面，并在顶部导航加入“社区”入口。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0
+- `npm run dist`: EXIT=0
+- `node scripts/compress-asar.mjs`: EXIT=0
+
+---
+
+## 2026-05-02 · 继承开发 · UX · 阅读舒适度整体调优
+
+主题：**降低阅读眩光、收窄正文行宽、改用屏幕友好字体栈**
+
+### 资料依据
+
+- WCAG 视觉呈现建议正文行宽不超过 80 字符，CJK 不超过 40 字符；行距至少 1.5。
+- WCAG 对普通文本最低对比度要求为 4.5:1。
+- 眼疲劳建议里反复强调屏幕亮度应接近环境亮度，减少眩光；拾卷旧阅读默认 `L=97` 接近纯白。
+- 字体研究没有稳定证明 serif/sans 一定更好，实际更依赖字号、间距、屏幕渲染和用户熟悉度。
+
+### 修了什么
+
+`src/styles/globals.css`
+1. 新增 `--font-reading`，优先 Noto/思源，缺字时落到雅黑而不是直接落到 SimSun。
+2. 新增 `--reader-max-width: 760px` / `--reader-line-height: 1.85` / `--reader-paragraph-gap: 0.9em`。
+3. OCR/Markdown 正文从 `text-align: justify` 改为 `start`，避免中英混排被硬拉开。
+4. PDF canvas 加轻微 `sepia + brightness + contrast` filter，给原始白页降眩光。
+5. 新增 `--reader-content-filter`，给 HTML / EPUB / DOCX / TXT 视图同步做轻滤镜。
+6. 新增 `--ocr-content-filter`，OCR 视图单独稍强一点，并覆盖 OCR 标题区。
+
+`src/components/PdfViewer/PdfViewer.tsx`
+1. 阅读默认值从 `16px / 400 / L=97` 改为 `17px / 450 / L=91`，文字稍大稍稳、背景不刺眼。
+2. 增加一次性 `sj-readingComfortV2` 迁移：仍停留在旧白底默认的用户会自动迁到新暖纸默认。
+3. HTML / EPUB / DOCX / TXT / OCR 的正文容器统一收窄到约 40 个 CJK 字符的阅读宽度。
+4. EPUB / HTML 去掉强制两端对齐，保留段首缩进与可调背景/字号。
+5. 轻滤镜只挂在阅读内容层，避开右键菜单和工具栏，避免浮层定位被 CSS `filter` 影响。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0
+
+---
+
+## 2026-05-02 · 继承开发 · UX · LectureMode 总结失败接 CTA(R8#13 扩散收口)
+
+主题：**UX · AI 课程记录生成失败不再污染课程记录，并可一键去设置**
+
+### 修了什么
+
+`src/components/Lecture/LectureMode.tsx` AI 课程记录生成失败路径:
+1. 新增 `summaryError` 本地错误条，复用 `humanizeAiError()` 的 `ctaSettings`
+2. key / quota / model 类错误显示「去设置」按钮，点击打开 Settings 并关闭错误条
+3. `aiChatStream` 返回失败或直接 throw 都会被捕获并转译
+4. 失败不再写入 `session.aiSummary`，避免把「生成失败：...」保存成课程记录正文
+
+### 已扩散覆盖
+
+| 触点 | 状态 |
+|---|---|
+| AnnotationPanel summonErr | ✅ R8#13 |
+| ReadingLogView errorToast | ✅ R8#17 |
+| PersonasTab summon error banner | ✅ 2026-04-30 |
+| LectureMode 总结失败 | ✅ 本轮 |
+| AgentPanel(在 chat bubble 里渲染错误) | ⏭ 需单独设计 |
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0
+
+---
+
+## 2026-04-30 · 继承开发 · UX · PersonasTab 错误横幅接 CTA(R8#13 扩散)
+
+主题：**UX · API Key / 余额 / 模型错误在召唤人物页也可一键去设置**
+
+### 修了什么
+
+`src/components/Agent/PersonasTab.tsx` 顶层错误横幅:
+1. `errorMsg` 从纯字符串升级为 `{ message, ctaSettings }`
+2. `SummonView` 内 3 处 `humanizeAiError()` 调用改为把 `ctaSettings` 一并上传
+3. 错误横幅在 `ctaSettings=true` 时显示「去设置」按钮,点击打开 Settings 并关闭横幅
+4. 普通导入 / 导出 / 定位 / 历史会话错误仍走无 CTA 的普通横幅
+
+### 已扩散覆盖
+
+| 触点 | 状态 |
+|---|---|
+| AnnotationPanel summonErr | ✅ R8#13 |
+| ReadingLogView errorToast | ✅ R8#17 |
+| PersonasTab summon error banner | ✅ 本轮 |
+| LectureMode 总结失败 | 待后续 round |
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0
+
+---
+
 ## 2026-04-28 · Batch 61 · 夜间值守 Round 8 #18 · PERF · RAG cosineSim 热路径优化
 
 主题：**perf · RAG 检索的余弦相似度计算去掉 query 端 norm 的重复计算**

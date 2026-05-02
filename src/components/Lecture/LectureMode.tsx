@@ -7,6 +7,8 @@ import type { LectureSession, TranscriptSegment } from '../../types/library'
 import { connectWebSpeech, connectXfyun, connectAliyun, type STTConnection } from './sttProviders'
 import { humanizeAiError } from '../../utils/humanizeAiError'
 
+type SummaryError = { message: string; ctaSettings?: boolean }
+
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60).toString().padStart(2, '0')
   const s = Math.floor(seconds % 60).toString().padStart(2, '0')
@@ -139,6 +141,7 @@ export default function LectureMode() {
   const [paused, setPaused] = useState(false)
   const [generatingSummary, setGeneratingSummary] = useState(false)
   const [streamingSummary, setStreamingSummary] = useState('')
+  const [summaryError, setSummaryError] = useState<SummaryError | null>(null)
   const [sttStatus, setSttStatus] = useState<'none' | 'connecting' | 'connected' | 'failed'>('none')
   const [sttError, setSttError] = useState('')
 
@@ -390,6 +393,7 @@ export default function LectureMode() {
     if (!session || generatingSummary) return
     setGeneratingSummary(true)
     setStreamingSummary('')
+    setSummaryError(null)
 
     const transcriptText = transcript.map(s => `[${formatTime(s.startTime)}] ${s.text}`).join('\n')
 
@@ -424,17 +428,30 @@ export default function LectureMode() {
       setStreamingSummary(fullText)
     })
 
+    const setHumanizedSummaryError = (input: unknown) => {
+      const h = humanizeAiError(input)
+      if (h.silent) return
+      setSummaryError({
+        message: `生成失败：${h.message}${h.hint ? `（${h.hint}）` : ''}`,
+        ctaSettings: h.ctaSettings,
+      })
+    }
+
     try {
       const result = await window.electronAPI.aiChatStream(streamId, selectedAiModel, [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMsg },
       ])
       if (!result.success && mountedRef.current) {
-        // Batch 43: humanize raw error for friendlier inline display
-        const h = humanizeAiError(result.error)
-        fullText = h.silent
-          ? '生成已中断'
-          : `生成失败：${h.message}${h.hint ? `（${h.hint}）` : ''}`
+        // R8#20: show summary failures as an actionable inline banner instead
+        // of saving an error sentence as the course record itself.
+        setHumanizedSummaryError(result.error)
+        fullText = ''
+      }
+    } catch (err) {
+      if (mountedRef.current) {
+        setHumanizedSummaryError(err)
+        fullText = ''
       }
     } finally {
       cleanup()
@@ -682,6 +699,57 @@ export default function LectureMode() {
                 background: 'transparent', color: 'var(--text)',
               }}
             />
+
+            {summaryError && (
+              <div style={{
+                margin: '0 16px 12px',
+                padding: '10px 12px',
+                borderRadius: 6,
+                border: '1px solid rgba(181, 90, 79, 0.32)',
+                background: 'rgba(181, 90, 79, 0.08)',
+                color: 'var(--danger)',
+                fontSize: 12,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+              }}>
+                <span style={{ flex: 1, minWidth: 0 }}>{summaryError.message}</span>
+                {summaryError.ctaSettings && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      useUiStore.getState().setShowSettings(true)
+                      setSummaryError(null)
+                    }}
+                    style={{
+                      padding: '4px 9px',
+                      borderRadius: 5,
+                      border: '1px solid var(--danger)',
+                      background: 'transparent',
+                      color: 'var(--danger)',
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      flexShrink: 0,
+                    }}
+                  >去设置</button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setSummaryError(null)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--danger)',
+                    cursor: 'pointer',
+                    fontSize: 14,
+                    lineHeight: 1,
+                    padding: 0,
+                    flexShrink: 0,
+                  }}
+                  aria-label="关闭"
+                >×</button>
+              </div>
+            )}
 
             {/* AI Summary */}
             {(session?.aiSummary || streamingSummary) && (

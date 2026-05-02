@@ -481,6 +481,24 @@ function safeSkillSlug(slug: string, personaId: string): string {
   return `persona-${personaId.slice(0, 8)}`
 }
 
+const SKILL_PORTRAIT_EXTS = ['png', 'jpeg', 'jpg', 'webp'] as const
+
+async function copyImportedSkillPortrait(skillDir: string, personaId: string): Promise<void> {
+  for (const ext of SKILL_PORTRAIT_EXTS) {
+    const source = path.join(skillDir, `portrait.${ext}`)
+    try {
+      const stat = await fs.stat(source)
+      if (!stat.isFile()) continue
+      const targetDir = path.join(PERSONAS_DIR, personaId)
+      await fs.mkdir(targetDir, { recursive: true })
+      await fs.copyFile(source, path.join(targetDir, `portrait.${ext}`))
+      return
+    } catch {
+      // Try the next supported image extension.
+    }
+  }
+}
+
 /** Parse a SKILL.md file. Returns both the raw markdown and a best-effort
  *  extraction of frontmatter fields (name, description, triggers). If the
  *  frontmatter isn't YAML-parseable with our minimal parser, returns the
@@ -1269,6 +1287,7 @@ export function registerPersonasIpc(): void {
       await ensureDir()
       // Resolve: if absPath is a directory, look for SKILL.md inside
       const stat = await fs.stat(absPath)
+      const skillDir = stat.isDirectory() ? absPath : path.dirname(absPath)
       const skillMdPath = stat.isDirectory() ? path.join(absPath, 'SKILL.md') : absPath
       const md = await fs.readFile(skillMdPath, 'utf-8')
 
@@ -1327,6 +1346,9 @@ export function registerPersonasIpc(): void {
 
       const saveFile = path.join(PERSONAS_DIR, `${persona.id}.json`)
       await atomicWriteJson(saveFile, persona)
+      await copyImportedSkillPortrait(skillDir, persona.id).catch((e) => {
+        console.warn('[persona-import-skill] portrait copy skipped:', e?.message)
+      })
       // Phase C: imported skills usually have empty sourcesUsed (external
       // skills don't ship their research pool), so auto-build short-circuits
       // at the "no hydrated content" check. Still call it for correctness —
@@ -1601,6 +1623,8 @@ export function registerPersonasIpc(): void {
       let sys: string
       if (persona.skill?.fullMarkdown) {
         sys = `你现在按下面这份 skill 扮演 **${displayName}**。严格遵循其中的 Agentic Protocol、心智模型、启发式与表达 DNA；遇到"诚实边界"里提到的资料空白，直接说"这超出我的已知"，不要编造。以第一人称回答，不要以第三人称谈论该人物。
+
+**输出精简（软约束）**：默认回答控制在必要长度，优先思想动作 + 原文锚点 + 关键论证步骤，省略重复阐述、过渡客套、冗长背景介绍。除非用户明确要求"详尽展开"或"完整论证"，单轮回答尽量精简到 skill 内字数指引的 60% 左右——警句型人物（如老子）更短、论辩型人物（如墨子、孟子）保留必要推理链但去掉枝节。
 
 ---
 

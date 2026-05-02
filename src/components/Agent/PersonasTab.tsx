@@ -60,17 +60,20 @@ const MONO = '"JetBrains Mono", "SF Mono", Consolas, monospace'
 
 // Bundled skills we ship — used for OFFICIAL badge + localhost portrait fallback.
 const CANONICAL_SLUGS = new Set([
-  'kant', 'plato', 'aristotle', 'confucius', 'laozi',
+  'kant', 'plato', 'aristotle', 'confucius', 'laozi', 'mozi', 'socrates',
   'wangyangming', 'hegel', 'weber', 'durkheim',
 ])
+const COMMUNITY_PNG_PORTRAITS = new Set(['confucius', 'laozi', 'mozi', 'socrates', 'plato', 'aristotle'])
 const CJK_SLUG_MAP: Record<string, string> = {
   '黑格尔': 'hegel', '康德': 'kant', '柏拉图': 'plato',
   '亚里士多德': 'aristotle', '孔子': 'confucius', '老子': 'laozi',
+  '墨子': 'mozi', '苏格拉底': 'socrates',
   '王阳明': 'wangyangming', '韦伯': 'weber', '马克斯·韦伯': 'weber',
   '涂尔干': 'durkheim', '埃米尔·涂尔干': 'durkheim',
 }
 
 type Stage = 'gallery' | 'detail' | 'summon' | 'import'
+type PanelError = { message: string; ctaSettings?: boolean }
 type PersonaListEntry = {
   id: string; name: string; canonicalName?: string
   identity?: string; updatedAt: string; currentFitnessTotal?: number
@@ -97,6 +100,13 @@ type SummonInit = {
   sessionId: string
   startedAt?: string
   messages?: SummonMsg[]
+}
+
+function toAiPanelError(h: ReturnType<typeof humanizeAiError>): PanelError {
+  return {
+    message: h.hint ? `${h.message}（${h.hint}）` : h.message,
+    ctaSettings: h.ctaSettings,
+  }
 }
 
 // ============================================================================
@@ -150,7 +160,8 @@ async function loadPortraitOnce(p: { id: string; name: string; canonicalName?: s
     // Localhost dev server fallback for canonical slugs
     for (const slug of inferSlugs(p)) {
       if (CANONICAL_SLUGS.has(slug)) {
-        const url = `http://localhost:8765/assets/portraits/${slug}.jpeg`
+        const ext = COMMUNITY_PNG_PORTRAITS.has(slug) ? 'png' : 'jpeg'
+        const url = `http://localhost:8765/assets/portraits/${slug}.${ext}`
         portraitMemoryCache.set(p.id, url)
         return url
       }
@@ -1059,7 +1070,7 @@ function SummonView({
   persona: Persona
   init: SummonInit
   onClose: () => void
-  onError: (msg: string) => void
+  onError: (error: PanelError) => void
   onNewSession: () => void
 }) {
   const selectedAiModel = useUiStore(s => s.selectedAiModel)
@@ -1091,7 +1102,7 @@ function SummonView({
         if (!r?.success || !r.systemPrompt) {
           // Batch 43: humanize raw API errors (401/429/网络/etc.)
           const h = humanizeAiError(r?.error || '无法构建召唤 system prompt')
-          if (!h.silent) onError(h.hint ? `${h.message}（${h.hint}）` : h.message)
+          if (!h.silent) onError(toAiPanelError(h))
           return
         }
         setSysPrompt(r.systemPrompt)
@@ -1106,7 +1117,7 @@ function SummonView({
         if (!cancelled) {
           // Batch 43: humanize
           const h = humanizeAiError(err)
-          if (!h.silent) onError(h.hint ? `${h.message}（${h.hint}）` : h.message)
+          if (!h.silent) onError(toAiPanelError(h))
         }
       }
       finally { if (!cancelled) setInitLoading(false) }  // P1-2: 结束载入
@@ -1272,7 +1283,7 @@ function SummonView({
       if (!mountedRef.current) return
       // Batch 43: humanize raw API errors
       const h = humanizeAiError(err)
-      if (!h.silent) onError(h.hint ? `${h.message}（${h.hint}）` : h.message)
+      if (!h.silent) onError(toAiPanelError(h))
     } finally {
       if (mountedRef.current) setBusy(false)
     }
@@ -1491,7 +1502,8 @@ export default function PersonasTab() {
   const [list, setList] = useState<PersonaListEntry[]>([])
   const [current, setCurrent] = useState<Persona | null>(null)
   const [stage, setStage] = useState<Stage>('gallery')
-  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  // UX-R8#19 · 召唤页的 AI/key/quota/model 类错误也接入 "去设置" CTA.
+  const [errorMsg, setErrorMsg] = useState<PanelError | null>(null)
   // Batch 43: 替代 window.confirm() 的暖金确认弹窗
   const { ask: askConfirm, dialog: confirmDialog } = useConfirmDialog()
   // P0-4: 取代导出成功的 window.alert(), 改成面板内暖金风格的成功提示（4s 自消失）
@@ -1599,7 +1611,7 @@ export default function PersonasTab() {
     setErrorMsg(null)
     const r = await window.electronAPI.personaLoad?.(id)
     if (r?.success && r.persona) { setCurrent(r.persona); setStage('detail') }
-    else setErrorMsg(r?.error || '档案加载失败')
+    else setErrorMsg({ message: r?.error || '档案加载失败' })
   }, [])
 
   const handleDelete = useCallback((id: string) => {
@@ -1630,12 +1642,12 @@ export default function PersonasTab() {
         outDir = r.dir
       }
       const r = await window.electronAPI.personaExportSkill?.(current.id, { outDir })
-      if (!r?.success) { setErrorMsg(r?.error || '导出失败'); return }
+      if (!r?.success) { setErrorMsg({ message: r?.error || '导出失败' }); return }
       const reloaded = await window.electronAPI.personaLoad?.(current.id)
       if (reloaded?.success && reloaded.persona) setCurrent(reloaded.persona)
       // P0-4: 从 window.alert 换成 in-app 绿色横幅（4s 自消失），保留暖金美学
       setSuccessMsg(`已导出到 ${r.skillDir}`)
-    } catch (err: any) { setErrorMsg(err?.message || String(err)) }
+    } catch (err: any) { setErrorMsg({ message: err?.message || String(err) }) }
   }, [current])
 
   const handleImport = useCallback(async () => {
@@ -1644,10 +1656,10 @@ export default function PersonasTab() {
       const pick = await window.electronAPI.personaPickSkillPath?.()
       if (!pick?.success || !pick.path) return
       const r = await window.electronAPI.personaImportSkill?.(pick.path)
-      if (!r?.success || !r.persona) { setErrorMsg(r?.error || '导入失败'); return }
+      if (!r?.success || !r.persona) { setErrorMsg({ message: r?.error || '导入失败' }); return }
       setImportPreview({ path: pick.path, persona: r.persona })
       setStage('import')
-    } catch (err: any) { setErrorMsg(err?.message || String(err)) }
+    } catch (err: any) { setErrorMsg({ message: err?.message || String(err) }) }
     finally { setImporting(false) }
   }, [])
 
@@ -1687,7 +1699,7 @@ export default function PersonasTab() {
     try {
       const r = await window.electronAPI.summonSessionLoad?.(current.id, sessionId)
       if (!r?.success || !r.session) {
-        setErrorMsg(r?.error || '该对话已丢失或损坏')
+        setErrorMsg({ message: r?.error || '该对话已丢失或损坏' })
         return
       }
       setSummonInit({
@@ -1696,7 +1708,7 @@ export default function PersonasTab() {
         messages: r.session.messages as SummonMsg[],
       })
       setStage('summon')
-    } catch (err: any) { setErrorMsg(err?.message || String(err)) }
+    } catch (err: any) { setErrorMsg({ message: err?.message || String(err) }) }
   }, [current])
 
   // "新对话" button inside SummonView. We force a remount by swapping summonInit
@@ -1726,7 +1738,26 @@ export default function PersonasTab() {
           borderRadius: 6, fontSize: 12, color: C.danger,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
         }}>
-          <span>{errorMsg}</span>
+          <span style={{ flex: 1, minWidth: 0 }}>{errorMsg.message}</span>
+          {errorMsg.ctaSettings && (
+            <button
+              type="button"
+              onClick={() => {
+                useUiStore.getState().setShowSettings(true)
+                setErrorMsg(null)
+              }}
+              style={{
+                padding: '4px 9px',
+                borderRadius: 5,
+                border: `1px solid ${C.danger}`,
+                background: 'rgba(181, 90, 79, 0.08)',
+                color: C.danger,
+                cursor: 'pointer',
+                fontSize: 12,
+                flexShrink: 0,
+              }}
+            >去设置</button>
+          )}
           <button
             onClick={() => setErrorMsg(null)}
             style={{ background: 'none', border: 'none', color: C.danger, cursor: 'pointer', fontSize: 14, lineHeight: 1 }}
@@ -1825,7 +1856,7 @@ export default function PersonasTab() {
           onReveal={async () => {
             if (!current) return
             const r = await window.electronAPI.personaReveal?.(current.id)
-            if (!r?.success) setErrorMsg(r?.error || '定位失败')
+            if (!r?.success) setErrorMsg({ message: r?.error || '定位失败' })
           }}
           onDelete={() => handleDelete(current.id)}
           onPersonaUpdated={handlePersonaUpdated}

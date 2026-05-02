@@ -79,7 +79,8 @@ function inferSlug(persona: Persona): string[] {
   const CJK_MAP: Record<string, string> = {
     '黑格尔': 'hegel', '康德': 'kant', '柏拉图': 'plato',
     '亚里士多德': 'aristotle', '孔子': 'confucius',
-    '老子': 'laozi', '王阳明': 'wangyangming',
+    '老子': 'laozi', '墨子': 'mozi', '苏格拉底': 'socrates',
+    '老子李耳': 'laozi', '王阳明': 'wangyangming',
     '韦伯': 'weber', '马克斯·韦伯': 'weber',
     '涂尔干': 'durkheim', '埃米尔·涂尔干': 'durkheim',
   }

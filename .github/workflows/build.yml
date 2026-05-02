@@ -26,6 +26,22 @@ jobs:
       - name: Copy app.asar for patch update
         run: Copy-Item "dist-packager\拾卷-win32-x64\resources\app.asar" "dist-packager\app.asar"
         shell: pwsh
+      - name: Compress app.asar for patch update
+        run: |
+          $source = "dist-packager\app.asar"
+          $target = "dist-packager\app.asar.gz"
+          $inputStream = [System.IO.File]::OpenRead($source)
+          $outputStream = [System.IO.File]::Create($target)
+          $gzipStream = [System.IO.Compression.GZipStream]::new($outputStream, [System.IO.Compression.CompressionLevel]::Optimal)
+          try {
+            $inputStream.CopyTo($gzipStream)
+          } finally {
+            $gzipStream.Dispose()
+            $outputStream.Dispose()
+            $inputStream.Dispose()
+          }
+          Get-ChildItem $source, $target | Format-Table Name, Length
+        shell: pwsh
 
       # 2. electron-builder path (produces NSIS installer + portable exe)
       - name: Build NSIS installer + portable
@@ -55,6 +71,10 @@ jobs:
         with:
           name: shijuan-app-asar
           path: dist-packager/app.asar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shijuan-app-asar-gz
+          path: dist-packager/app.asar.gz
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v4
         with:
@@ -124,4 +144,5 @@ jobs:
             artifacts/shijuan-win-portable/*.exe
             artifacts/shijuan-mac-x64/shijuan-mac-x64.zip
             artifacts/shijuan-mac-arm64/shijuan-mac-arm64.zip
+            artifacts/shijuan-app-asar-gz/app.asar.gz
             artifacts/shijuan-app-asar/app.asar

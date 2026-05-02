@@ -61,7 +61,13 @@ badge 悬浮提示用浏览器 `title` 属性，多行 `\n` 在某些 OS 会被�
 
 **R8#13 进展**：humanizeAiError 已 cover 全部关键词(R8#13 之前就完成了 message + hint),但 `ctaSettings` 标志没人用。AnnotationPanel summonErr toast 接入了 ctaSettings → 错误是 key/quota/model 类时显示"去设置"按钮一键打开 Settings。
 
-**剩余**(后续 round 可继续):AgentPanel / PersonasTab / LectureMode / ReadingLogView 等其它 4 处 humanizeAiError 调用点也该接 CTA。当前只接最高频的 AnnotationPanel。
+**R8#17 进展**：ReadingLogView AI 总结失败 toast 已接入同款 "去设置" CTA。
+
+**2026-04-30 继承开发进展**：PersonasTab 召唤页顶层错误横幅已从纯字符串升级为 `{ message, ctaSettings }`，`humanizeAiError()` 的 key/quota/model 类错误会显示 "去设置" 按钮。
+
+**2026-05-02 继承开发进展**：LectureMode AI 课程记录生成失败已改成本地错误条，key/quota/model 类错误会显示 "去设置" 按钮；失败不再保存成 `aiSummary` 正文。
+
+**剩余**(后续 round 可继续):AgentPanel 错误在 chat bubble 内，不是 toast/banner，是否接 CTA 需要单独设计。
 
 ### P2-9 · AnnotationPanel 召唤 popover 里没有快速 "去库里导入" 链接
 personaList 为空时没有引导按钮，用户要手动切到 Agent 面板召唤 tab。

@@ -77,12 +77,12 @@ function DraggableToggle({ onClick }: { onClick: () => void }) {
   }, [])
 
   const style: React.CSSProperties = pos.x >= 0
-    ? { position: 'fixed', left: pos.x, top: pos.y, right: 'auto', zIndex: 50, width: 36, height: 36, borderRadius: '50%', border: '1px solid var(--border)', background: 'var(--bg)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'grab', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }
+    ? { position: 'fixed', left: pos.x, top: pos.y, right: 'auto', zIndex: 50, width: 36, height: 36, borderRadius: '50%', border: '1px solid var(--border)', background: 'var(--bg-warm)', color: 'var(--text)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'grab', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }
     : {}
 
   return (
     <button
-      className={pos.x < 0 ? 'floating-toggle' : ''}
+      className="floating-toggle"
       style={style}
       onMouseDown={handleMouseDown}
       title="打开注释面板（可拖拽移动）"

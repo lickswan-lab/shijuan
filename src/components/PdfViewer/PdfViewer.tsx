@@ -606,36 +606,38 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
 
   return (
     <div className="ocr-markdown-content" ref={containerRef}>
-      {sections.map((pageText, i) => (
-        <div key={i} data-page-number={i + 1} style={{ marginBottom: 28 }}>
-          {sections.length > 1 && (
-            <div style={{
-              // Was #bbb / #eee hardcoded — fine in light mode, too bright in
-              // dark mode (#eee border becomes a glaring white bar). Theme vars
-              // keep the "page break marker" subtle in both themes.
-              fontSize: 12, color: 'var(--text-muted)', marginBottom: 10,
-              paddingBottom: 6, borderBottom: '1px solid var(--border-light)',
-              fontFamily: '-apple-system, "Microsoft YaHei", sans-serif',
-              userSelect: 'none', opacity: 0.6,
-            }}>
-              — 第 {i + 1} 页 —
-            </div>
-          )}
-          <Markdown
-            remarkPlugins={[remarkMath]}
-            rehypePlugins={[rehypeKatex]}
-            components={{
-              img: ({ src, alt }) => {
-                // Hide bbox image references
-                if (src && (src.includes('bbox') || src.includes('page='))) return null
-                return <img src={src} alt={alt} style={{ maxWidth: '100%', borderRadius: 4, margin: '8px 0' }} />
-              }
-            }}
-          >
-            {pageText.trim()}
-          </Markdown>
-        </div>
-      ))}
+      <div style={{ filter: 'var(--ocr-content-filter)' }}>
+        {sections.map((pageText, i) => (
+          <div key={i} data-page-number={i + 1} style={{ marginBottom: 28 }}>
+            {sections.length > 1 && (
+              <div style={{
+                // Was #bbb / #eee hardcoded — fine in light mode, too bright in
+                // dark mode (#eee border becomes a glaring white bar). Theme vars
+                // keep the "page break marker" subtle in both themes.
+                fontSize: 12, color: 'var(--text-muted)', marginBottom: 10,
+                paddingBottom: 6, borderBottom: '1px solid var(--border-light)',
+                fontFamily: '-apple-system, "Microsoft YaHei", sans-serif',
+                userSelect: 'none', opacity: 0.6,
+              }}>
+                — 第 {i + 1} 页 —
+              </div>
+            )}
+            <Markdown
+              remarkPlugins={[remarkMath]}
+              rehypePlugins={[rehypeKatex]}
+              components={{
+                img: ({ src, alt }) => {
+                  // Hide bbox image references
+                  if (src && (src.includes('bbox') || src.includes('page='))) return null
+                  return <img src={src} alt={alt} style={{ maxWidth: '100%', borderRadius: 4, margin: '8px 0' }} />
+                }
+              }}
+            >
+              {pageText.trim()}
+            </Markdown>
+          </div>
+        ))}
+      </div>
 
       {/* Mark right-click menu */}
       {markMenu && (
@@ -756,10 +758,12 @@ setTimeout(highlightAnnotations, 200);
     color: ${textColor} !important;
     font-size: ${fontSize}px !important;
     font-weight: ${fontWeight} !important;
-    line-height: 1.9 !important;
-    font-family: "Noto Serif SC", "Source Han Serif", Georgia, serif !important;
+    line-height: var(--reader-line-height, 1.85) !important;
+    font-family: var(--font-reading, "Noto Serif SC", "Source Han Serif SC", "Microsoft YaHei", Georgia, serif) !important;
   }
-  body { max-width: 860px; margin: 0 auto; padding: 32px 48px; }
+  body { max-width: var(--reader-max-width, 760px); margin: 0 auto; padding: 36px 44px 72px; }
+  p { margin: 0 0 var(--reader-paragraph-gap, 0.9em) 0; }
+  body { filter: var(--reader-content-filter, sepia(0.03) saturate(0.97) brightness(0.975) contrast(0.99)); }
   ::selection { background: rgba(200, 149, 108, 0.35); }
   img { max-width: 100%; height: auto; }
 </style>`
@@ -860,6 +864,11 @@ function EpubViewer({
   // we iterate this map and re-apply highlights to every known section so
   // marks survive scrolling between chapters.
   const contentsMapRef = useRef<Map<string, any>>(new Map())
+  const latestCfiRef = useRef<string | null>(null)
+  const lastGoodScrollTopRef = useRef(0)
+  const resizeRestoreReadyRef = useRef(false)
+  const suppressRelocatedUntilRef = useRef(0)
+  const lastSelectionBridgeAtRef = useRef(0)
   // Navigation state: TOC (chapter list) + current chapter label for the bar.
   const [toc, setToc] = useState<Array<{ label: string; href: string }>>([])
   const tocRef = useRef<Array<{ label: string; href: string }>>([])
@@ -904,6 +913,41 @@ function EpubViewer({
       : `hsl(30, 20%, ${100 - cd}%)`
   }
 
+  const clearNativeSelection = (contents: any) => {
+    try {
+      const doc = contents?.document as Document | undefined
+      const win = (contents?.window as Window | undefined) || doc?.defaultView
+      win?.getSelection()?.removeAllRanges()
+    } catch {}
+  }
+
+  const surfaceSelectionFromContents = (contents: any) => {
+    const doc = contents?.document as Document | undefined
+    const win = (contents?.window as Window | undefined) || doc?.defaultView
+    const sel = win?.getSelection()
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false
+
+    const range = sel.getRangeAt(0).cloneRange()
+    const text = range.toString().trim()
+    if (!text || text.length < 2) return false
+
+    try {
+      const rects = Array.from(range.getClientRects())
+      const rect = rects.find(r => r.width > 0 || r.height > 0) || range.getBoundingClientRect()
+      const iframeEl: HTMLIFrameElement | null =
+        contents.iframe || (doc?.defaultView?.frameElement as HTMLIFrameElement | null)
+      const iframeRect = iframeEl?.getBoundingClientRect() || { left: 0, top: 0 }
+      const x = iframeRect.left + rect.left + rect.width / 2
+      const y = iframeRect.top + rect.top - 8
+      lastSelectionBridgeAtRef.current = Date.now()
+      onToolbarRef.current?.(x, y, text)
+      return true
+    } catch (err) {
+      console.warn('[epub] toolbar bridge failed', err)
+      return false
+    }
+  }
+
   // Apply / re-apply annotation underlines and marker dots inside one
   // iframe's document. Idempotent: clears any prior wrap before redoing the
   // pass, so updates don't accumulate stale spans.
@@ -928,17 +972,18 @@ function EpubViewer({
     style.textContent = `
       html, body { box-sizing: border-box !important; background: ${bgColor} !important; }
       body {
-        max-width: 860px !important;
+        max-width: var(--reader-max-width, 760px) !important;
         margin: 0 auto !important;
-        padding: 40px 56px !important;
-        font-family: "Noto Serif SC", "Source Han Serif", Georgia, serif !important;
-        line-height: 1.9 !important;
+        padding: 44px 48px 80px !important;
+        font-family: var(--font-reading, "Noto Serif SC", "Source Han Serif SC", "Microsoft YaHei", Georgia, serif) !important;
+        line-height: var(--reader-line-height, 1.85) !important;
         font-size: ${fs}px !important;
         font-weight: ${fw} !important;
         color: ${textColor} !important;
-        text-align: justify !important;
+        text-align: start !important;
+        filter: var(--reader-content-filter, sepia(0.03) saturate(0.97) brightness(0.975) contrast(0.99)) !important;
       }
-      p { margin: 0 0 1em 0 !important; text-indent: 2em !important; }
+      p { margin: 0 0 var(--reader-paragraph-gap, 0.9em) 0 !important; text-indent: 2em !important; }
       h1, h2, h3 {
         font-family: -apple-system, "Microsoft YaHei", sans-serif !important;
         text-align: center !important;
@@ -1064,6 +1109,7 @@ function EpubViewer({
   // their own 'rendered' event with the latest values via styleRef.
   useEffect(() => {
     for (const contents of contentsMapRef.current.values()) {
+      clearNativeSelection(contents)
       applyHighlights(contents)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1130,28 +1176,12 @@ function EpubViewer({
       // toolbar; the annotation side-panel only opens when the user clicks
       // the toolbar's "注释" button.
       rendition.on('selected', (_cfiRange: string, contents: any) => {
-        const win = contents?.window as Window | undefined
-        const sel = win?.getSelection()
-        if (!sel || sel.rangeCount === 0) return
-        const text = sel.toString().trim()
-        if (!text || text.length < 2) return
-
-        try {
-          const range = sel.getRangeAt(0)
-          const rect = range.getBoundingClientRect()
-          // contents.iframe gives the iframe element; fall back to searching
-          // the container for it if not exposed.
-          const iframeEl: HTMLIFrameElement | null =
-            contents.iframe || (contents.document?.defaultView?.frameElement as HTMLIFrameElement | null)
-          const iframeRect = iframeEl?.getBoundingClientRect() || { left: 0, top: 0 }
-          const x = iframeRect.left + rect.left + rect.width / 2
-          // Toolbar uses translateY(-100%), so y is its bottom edge.
-          // Place above the selection (same as PDF/OCT behavior).
-          const y = iframeRect.top + rect.top - 8
-          onToolbarRef.current?.(x, y, text)
-        } catch (err) {
-          console.warn('[epub] toolbar bridge failed', err)
-        }
+        // Native iframe mouseup captures the exact DOM Range earlier. Keep
+        // epub.js' selected event only as a fallback; in some books it reports
+        // after internal CFI normalization, which can visually stretch the live
+        // selection back to the paragraph start.
+        if (Date.now() - lastSelectionBridgeAtRef.current < 300) return
+        surfaceSelectionFromContents(contents)
       })
 
       // After each section renders (or re-renders), cache its Contents object
@@ -1174,6 +1204,9 @@ function EpubViewer({
             const doc = c?.document as Document | undefined
             if (doc && !(doc as any).__sjDismissBound) {
               (doc as any).__sjDismissBound = true
+              doc.addEventListener('mouseup', () => {
+                setTimeout(() => surfaceSelectionFromContents(c), 0)
+              }, true)
               doc.addEventListener('click', () => {
                 const s = doc.defaultView?.getSelection()
                 if (!s || s.isCollapsed) onToolbarDismissRef.current?.()
@@ -1223,7 +1256,10 @@ function EpubViewer({
         try {
           // Persist CFI for resume-on-reopen
           const curCfi = location?.start?.cfi
-          if (typeof curCfi === 'string' && curCfi) scheduleCfiSave(curCfi)
+          if (typeof curCfi === 'string' && curCfi && Date.now() > suppressRelocatedUntilRef.current) {
+            latestCfiRef.current = curCfi
+            scheduleCfiSave(curCfi)
+          }
           if (location?.start?.percentage !== undefined) {
             setProgressPct(Math.round(location.start.percentage * 100))
           }
@@ -1259,6 +1295,8 @@ function EpubViewer({
       } catch {
         await rendition.display()
       }
+      if (typeof savedCfi === 'string' && savedCfi) latestCfiRef.current = savedCfi
+      resizeRestoreReadyRef.current = true
 
       // Generate the locations index so location.start.percentage works
       // (without this, progressPct stays 0%). 1500 chars per location is
@@ -1309,6 +1347,7 @@ function EpubViewer({
 
     return () => {
       destroyed = true
+      resizeRestoreReadyRef.current = false
       contentsMapRef.current.clear()
       if (renditionRef.current) try { renditionRef.current.destroy() } catch {}
       if (bookRef.current) try { bookRef.current.destroy() } catch {}
@@ -1318,10 +1357,69 @@ function EpubViewer({
     }
   }, [absPath, onTextSelect])
 
-  // No explicit resize on layout change — epub.js scrolled mode + CSS
-  // width:100% iframe handles reflow without losing scroll position.
-  // The legacy r.resize() + window.dispatchEvent('resize') paths both
-  // triggered iframe rebuilds that reset scrollTop.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+
+    let scrollRaf: number | null = null
+    const onScroll = () => {
+      if (scrollRaf !== null) return
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = null
+        if (el.scrollTop > 10) lastGoodScrollTopRef.current = el.scrollTop
+      })
+    }
+
+    let restoreTimer: ReturnType<typeof setTimeout> | null = null
+    let lastWidth = el.clientWidth
+    const ro = new ResizeObserver(() => {
+      if (!resizeRestoreReadyRef.current) return
+      const nextWidth = el.clientWidth
+      const nextHeight = el.clientHeight
+      if (!lastWidth || Math.abs(nextWidth - lastWidth) < 8) {
+        lastWidth = nextWidth
+        return
+      }
+      lastWidth = nextWidth
+
+      const cfi = (() => {
+        try {
+          const loc = renditionRef.current?.currentLocation?.()
+          return (loc as any)?.start?.cfi || latestCfiRef.current || null
+        } catch { return null }
+      })()
+      const scrollTop = lastGoodScrollTopRef.current
+      if (!cfi && scrollTop <= 10) return
+
+      for (const contents of contentsMapRef.current.values()) clearNativeSelection(contents)
+      suppressRelocatedUntilRef.current = Date.now() + 1600
+      if (restoreTimer) clearTimeout(restoreTimer)
+      restoreTimer = setTimeout(async () => {
+        try {
+          renditionRef.current?.resize?.(nextWidth, nextHeight)
+          if (cfi) await renditionRef.current?.display(cfi)
+          if (scrollTop > 10 && el.scrollTop <= 10) el.scrollTop = scrollTop
+        } catch {
+          if (scrollTop > 10 && el.scrollTop <= 10) el.scrollTop = scrollTop
+        } finally {
+          suppressRelocatedUntilRef.current = Date.now() + 300
+        }
+      }, 180)
+    })
+
+    el.addEventListener('scroll', onScroll, { passive: true })
+    ro.observe(el)
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      ro.disconnect()
+      if (scrollRaf !== null) cancelAnimationFrame(scrollRaf)
+      if (restoreTimer) clearTimeout(restoreTimer)
+    }
+  }, [])
+
+  // ResizeObserver above tells epub.js when the reading column width changes
+  // (annotation panel open/close), then restores the current CFI so the text
+  // reflows without dropping back to the beginning.
 
   // Keyboard: ← previous chapter · → next chapter. Attached at the wrapper
   // level so focus inside the iframe doesn't need to bubble for it to work
@@ -1343,6 +1441,16 @@ function EpubViewer({
     try { renditionRef.current?.display(href) } catch (err) { console.error('[epub] goto failed', err) }
   }
 
+  const epubNavControlStyle = {
+    padding: '3px 8px',
+    fontSize: 11,
+    border: '1px solid var(--border)',
+    borderRadius: 4,
+    background: 'var(--bg)',
+    color: 'var(--text)',
+    cursor: 'pointer',
+  } as const
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: 'var(--bg)' }}>
       {/* Top nav bar — chapter dropdown + prev/next + progress */}
@@ -1354,19 +1462,19 @@ function EpubViewer({
         <button
           onClick={() => renditionRef.current?.prev()}
           title="上一章（←）"
-          style={{ padding: '3px 8px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', cursor: 'pointer' }}
+          style={epubNavControlStyle}
         >← 上一章</button>
         <button
           onClick={() => renditionRef.current?.next()}
           title="下一章（→）"
-          style={{ padding: '3px 8px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', cursor: 'pointer' }}
+          style={epubNavControlStyle}
         >下一章 →</button>
         {toc.length > 0 && (
           <select
             value=""
             onChange={e => { if (e.target.value) gotoHref(e.target.value) }}
             title="跳转到章节"
-            style={{ fontSize: 11, padding: '3px 6px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', maxWidth: 260 }}
+            style={{ ...epubNavControlStyle, padding: '3px 6px', maxWidth: 260 }}
           >
             <option value="">目录（{toc.length} 章）…</option>
             {toc.map((t, i) => (
@@ -1486,10 +1594,11 @@ function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationCli
     <>
       <div ref={containerRef}
         style={{
-          maxWidth: 'min(95%, 1400px)', margin: '0 auto',
+          maxWidth: 'min(100%, calc(var(--reader-max-width) + 120px))', margin: '0 auto',
           padding: '32px clamp(28px, 4vw, 72px) 80px',
           fontSize: 'inherit', fontWeight: 'inherit', color: 'inherit',
-          lineHeight: 2, fontFamily: 'var(--font-serif)', position: 'relative',
+          lineHeight: 'var(--reader-line-height)', fontFamily: 'var(--font-reading)', position: 'relative',
+          filter: 'var(--reader-content-filter)',
         }}
         dangerouslySetInnerHTML={{ __html: html }}
       />
@@ -1596,11 +1705,13 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
     <div ref={containerRef} className="ocr-markdown-content" style={{
       fontSize: fontSize ?? 16,
       fontWeight: fontWeight ?? 400,
-      lineHeight: 2,
+      lineHeight: 'var(--reader-line-height)',
       position: 'relative',
       color: color || undefined,
     }}>
-      <Markdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{text}</Markdown>
+      <div style={{ filter: 'var(--reader-content-filter)' }}>
+        <Markdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{text}</Markdown>
+      </div>
       {markMenu && (
         <div style={{ position: 'fixed', left: markMenu.x, top: markMenu.y, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, boxShadow: '0 2px 8px rgba(0,0,0,0.15)', zIndex: 100, padding: 4 }}>
           <button onClick={() => { onRemoveMark?.(markMenu.markId); setMarkMenu(null) }}
@@ -1784,12 +1895,12 @@ export default function PdfViewer() {
   // BUG-FIX R8#8 · 走 readNumber 兜底 NaN(原 lsGet 没防,坏数据时 fontSize: NaN 导致 OCR 文本不可读)
   const lsGet = (key: string, def: number) => readNumber(key, def)
   const lsSet = (key: string, v: number, setter: (v: number) => void) => { setter(v); try { localStorage.setItem(key, String(v)) } catch {} }
-  const [ocrFontSize, _setOcrFontSize] = useState(() => lsGet('sj-fontSize', 16))
-  const [ocrFontWeight, _setOcrFontWeight] = useState(() => lsGet('sj-fontWeight', 400))
-  const [ocrColorDepth, _setOcrColorDepth] = useState(() => lsGet('sj-colorDepth', 80))
-  const [ocrBgHue, _setOcrBgHue] = useState(() => lsGet('sj-bgHue', 40))
-  const [ocrBgSat, _setOcrBgSat] = useState(() => lsGet('sj-bgSat', 30))
-  const [ocrBgLight, _setOcrBgLight] = useState(() => lsGet('sj-bgLight', 97))
+  const [ocrFontSize, _setOcrFontSize] = useState(() => lsGet('sj-fontSize', 17))
+  const [ocrFontWeight, _setOcrFontWeight] = useState(() => lsGet('sj-fontWeight', 450))
+  const [ocrColorDepth, _setOcrColorDepth] = useState(() => lsGet('sj-colorDepth', 76))
+  const [ocrBgHue, _setOcrBgHue] = useState(() => lsGet('sj-bgHue', 38))
+  const [ocrBgSat, _setOcrBgSat] = useState(() => lsGet('sj-bgSat', 42))
+  const [ocrBgLight, _setOcrBgLight] = useState(() => lsGet('sj-bgLight', 91))
   const setOcrFontSize = (v: number) => lsSet('sj-fontSize', v, _setOcrFontSize)
   const setOcrFontWeight = (v: number) => lsSet('sj-fontWeight', v, _setOcrFontWeight)
   const setOcrColorDepth = (v: number) => lsSet('sj-colorDepth', v, _setOcrColorDepth)
@@ -1963,9 +2074,27 @@ export default function PdfViewer() {
       setOcrBgHue(220); setOcrBgSat(10); setOcrBgLight(15)
     } else if (!darkMode && ocrBgLight < 50) {
       // Switching to light — apply default light preset
-      setOcrBgHue(40); setOcrBgSat(30); setOcrBgLight(97)
+      setOcrBgHue(38); setOcrBgSat(42); setOcrBgLight(91)
     }
   }, [darkMode])
+
+  // 2026-05-02 · Reading comfort migration. Older builds defaulted to an
+  // almost-white L=97 page; if the user is still on that legacy default, move
+  // them to the calmer parchment preset once. Deliberate non-bright presets are
+  // left untouched.
+  useEffect(() => {
+    try {
+      if (localStorage.getItem('sj-readingComfortV2') === '1' || darkMode) return
+      const storedLight = readNumber('sj-bgLight', 97)
+      if (storedLight >= 95) {
+        setOcrBgHue(38); setOcrBgSat(42); setOcrBgLight(91)
+      }
+      if (readNumber('sj-fontSize', 16) === 16) setOcrFontSize(17)
+      if (readNumber('sj-fontWeight', 400) === 400) setOcrFontWeight(450)
+      if (readNumber('sj-colorDepth', 80) === 80) setOcrColorDepth(76)
+      localStorage.setItem('sj-readingComfortV2', '1')
+    } catch {}
+  }, [])
 
   const library = useLibraryStore(s => s.library)
 
@@ -3095,7 +3224,7 @@ export default function PdfViewer() {
                     // v1.2.7: re-tuned presets. Previously 5 of 6 clustered at L≈94-97
                     // (visually indistinguishable); now each preset has clearly
                     // different hue + stronger saturation and L spread 82-92.
-                    { label: '暖', h: 38, s: 55, l: 92 },      // 米黄 — 纸本质感
+                    { label: '暖', h: 38, s: 42, l: 91 },      // 米黄 — 低眩光纸本
                     { label: '护眼', h: 128, s: 45, l: 88 },    // 浅绿 — 保留原经典色
                     { label: '晨雾', h: 30, s: 35, l: 86 },    // 淡杏 — 黄昏阅读
                     { label: '蓝', h: 210, s: 40, l: 90 },     // 冷蓝 — 集中
@@ -3408,7 +3537,7 @@ export default function PdfViewer() {
             key={currentEntry?.id}
             absPath={absPath}
             onTextSelect={setTextSelection}
-            annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
+            annotations={memoizedAnnotations}
             onAnnotationClick={(id) => setActiveAnnotation(id)}
             marks={memoizedMarks}
             onRemoveMark={handleRemoveMark}
@@ -3455,7 +3584,7 @@ export default function PdfViewer() {
           background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
         }} onMouseUp={handleMouseUp}>
           <div style={{
-            maxWidth: 'min(95%, 1400px)', margin: '0 auto',
+            maxWidth: 'min(100%, calc(var(--reader-max-width) + 120px))', margin: '0 auto',
             padding: '40px clamp(32px, 4vw, 80px)', minHeight: '100%',
           }} data-page-number="1">
             <TextFileContent
@@ -3493,7 +3622,7 @@ export default function PdfViewer() {
         >
           {/* 2026-04-28 CLEAN · 沉浸式 dual-page OCR 分支已删,固定走单列 */}
           <div style={{
-            maxWidth: 'min(95%, 1400px)', margin: '0 auto',
+            maxWidth: 'min(100%, calc(var(--reader-max-width) + 120px))', margin: '0 auto',
             padding: '40px clamp(32px, 4vw, 80px) 80px',
             background: 'transparent', minHeight: '100%',
             fontSize: ocrFontSize, fontWeight: ocrFontWeight,
@@ -3502,6 +3631,7 @@ export default function PdfViewer() {
             <div style={{
               textAlign: 'center', marginBottom: 32, paddingBottom: 20,
               borderBottom: '2px solid var(--border)',
+              filter: 'var(--ocr-content-filter)',
             }}>
               <h2 style={{ fontSize: ocrFontSize + 4, lineHeight: 1.4, marginBottom: 6 }}>
                 {currentEntry?.title || ''}
