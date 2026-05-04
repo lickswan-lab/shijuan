@@ -1,7 +1,23 @@
 import { create } from 'zustand'
 import { v4 as uuid } from 'uuid'
 // 2026-04-28 · ReadingLog 类型已删
-import type { Library, LibraryEntry, PdfMeta, VirtualFolder, Memo, BlockRef, MemoSnapshot, MemoFolder, LectureSession } from '../types/library'
+import type {
+  ActivityStats,
+  Library,
+  LibraryEntry,
+  PdfMeta,
+  VirtualFolder,
+  Memo,
+  BlockRef,
+  MemoSnapshot,
+  MemoFolder,
+  LectureSession,
+  ReadingGraph,
+  ReadingGraphConnectionSource,
+  ReadingGraphEdge,
+  ReadingGraphNode,
+  ReadingGraphNodeRef,
+} from '../types/library'
 import { createDefaultLibrary, createDefaultPdfMeta } from '../types/library'
 import { extractPdfMetadata } from '../utils/pdfMetadata'
 import { parseBibTeX, splitAuthors, splitKeywords, parseYear, extractFilePath } from '../utils/bibtexParser'
@@ -15,6 +31,156 @@ const updatePdfMetaByEntryId_queue: Record<string, Promise<void>> = {}
 // initLibrary call (future "switch workspace" UI) doesn't double-run, and
 // callbacks read fresh state from the store instead of a stale closure.
 let initPostBootTimer: ReturnType<typeof setTimeout> | null = null
+
+function emptyReadingGraph(name = '阅读图谱'): ReadingGraph {
+  const now = new Date().toISOString()
+  return { id: uuid(), name, version: '1.0.0', nodes: [], edges: [], createdAt: now, updatedAt: now }
+}
+
+function ensureGraphShape(graph: ReadingGraph, fallbackName = '阅读图谱'): ReadingGraph {
+  const now = new Date().toISOString()
+  if (!graph.id) graph.id = uuid()
+  if (!graph.name) graph.name = fallbackName
+  if (!graph.version) graph.version = '1.0.0'
+  if (!graph.createdAt) graph.createdAt = graph.updatedAt || now
+  if (!graph.updatedAt) graph.updatedAt = graph.createdAt || now
+  if (!Array.isArray(graph.nodes)) graph.nodes = []
+  if (!Array.isArray(graph.edges)) graph.edges = []
+  if (graph.nodes.length === 0 && graph.edges.length > 0) {
+    const seen = new Set<string>()
+    const migratedNodes: ReadingGraphNode[] = []
+    for (const edge of graph.edges) {
+      for (const ref of [edge.a, edge.b]) {
+        const key = nodeKey(ref)
+        if (seen.has(key)) continue
+        seen.add(key)
+        migratedNodes.push({ ...ref, addedAt: edge.createdAt || graph.updatedAt || new Date().toISOString() })
+      }
+    }
+    graph.nodes = migratedNodes
+  }
+  return graph
+}
+
+function ensureReadingGraphs(library: Library): ReadingGraph[] {
+  const legacyGraph = library.readingGraph
+  if (!Array.isArray(library.readingGraphs) || library.readingGraphs.length === 0) {
+    const graph = legacyGraph ? ensureGraphShape(legacyGraph, '阅读图谱') : emptyReadingGraph('阅读图谱')
+    library.readingGraphs = [graph]
+    library.activeReadingGraphId = graph.id
+    library.readingGraph = graph
+    return library.readingGraphs
+  }
+
+  library.readingGraphs = library.readingGraphs.map((graph, index) =>
+    ensureGraphShape(graph, index === 0 ? '阅读图谱' : `图谱 ${index + 1}`)
+  )
+  if (!library.activeReadingGraphId || !library.readingGraphs.some(graph => graph.id === library.activeReadingGraphId)) {
+    library.activeReadingGraphId = library.readingGraphs[0].id
+  }
+  library.readingGraph = library.readingGraphs.find(graph => graph.id === library.activeReadingGraphId) || library.readingGraphs[0]
+  return library.readingGraphs
+}
+
+function ensureReadingGraph(library: Library): ReadingGraph {
+  ensureReadingGraphs(library)
+  return library.readingGraph!
+}
+
+function libraryWithActiveGraph(library: Library, graph: ReadingGraph): Library {
+  const graphs = ensureReadingGraphs(library)
+  const nextGraph = { ...graph, nodes: [...graph.nodes], edges: [...graph.edges] }
+  return {
+    ...library,
+    readingGraph: nextGraph,
+    readingGraphs: graphs.map(item => item.id === nextGraph.id ? nextGraph : item),
+    activeReadingGraphId: nextGraph.id,
+  }
+}
+
+function nodeKey(node: ReadingGraphNodeRef) {
+  return `${node.type}:${node.id}`
+}
+
+function sameNode(a: ReadingGraphNodeRef, b: ReadingGraphNodeRef) {
+  return a.type === b.type && a.id === b.id
+}
+
+function graphHasNode(graph: ReadingGraph, node: ReadingGraphNodeRef) {
+  return graph.nodes.some(item => sameNode(item, node))
+}
+
+function sameUndirectedEdge(edge: ReadingGraphEdge, a: ReadingGraphNodeRef, b: ReadingGraphNodeRef) {
+  return (sameNode(edge.a, a) && sameNode(edge.b, b)) || (sameNode(edge.a, b) && sameNode(edge.b, a))
+}
+
+function orderedPair(a: ReadingGraphNodeRef, b: ReadingGraphNodeRef): [ReadingGraphNodeRef, ReadingGraphNodeRef] {
+  return nodeKey(a) <= nodeKey(b) ? [a, b] : [b, a]
+}
+
+function upsertGraphConnection(
+  library: Library,
+  a: ReadingGraphNodeRef,
+  b: ReadingGraphNodeRef,
+  source: ReadingGraphConnectionSource = 'manual',
+  note?: string,
+): ReadingGraphEdge | null {
+  if (sameNode(a, b)) return null
+  const graph = ensureReadingGraph(library)
+  const now = new Date().toISOString()
+  const event = { id: uuid(), source, kind: 'connection' as const, createdAt: now, note, from: a, to: b }
+  let edge = graph.edges.find(e => sameUndirectedEdge(e, a, b))
+  if (edge) {
+    edge.updatedAt = now
+    if (source === 'manual') {
+      edge.events = [...(edge.events || []).filter(item => !(item.source === 'manual' && item.kind !== 'record')), event]
+    } else {
+      edge.events = [...(edge.events || []), event]
+    }
+    edge.linkCount = Math.max(1, edge.events.length)
+    edge.weight = edge.linkCount
+  } else {
+    const [left, right] = orderedPair(a, b)
+    edge = {
+      id: uuid(),
+      a: left,
+      b: right,
+      linkCount: 1,
+      weight: 1,
+      createdAt: now,
+      updatedAt: now,
+      events: [event],
+    }
+    graph.edges.push(edge)
+  }
+  graph.updatedAt = now
+  return edge
+}
+
+function bumpActivityStats(prev: ActivityStats | undefined, ms: number, nowIso = new Date().toISOString()): ActivityStats {
+  const safeMs = Math.max(0, Math.min(ms, 10 * 60 * 1000))
+  const nowTime = new Date(nowIso).getTime()
+  const lastTime = prev?.lastAt ? new Date(prev.lastAt).getTime() : 0
+  const sameSession = !!lastTime && Number.isFinite(lastTime) && nowTime - lastTime < 5 * 60 * 1000
+  return {
+    firstAt: prev?.firstAt || nowIso,
+    lastAt: nowIso,
+    totalMs: (prev?.totalMs || 0) + safeMs,
+    sessionCount: (prev?.sessionCount || 0) + (sameSession ? 0 : 1),
+    lastSessionMs: sameSession ? (prev?.lastSessionMs || 0) + safeMs : safeMs,
+  }
+}
+
+function dropGraphNode(library: Library, node: ReadingGraphNodeRef) {
+  const graphs = ensureReadingGraphs(library)
+  const now = new Date().toISOString()
+  for (const graph of graphs) {
+    graph.nodes = graph.nodes.filter(item => !sameNode(item, node))
+    graph.edges = graph.edges.filter(edge => !sameNode(edge.a, node) && !sameNode(edge.b, node))
+    graph.updatedAt = now
+  }
+  library.readingGraph = graphs.find(graph => graph.id === library.activeReadingGraphId) || graphs[0]
+}
 
 // Background PDF metadata enrichment. Called after import finishes — reads each
 // newly-imported PDF's Info dict and updates its title / authors / year when
@@ -84,6 +250,7 @@ interface LibraryState {
   removeEntry: (id: string) => Promise<void>
   deleteEntry: (id: string) => Promise<{ success: boolean; error?: string }>
   openEntry: (entry: LibraryEntry) => Promise<void>
+  clearCurrentEntry: () => void
   updateEntry: (id: string, updates: Partial<LibraryEntry>) => Promise<void>
   savePdfMeta: (meta: PdfMeta) => Promise<void>
   updatePdfMeta: (updater: (meta: PdfMeta) => PdfMeta) => Promise<void>
@@ -118,6 +285,22 @@ interface LibraryState {
   renameMemoFolder: (id: string, name: string) => Promise<void>
   deleteMemoFolder: (id: string) => Promise<void>
   moveMemoToFolder: (memoId: string, folderId: string | undefined) => Promise<void>
+
+  // Reading graph + activity feedback
+  createReadingGraph: (name?: string) => Promise<ReadingGraph>
+  switchReadingGraph: (id: string) => Promise<void>
+  renameReadingGraph: (id: string, name: string) => Promise<void>
+  deleteReadingGraph: (id: string) => Promise<void>
+  addGraphNodes: (nodes: ReadingGraphNodeRef[]) => Promise<void>
+  removeGraphNode: (node: ReadingGraphNodeRef) => Promise<void>
+  updateGraphNodePosition: (node: ReadingGraphNodeRef, position: { x: number; y: number }) => Promise<void>
+  addGraphConnection: (a: ReadingGraphNodeRef, b: ReadingGraphNodeRef, source?: ReadingGraphConnectionSource, note?: string) => Promise<ReadingGraphEdge | null>
+  addGraphConnectionEvent: (edgeId: string, payload: { title?: string; note?: string }) => Promise<void>
+  updateGraphConnectionEvent: (edgeId: string, eventId: string, patch: { title?: string; note?: string }) => Promise<void>
+  deleteGraphConnectionEvent: (edgeId: string, eventId: string) => Promise<void>
+  deleteGraphConnection: (edgeId: string) => Promise<void>
+  incrementEntryReadingTime: (entryId: string, ms: number) => Promise<void>
+  incrementMemoWritingTime: (memoId: string, ms: number) => Promise<void>
 
   // 2026-04-28 · Reading log actions(saveReadingLog / reloadReadingLogsFromDisk)
   //   已删,readingLog 功能下线。
@@ -154,6 +337,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (!library.memos) library.memos = []
     if (!library.folders) library.folders = []
     if (!library.memoFolders) library.memoFolders = []
+    ensureReadingGraph(library)
     // 2026-04-28 · readingLogs 字段从 type 中移除,旧库里的数据在下次 saveLibrary
     //   时会被自然丢弃(JSON.stringify 不写入未声明字段),不再 patch 默认数组。
     if (!library.lectureSessions) library.lectureSessions = []
@@ -451,13 +635,17 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const { library, currentEntry } = get()
     if (!library) return
 
-    library.entries = library.entries.filter(e => e.id !== id)
-    await window.electronAPI.saveLibrary(library)
+    const newLibrary = { ...library, entries: library.entries.filter(e => e.id !== id) }
+    dropGraphNode(newLibrary, { type: 'entry', id })
+    const currentStillExists = currentEntry
+      ? newLibrary.entries.some(e => e.id === currentEntry.id)
+      : false
     set({
-      library: { ...library },
-      currentEntry: currentEntry?.id === id ? null : currentEntry,
-      currentPdfMeta: currentEntry?.id === id ? null : get().currentPdfMeta
+      library: newLibrary,
+      currentEntry: currentStillExists ? currentEntry : null,
+      currentPdfMeta: currentStillExists ? get().currentPdfMeta : null,
     })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
   },
 
   // Delete original file (move to trash) + remove from library
@@ -473,18 +661,24 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (!result.success) return result
 
     // Remove from library
-    library.entries = library.entries.filter(e => e.id !== id)
-    await window.electronAPI.saveLibrary(library)
+    const newLibrary = { ...library, entries: library.entries.filter(e => e.id !== id) }
+    dropGraphNode(newLibrary, { type: 'entry', id })
+    const currentStillExists = currentEntry
+      ? newLibrary.entries.some(e => e.id === currentEntry.id)
+      : false
+    set({
+      library: newLibrary,
+      currentEntry: currentStillExists ? currentEntry : null,
+      currentPdfMeta: currentStillExists ? get().currentPdfMeta : null,
+    })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
     // Drop the now-orphaned meta file so meta/ doesn't accumulate junk over time.
     // Idempotent: missing file is not an error.
     window.electronAPI.deletePdfMeta?.(id).catch(() => {})
-    set({
-      library: { ...library },
-      currentEntry: currentEntry?.id === id ? null : currentEntry,
-      currentPdfMeta: currentEntry?.id === id ? null : get().currentPdfMeta
-    })
     return { success: true }
   },
+
+  clearCurrentEntry: () => set({ currentEntry: null, currentPdfMeta: null }),
 
   openEntry: async (entry: LibraryEntry) => {
     // Check file still exists
@@ -747,16 +941,20 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   createMemo: async (title?: string, folderId?: string) => {
     const { library } = get()
     if (!library) throw new Error('Library not loaded')
-    if (!library.memos) library.memos = []
     const memo: Memo = {
       id: uuid(), title: title && title.trim() ? title : '新笔记', content: '', blocks: [], aiHistory: [],
       folderId,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       snapshots: []
     }
-    library.memos.push(memo)
-    await window.electronAPI.saveLibrary(library)
-    set({ library: { ...library } })
+    const newLibrary = {
+      ...library,
+      memos: [...(library.memos || []), memo],
+    }
+    set({ library: newLibrary })
+    void window.electronAPI.saveLibrary(newLibrary).catch(err => {
+      console.error('[library:createMemo] save failed:', err)
+    })
     return memo
   },
 
@@ -774,6 +972,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const { library } = get()
     if (!library) return
     library.memos = (library.memos || []).filter(m => m.id !== id)
+    dropGraphNode(library, { type: 'memo', id })
     await window.electronAPI.saveLibrary(library)
     set({ library: { ...library } })
   },
@@ -786,6 +985,20 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (memo.blocks.some(b => b.historyEntryId === block.historyEntryId)) return
     memo.blocks.push(block)
     memo.updatedAt = new Date().toISOString()
+    if (block.entryId) {
+      const graph = ensureReadingGraph(library)
+      const entryNode: ReadingGraphNodeRef = { type: 'entry', id: block.entryId }
+      const memoNode: ReadingGraphNodeRef = { type: 'memo', id: memoId }
+      if (graphHasNode(graph, entryNode) && graphHasNode(graph, memoNode)) {
+        upsertGraphConnection(
+          library,
+          entryNode,
+          memoNode,
+          'citation',
+          '从文献信息块加入笔记',
+        )
+      }
+    }
     await window.electronAPI.saveLibrary(library)
     set({ library: { ...library } })
   },
@@ -852,6 +1065,254 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (memo) memo.folderId = folderId
     await window.electronAPI.saveLibrary(library)
     set({ library: { ...library } })
+  },
+
+  createReadingGraph: async (name) => {
+    const { library } = get()
+    if (!library) throw new Error('Library not loaded')
+    const graphs = ensureReadingGraphs(library)
+    const cleanName = name?.trim() || `阅读图谱 ${graphs.length + 1}`
+    const graph = emptyReadingGraph(cleanName)
+    const nextGraphs = [...graphs, graph]
+    const newLibrary = {
+      ...library,
+      readingGraphs: nextGraphs,
+      activeReadingGraphId: graph.id,
+      readingGraph: graph,
+    }
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+    return graph
+  },
+
+  switchReadingGraph: async (id) => {
+    const { library } = get()
+    if (!library) return
+    const graphs = ensureReadingGraphs(library)
+    const graph = graphs.find(item => item.id === id)
+    if (!graph) return
+    const newLibrary = { ...library, readingGraphs: [...graphs], activeReadingGraphId: id, readingGraph: graph }
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  renameReadingGraph: async (id, name) => {
+    const { library } = get()
+    if (!library) return
+    const cleanName = name.trim()
+    if (!cleanName) return
+    const graphs = ensureReadingGraphs(library)
+    const now = new Date().toISOString()
+    const nextGraphs = graphs.map(graph => graph.id === id ? { ...graph, name: cleanName, updatedAt: now } : graph)
+    const activeGraph = nextGraphs.find(graph => graph.id === library.activeReadingGraphId) || nextGraphs[0]
+    const newLibrary = { ...library, readingGraphs: nextGraphs, readingGraph: activeGraph }
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  deleteReadingGraph: async (id) => {
+    const { library } = get()
+    if (!library) return
+    const graphs = ensureReadingGraphs(library)
+    let nextGraphs = graphs.filter(graph => graph.id !== id)
+    if (nextGraphs.length === 0) nextGraphs = [emptyReadingGraph('阅读图谱')]
+    const nextActiveId = library.activeReadingGraphId === id ? nextGraphs[0].id : (library.activeReadingGraphId || nextGraphs[0].id)
+    const activeGraph = nextGraphs.find(graph => graph.id === nextActiveId) || nextGraphs[0]
+    const newLibrary = {
+      ...library,
+      readingGraphs: nextGraphs,
+      activeReadingGraphId: activeGraph.id,
+      readingGraph: activeGraph,
+    }
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  addGraphNodes: async (nodes) => {
+    const { library } = get()
+    if (!library || nodes.length === 0) return
+    const graph = ensureReadingGraph(library)
+    const now = new Date().toISOString()
+    const seen = new Set(graph.nodes.map(nodeKey))
+    const nextNodes = graph.nodes.slice()
+    for (const node of nodes) {
+      const key = nodeKey(node)
+      if (seen.has(key)) continue
+      seen.add(key)
+      nextNodes.push({ ...node, addedAt: now })
+    }
+    const nextGraph = { ...graph, nodes: nextNodes, edges: [...graph.edges], updatedAt: now }
+    const newLibrary = libraryWithActiveGraph(library, nextGraph)
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  removeGraphNode: async (node) => {
+    const { library } = get()
+    if (!library) return
+    dropGraphNode(library, node)
+    const graph = ensureReadingGraph(library)
+    const newLibrary = libraryWithActiveGraph(library, graph)
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  updateGraphNodePosition: async (node, position) => {
+    const { library } = get()
+    if (!library) return
+    const graph = ensureReadingGraph(library)
+    const now = new Date().toISOString()
+    const nextNodes = graph.nodes.map(item =>
+      sameNode(item, node)
+        ? { ...item, position: { x: Math.round(position.x), y: Math.round(position.y) }, updatedAt: now }
+        : item
+    )
+    const newLibrary = libraryWithActiveGraph(library, { ...graph, nodes: nextNodes, edges: [...graph.edges], updatedAt: now })
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  addGraphConnection: async (a, b, source = 'manual', note) => {
+    const { library } = get()
+    if (!library) return null
+    const edge = upsertGraphConnection(library, a, b, source, note)
+    if (!edge) return null
+    const graph = ensureReadingGraph(library)
+    const newLibrary = libraryWithActiveGraph(library, graph)
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+    return edge
+  },
+
+  addGraphConnectionEvent: async (edgeId, payload) => {
+    const { library } = get()
+    if (!library) return
+    const graph = ensureReadingGraph(library)
+    const now = new Date().toISOString()
+    const event = {
+      id: uuid(),
+      source: 'manual' as const,
+      kind: 'record' as const,
+      createdAt: now,
+      title: payload.title?.trim() || '',
+      note: payload.note || '',
+    }
+    const nextGraph = {
+      ...graph,
+      edges: graph.edges.map(edge => edge.id === edgeId
+        ? {
+            ...edge,
+            updatedAt: now,
+            linkCount: Math.max(1, (edge.events || []).length + 1),
+            weight: Math.max(1, (edge.events || []).length + 1),
+            events: [...(edge.events || []), event],
+          }
+        : edge
+      ),
+      updatedAt: now,
+    }
+    const newLibrary = libraryWithActiveGraph(library, nextGraph)
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  updateGraphConnectionEvent: async (edgeId, eventId, patch) => {
+    const { library } = get()
+    if (!library) return
+    const graph = ensureReadingGraph(library)
+    const now = new Date().toISOString()
+    const nextGraph = {
+      ...graph,
+      edges: graph.edges.map(edge => edge.id === edgeId
+        ? {
+            ...edge,
+            updatedAt: now,
+            events: (edge.events || []).map(event => event.id === eventId
+              ? { ...event, ...patch }
+              : event
+            ),
+          }
+        : edge
+      ),
+      updatedAt: now,
+    }
+    const newLibrary = libraryWithActiveGraph(library, nextGraph)
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  deleteGraphConnectionEvent: async (edgeId, eventId) => {
+    const { library } = get()
+    if (!library) return
+    const graph = ensureReadingGraph(library)
+    const now = new Date().toISOString()
+    const nextGraph = {
+      ...graph,
+      edges: graph.edges.map(edge => {
+        if (edge.id !== edgeId) return edge
+        const events = (edge.events || []).filter(event => event.id !== eventId)
+        return {
+          ...edge,
+          updatedAt: now,
+          linkCount: Math.max(1, events.length),
+          weight: Math.max(1, events.length),
+          events,
+        }
+      }),
+      updatedAt: now,
+    }
+    const newLibrary = libraryWithActiveGraph(library, nextGraph)
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  deleteGraphConnection: async (edgeId) => {
+    const { library } = get()
+    if (!library) return
+    const graph = ensureReadingGraph(library)
+    const nextGraph = {
+      ...graph,
+      edges: graph.edges.filter(edge => edge.id !== edgeId),
+      updatedAt: new Date().toISOString(),
+    }
+    const newLibrary = libraryWithActiveGraph(library, nextGraph)
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  incrementEntryReadingTime: async (entryId, ms) => {
+    const { library } = get()
+    if (!library || ms < 1000) return
+    const idx = library.entries.findIndex(e => e.id === entryId)
+    if (idx < 0) return
+    const now = new Date().toISOString()
+    const newEntries = library.entries.slice()
+    newEntries[idx] = {
+      ...newEntries[idx],
+      readingStats: bumpActivityStats(newEntries[idx].readingStats, ms, now),
+      lastOpenedAt: now,
+    }
+    const newLibrary = { ...library, entries: newEntries }
+    set({ library: newLibrary, ...(get().currentEntry?.id === entryId ? { currentEntry: newEntries[idx] } : {}) })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
+  },
+
+  incrementMemoWritingTime: async (memoId, ms) => {
+    const { library } = get()
+    if (!library || ms < 1000) return
+    const memos = library.memos || []
+    const idx = memos.findIndex(m => m.id === memoId)
+    if (idx < 0) return
+    const now = new Date().toISOString()
+    const newMemos = memos.slice()
+    newMemos[idx] = {
+      ...newMemos[idx],
+      writingStats: bumpActivityStats(newMemos[idx].writingStats, ms, now),
+      updatedAt: now,
+    }
+    const newLibrary = { ...library, memos: newMemos }
+    set({ library: newLibrary })
+    await window.electronAPI.saveLibrary(newLibrary).catch(() => {})
   },
 
   // ===== Lecture actions =====

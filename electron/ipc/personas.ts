@@ -505,7 +505,7 @@ async function copyImportedSkillPortrait(skillDir: string, personaId: string): P
  *  fullMarkdown untouched and frontmatter=null. */
 function parseSkillMarkdown(md: string): {
   fullMarkdown: string
-  frontmatter: { name: string; description: string; triggers: string[]; model?: string } | null
+  frontmatter: { name: string; description: string; triggers: string[]; model?: string; cardIntro?: string } | null
   body: string
 } {
   // Frontmatter must start at position 0
@@ -519,7 +519,7 @@ function parseSkillMarkdown(md: string): {
   // Very small YAML parser — keys: 'name', 'description', 'model' are string
   // scalars; 'triggers' is a block list (leading "  - x" lines). Anything
   // fancier falls back to null.
-  const frontmatter: { name: string; description: string; triggers: string[]; model?: string } = {
+  const frontmatter: { name: string; description: string; triggers: string[]; model?: string; cardIntro?: string } = {
     name: '', description: '', triggers: [],
   }
   const lines = yaml.split(/\r?\n/)
@@ -544,6 +544,7 @@ function parseSkillMarkdown(md: string): {
     if (key === 'name') frontmatter.name = val
     else if (key === 'description') frontmatter.description = val
     else if (key === 'model') frontmatter.model = val || undefined
+    else if (key === 'cardIntro') frontmatter.cardIntro = val || undefined
     else if (key === 'triggers') {
       // Flow list: [a, b, c]
       const flow = val.match(/^\[(.*)\]$/)
@@ -998,6 +999,7 @@ interface PersonaSummary {
   name: string
   canonicalName?: string
   identity?: string
+  cardIntro?: string
   updatedAt: string
   currentFitnessTotal?: number
 }
@@ -1021,6 +1023,7 @@ export function registerPersonasIpc(): void {
             name: p.name,
             canonicalName: p.canonicalName,
             identity: p.identity,
+            cardIntro: p.cardIntro || p.skill?.frontmatter?.cardIntro,
             updatedAt: p.updatedAt,
             currentFitnessTotal: p.currentFitness?.total,
           })
@@ -1303,6 +1306,7 @@ export function registerPersonasIpc(): void {
         frontmatter: {
           name: fm.name,
           description: fm.description || '',
+          cardIntro: fm.cardIntro,
           triggers: fm.triggers,
           model: fm.model,
         },
@@ -1328,6 +1332,7 @@ export function registerPersonasIpc(): void {
         name: fm.name,
         canonicalName: fm.name,
         identity: fm.description || undefined,
+        cardIntro: fm.cardIntro || undefined,
         skillMode: 'imported',
         content: parsed.fullMarkdown,
         sourcesUsed: [],

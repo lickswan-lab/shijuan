@@ -5,6 +5,7 @@ import FileTree from './components/Sidebar/FileTree'
 const PdfViewer = lazy(() => import('./components/PdfViewer/PdfViewer'))
 const AnnotationPanel = lazy(() => import('./components/AnnotationPanel/AnnotationPanel'))
 const MemoEditor = lazy(() => import('./components/Memo/MemoEditor'))
+const ReadingGraphView = lazy(() => import('./components/ReadingGraph/ReadingGraphView'))
 // 2026-04-28 · ReadingLogView 已删(readingLog 功能下线)
 const AgentPanel = lazy(() => import('./components/Agent/AgentPanel'))
 const QuickOpenModal = lazy(() => import('./components/QuickOpen/QuickOpenModal'))
@@ -99,17 +100,29 @@ export default function App() {
   // 都 re-render App（全屏树都要过一遍 reconcile），改成每个字段独立 selector，
   // 只有读到的字段变化才触发 App 层重渲。library 同理。
   const library = useLibraryStore(s => s.library)
+  const currentEntryId = useLibraryStore(s => s.currentEntry?.id || null)
   const initLibrary = useLibraryStore(s => s.initLibrary)
   const importByPaths = useLibraryStore(s => s.importByPaths)
+  const clearCurrentEntry = useLibraryStore(s => s.clearCurrentEntry)
+  const incrementEntryReadingTime = useLibraryStore(s => s.incrementEntryReadingTime)
+  const incrementMemoWritingTime = useLibraryStore(s => s.incrementMemoWritingTime)
   const setGlmApiKeyStatus = useUiStore(s => s.setGlmApiKeyStatus)
   const annotationPanelCollapsed = useUiStore(s => s.annotationPanelCollapsed)
   const toggleAnnotationPanel = useUiStore(s => s.toggleAnnotationPanel)
   const activeMemoId = useUiStore(s => s.activeMemoId)
+  const mainView = useUiStore(s => s.mainView)
   // 2026-04-28 · activeReadingLogDate 已删(readingLog 功能下线)
   const rightPanel = useUiStore(s => s.rightPanel)
   // 2026-04-28 CLEAN · immersiveMode + dualPageMode 已删(沉浸式阅读下线)
   const [dropActive, setDropActive] = useState(false)
   const dropCounter = useRef(0)  // track nested drag enter/leave
+
+  useEffect(() => {
+    if (!library || !currentEntryId) return
+    if (!library.entries.some(entry => entry.id === currentEntryId)) {
+      clearCurrentEntry()
+    }
+  }, [clearCurrentEntry, currentEntryId, library])
 
   // ===== Global keyboard shortcuts =====
   useEffect(() => {
@@ -179,10 +192,15 @@ export default function App() {
       }
 
       // Ctrl+N → New memo
-      if (ctrl && e.key === 'n' && !shift) {
+      if (ctrl && e.key.toLowerCase() === 'n' && !shift) {
         e.preventDefault()
+        if (e.repeat) return
         useUiStore.getState().setSidebarTab('memos')
-        useLibraryStore.getState().createMemo()
+        void useLibraryStore.getState().createMemo().then(memo => {
+          useUiStore.getState().setActiveMemo(memo.id)
+        }).catch(err => {
+          console.error('[shortcut:new-memo] failed:', err)
+        })
         return
       }
 
@@ -276,6 +294,58 @@ export default function App() {
     document.documentElement.classList.toggle('dark-mode', dark)
     window.electronAPI?.setTitleBarTheme?.(dark)
   }, [])
+
+  // Track active reading/writing time as feedback for the graph. The timer only
+  // counts when the app is visible and the main reader/memo surface is open.
+  useEffect(() => {
+    if (mainView !== 'reader') return
+    const target = activeMemoId
+      ? { kind: 'memo' as const, id: activeMemoId }
+      : currentEntryId
+        ? { kind: 'entry' as const, id: currentEntryId }
+        : null
+    if (!target) return
+
+    let lastTick = Date.now()
+    let bufferedMs = 0
+
+    const flush = () => {
+      if (bufferedMs < 1000) return
+      const ms = bufferedMs
+      bufferedMs = 0
+      if (target.kind === 'memo') {
+        incrementMemoWritingTime(target.id, ms)
+      } else {
+        incrementEntryReadingTime(target.id, ms)
+      }
+    }
+
+    const tick = () => {
+      const now = Date.now()
+      if (document.hidden) {
+        lastTick = now
+        return
+      }
+      const delta = Math.max(0, Math.min(now - lastTick, 30_000))
+      lastTick = now
+      bufferedMs += delta
+      if (bufferedMs >= 15_000) flush()
+    }
+
+    const timer = setInterval(tick, 5_000)
+    const onVisibility = () => {
+      if (document.hidden) flush()
+      lastTick = Date.now()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('beforeunload', flush)
+    return () => {
+      flush()
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('beforeunload', flush)
+    }
+  }, [mainView, activeMemoId, currentEntryId, incrementEntryReadingTime, incrementMemoWritingTime])
 
   // 2026-04-28 · onLibraryChangedOnDisk + reloadReadingLogsFromDisk 已删
   //   (readingLog 功能下线,midnight scheduler 也跟着删了,不再有"主进程改库"事件)
@@ -401,7 +471,11 @@ export default function App() {
         {/* Main content: Memo editor / PDF viewer (lazy-loaded)
             2026-04-28 · ReadingLogView 分支已删(readingLog 功能下线) */}
         <Suspense fallback={<div className="empty-state"><span className="loading-spinner" /></div>}>
-        {activeMemoId ? (
+        {mainView === 'graph' ? (
+          <ErrorBoundary fallbackLabel="阅读图谱">
+            <ReadingGraphView />
+          </ErrorBoundary>
+        ) : activeMemoId ? (
           <>
             <ErrorBoundary fallbackLabel="笔记">
               <MemoEditor />
@@ -459,8 +533,8 @@ export default function App() {
         <OnboardingModal />
       </Suspense>
 
-      {/* Feature tour: 5-step walkthrough that fires the first boot after the
-          user has any AI key configured (导入文件 / OCR / 划线 / 删除 / 学徒周报).
+      {/* Feature tour: 6-step walkthrough that fires the first boot after the
+          user has any AI key configured (导入 / OCR / 划线 / 注释 / 学徒对话 / 召唤).
           Re-triggerable from Settings via setForceFeatureTour(true). */}
       <Suspense fallback={null}>
         <FeatureTourModal />

@@ -12,10 +12,12 @@
 import { useEffect, useRef, useState } from 'react'
 
 export type OcrMode = 'full' | 'range' | 'around-current'
+export type OcrEngine = 'glm' | 'rapidocr'
 
 export interface OcrRangeChoice {
   startPage?: number
   endPage?: number
+  engine?: OcrEngine
 }
 
 export interface OcrRangeModalProps {
@@ -23,6 +25,9 @@ export interface OcrRangeModalProps {
   totalPages: number       // PDF 总页数
   currentPage: number      // 用户当前可见页（用于"当前页附近"默认值）
   defaultMode?: OcrMode
+  ocrEngine?: OcrEngine
+  glmApiKeyStatus?: 'set' | 'not-set' | 'checking'
+  onEngineChange?: (engine: OcrEngine) => void
   onConfirm: (choice: OcrRangeChoice) => void
   onCancel: () => void
 }
@@ -32,6 +37,9 @@ export default function OcrRangeModal({
   totalPages,
   currentPage,
   defaultMode = 'full',
+  ocrEngine = 'glm',
+  glmApiKeyStatus = 'checking',
+  onEngineChange,
   onConfirm,
   onCancel,
 }: OcrRangeModalProps) {
@@ -39,6 +47,7 @@ export default function OcrRangeModal({
   const [startStr, setStartStr] = useState('1')
   const [endStr, setEndStr] = useState(String(totalPages || 1))
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [rapidStatus, setRapidStatus] = useState<{ checking: boolean; available: boolean; message: string; installCommand?: string } | null>(null)
   const confirmBtnRef = useRef<HTMLButtonElement>(null)
 
   // 重置默认值（每次打开 modal 时）
@@ -51,6 +60,41 @@ export default function OcrRangeModal({
     const t = setTimeout(() => confirmBtnRef.current?.focus(), 30)
     return () => clearTimeout(t)
   }, [open, defaultMode, totalPages])
+
+  useEffect(() => {
+    if (!open || ocrEngine !== 'rapidocr') return
+    let cancelled = false
+    setRapidStatus({ checking: true, available: false, message: '正在检查本地 RapidOCR...' })
+    window.electronAPI?.rapidOcrProbe?.()
+      .then(r => {
+        if (cancelled) return
+        if (r?.available) {
+          setRapidStatus({
+            checking: false,
+            available: true,
+            message: `已连接 ${r.api || 'RapidOCR'}${r.version ? ` ${r.version}` : ''}${r.python ? ` · ${r.python}` : ''}`,
+            installCommand: r.installCommand,
+          })
+        } else {
+          setRapidStatus({
+            checking: false,
+            available: false,
+            message: r?.error || '未检测到本地 RapidOCR',
+            installCommand: r?.installCommand || 'python -m pip install rapidocr onnxruntime pymupdf',
+          })
+        }
+      })
+      .catch(err => {
+        if (cancelled) return
+        setRapidStatus({
+          checking: false,
+          available: false,
+          message: err?.message || 'RapidOCR 检查失败',
+          installCommand: 'python -m pip install rapidocr onnxruntime pymupdf',
+        })
+      })
+    return () => { cancelled = true }
+  }, [open, ocrEngine])
 
   // mode 切换时自动填合理默认
   useEffect(() => {
@@ -86,12 +130,26 @@ export default function OcrRangeModal({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, mode, startStr, endStr])
+  }, [open, mode, startStr, endStr, ocrEngine, glmApiKeyStatus, rapidStatus])
 
   function handleConfirm() {
     setErrorMsg(null)
+    if (ocrEngine === 'glm' && glmApiKeyStatus !== 'set') {
+      setErrorMsg('GLM OCR 需要先在设置里配置 GLM API KEY，或切换到本地 RapidOCR。')
+      return
+    }
+    if (ocrEngine === 'rapidocr') {
+      if (!rapidStatus || rapidStatus.checking) {
+        setErrorMsg('正在检查本地 RapidOCR，请稍等。')
+        return
+      }
+      if (!rapidStatus.available) {
+        setErrorMsg('本地 RapidOCR 还不可用，请先按下方命令安装依赖，或切回 GLM OCR。')
+        return
+      }
+    }
     if (mode === 'full') {
-      onConfirm({})
+      onConfirm({ engine: ocrEngine })
       return
     }
     const start = parseInt(startStr, 10)
@@ -112,7 +170,7 @@ export default function OcrRangeModal({
       setErrorMsg(`结束页不能超过总页数 ${totalPages}`)
       return
     }
-    onConfirm({ startPage: start, endPage: end })
+    onConfirm({ startPage: start, endPage: end, engine: ocrEngine })
   }
 
   // 输入失焦时把越界值 clamp 回合法区间——避免用户输完后还以为 200 页能 OCR
@@ -176,6 +234,49 @@ export default function OcrRangeModal({
           PDF 共 {totalPages || '?'} 页。你可以只 OCR 一部分（大文件全本 OCR 慢且费 quota）。
         </div>
 
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>OCR 引擎</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <EngineOption
+              checked={ocrEngine === 'rapidocr'}
+              title="本地 RapidOCR"
+              sub="离线 · 不消耗 API KEY"
+              onClick={() => onEngineChange?.('rapidocr')}
+            />
+            <EngineOption
+              checked={ocrEngine === 'glm'}
+              title="GLM OCR"
+              sub={glmApiKeyStatus === 'set' ? '云端 · 版式解析更强' : '需要 GLM API KEY'}
+              onClick={() => onEngineChange?.('glm')}
+            />
+          </div>
+          {ocrEngine === 'rapidocr' && rapidStatus && (
+            <div style={{
+              marginTop: 8,
+              padding: '8px 10px',
+              borderRadius: 6,
+              background: rapidStatus.available ? 'rgba(114, 153, 124, 0.10)' : 'rgba(201, 112, 112, 0.08)',
+              border: `1px solid ${rapidStatus.available ? 'rgba(114, 153, 124, 0.22)' : 'rgba(201, 112, 112, 0.18)'}`,
+              color: rapidStatus.available ? 'var(--success, #6E8F6B)' : 'var(--danger, #C97070)',
+              fontSize: 11.5,
+              lineHeight: 1.55,
+            }}>
+              <div>{rapidStatus.message}</div>
+              {!rapidStatus.available && rapidStatus.installCommand && (
+                <code style={{
+                  display: 'block',
+                  marginTop: 6,
+                  color: 'var(--text)',
+                  background: 'rgba(61, 53, 41, 0.06)',
+                  borderRadius: 4,
+                  padding: '5px 7px',
+                  userSelect: 'text',
+                }}>{rapidStatus.installCommand}</code>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* mode 选项 */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 }}>
           <ModeRadio
@@ -233,7 +334,9 @@ export default function OcrRangeModal({
             borderRadius: 6, lineHeight: 1.55,
           }}>
             将处理 <strong style={{ color: 'var(--accent)' }}>{pageCount}</strong> 页，
-            约 {estChunks} 个分片，预计 {estTimeLabel}（GLM 4 RPM 节流，实际可能更长）。
+            {ocrEngine === 'rapidocr'
+              ? ` 本地逐页识别，首次运行可能下载模型，预计 ${estTimeLabel} 起。`
+              : ` 约 ${estChunks} 个分片，预计 ${estTimeLabel}（GLM 4 RPM 节流，实际可能更长）。`}
           </div>
         )}
 
@@ -268,6 +371,30 @@ export default function OcrRangeModal({
         </div>
       </div>
     </div>
+  )
+}
+
+function EngineOption({
+  checked, title, sub, onClick,
+}: { checked: boolean; title: string; sub: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        textAlign: 'left',
+        padding: '11px 12px',
+        borderRadius: 8,
+        border: `1px solid ${checked ? 'var(--accent)' : 'var(--border-light)'}`,
+        background: checked ? 'var(--accent-soft, rgba(200,149,108,0.10))' : 'transparent',
+        color: 'var(--text)',
+        cursor: 'pointer',
+        transition: 'all 160ms ease',
+      }}
+    >
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 3 }}>{title}</div>
+      <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{sub}</div>
+    </button>
   )
 }
 

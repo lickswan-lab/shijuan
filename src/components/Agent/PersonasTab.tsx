@@ -76,7 +76,7 @@ type Stage = 'gallery' | 'detail' | 'summon' | 'import'
 type PanelError = { message: string; ctaSettings?: boolean }
 type PersonaListEntry = {
   id: string; name: string; canonicalName?: string
-  identity?: string; updatedAt: string; currentFitnessTotal?: number
+  identity?: string; cardIntro?: string; updatedAt: string; currentFitnessTotal?: number
 }
 type SummonMsg = {
   role: 'user' | 'assistant'
@@ -89,6 +89,7 @@ type SummonMsg = {
 }
 type SummonSessionSummary = {
   sessionId: string
+  title?: string
   startedAt: string
   messageCount: number
   firstPreview: string
@@ -122,6 +123,12 @@ function inferSlugs(p: { canonicalName?: string; name: string }): string[] {
     if (mapped) out.add(mapped)
   }
   return Array.from(out)
+}
+
+function getPersonaCardIntro(entry: PersonaListEntry): string {
+  const intro = entry.cardIntro?.trim()
+  if (intro) return intro
+  return '已导入思想人物 Skill'
 }
 
 function Placeholder({ name }: { name: string }) {
@@ -228,6 +235,7 @@ function Card({
   const [hover, setHover] = useState(false)
   const subtitle = entry.identity
     || (entry.canonicalName && entry.canonicalName !== entry.name ? entry.canonicalName : '')
+  const intro = getPersonaCardIntro(entry)
   const isOfficial = inferSlugs(entry).some(s => CANONICAL_SLUGS.has(s))
   return (
     <div
@@ -274,7 +282,20 @@ function Card({
           }}>{subtitle}</div>
         )}
         <div style={{
-          marginTop: 14, paddingTop: 12,
+          marginTop: 7,
+          fontSize: 12,
+          color: C.textFaint,
+          lineHeight: 1.45,
+          minHeight: 18,
+          display: '-webkit-box',
+          WebkitLineClamp: 1,
+          WebkitBoxOrient: 'vertical',
+          overflow: 'hidden',
+        }}>
+          {intro}
+        </div>
+        <div style={{
+          marginTop: 12, paddingTop: 12,
           borderTop: `1px solid ${C.borderLight}`,
           display: 'flex', gap: 8, alignItems: 'center',
           fontSize: 11, color: C.textFaint, letterSpacing: '0.6px',
@@ -487,7 +508,7 @@ function DetailView({
             </section>
           )}
 
-          <HistorySessionsSection personaId={persona.id} onOpenSession={onOpenSession} />
+          <HistorySessionsSection personaId={persona.id} onOpenSession={onOpenSession} onNewSession={onSummon} />
           <UserMaterialsSection persona={persona} onPersonaUpdated={onPersonaUpdated} />
 
           {files.length > 0 && <FilesSection files={files} />}
@@ -561,10 +582,11 @@ function SourcesSection({ refs }: { refs: string[] }) {
 const historySessionsCache = new Map<string, SummonSessionSummary[]>()
 
 function HistorySessionsSection({
-  personaId, onOpenSession,
+  personaId, onOpenSession, onNewSession,
 }: {
   personaId: string
   onOpenSession: (sessionId: string) => void
+  onNewSession: () => void
 }) {
   // Batch 43: 替换 window.confirm
   const { ask: askConfirm, dialog: confirmDialog } = useConfirmDialog()
@@ -573,6 +595,10 @@ function HistorySessionsSection({
   const [sessions, setSessions] = useState<SummonSessionSummary[]>(cachedInitial || [])
   const [loading, setLoading] = useState(!cachedInitial)
   const [refreshTick, setRefreshTick] = useState(0)
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
 
   useEffect(() => {
     let cancelled = false
@@ -590,26 +616,140 @@ function HistorySessionsSection({
     return () => { cancelled = true }
   }, [personaId, refreshTick])
 
-  const handleDelete = useCallback((sessionId: string) => {
-    // Batch 43: window.confirm() → 暖金 ConfirmDialog
+  useEffect(() => {
+    setSelectionMode(false)
+    setSelectedIds(new Set())
+    setRenamingId(null)
+    setRenameDraft('')
+  }, [personaId])
+
+  const toggleSelect = useCallback((sessionId: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(sessionId)) next.delete(sessionId)
+      else next.add(sessionId)
+      return next
+    })
+  }, [])
+
+  const requestDelete = useCallback((ids: string[]) => {
+    if (ids.length === 0) return
     askConfirm({
-      title: '删除对话记录',
-      message: '删除这段对话记录？此操作不可撤销。',
+      title: ids.length > 1 ? '删除历史对话' : '删除对话记录',
+      message: ids.length > 1
+        ? `删除选中的 ${ids.length} 段召唤对话？此操作不可撤销。`
+        : '删除这段对话记录？此操作不可撤销。',
       confirmLabel: '删除',
       danger: true,
       onConfirm: async () => {
-        await window.electronAPI.summonSessionDelete?.(personaId, sessionId)
-        // UX-R8#9 · 删完清 cache,下次 effect 重 fetch 拿到最新
-        historySessionsCache.delete(personaId)
-        setRefreshTick(t => t + 1)
+        await Promise.all(ids.map(id => window.electronAPI.summonSessionDelete?.(personaId, id)))
+        const idSet = new Set(ids)
+        setSessions(prev => {
+          const next = prev.filter(s => !idSet.has(s.sessionId))
+          historySessionsCache.set(personaId, next)
+          return next
+        })
+        setSelectedIds(new Set())
+        setSelectionMode(false)
       },
     })
   }, [personaId, askConfirm])
 
+  const handleDeleteSelected = useCallback(() => {
+    requestDelete(Array.from(selectedIds))
+  }, [requestDelete, selectedIds])
+
+  const startRename = useCallback((session: SummonSessionSummary) => {
+    setRenamingId(session.sessionId)
+    setRenameDraft(session.title || session.firstPreview || '未命名对话')
+  }, [])
+
+  const cancelRename = useCallback(() => {
+    setRenamingId(null)
+    setRenameDraft('')
+  }, [])
+
+  const commitRename = useCallback(async (sessionId: string) => {
+    const title = renameDraft.trim()
+    if (!title) {
+      cancelRename()
+      return
+    }
+    const loaded = await window.electronAPI.summonSessionLoad?.(personaId, sessionId)
+    if (loaded?.success && loaded.session) {
+      await window.electronAPI.summonSessionSave?.({ ...loaded.session, title })
+    }
+    setSessions(prev => {
+      const next = prev.map(s => s.sessionId === sessionId ? { ...s, title } : s)
+      historySessionsCache.set(personaId, next)
+      return next
+    })
+    setRenamingId(null)
+    setRenameDraft('')
+  }, [personaId, renameDraft, cancelRename])
+
+  const header = (count?: number) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+      <h3 style={{
+        fontSize: 11, fontWeight: 500, letterSpacing: '2.5px',
+        textTransform: 'uppercase', color: C.textFaint,
+        display: 'flex', alignItems: 'center', gap: 12, margin: 0,
+      }}>
+        <span style={{ width: 28, height: 1, background: C.textFaint }} />
+        历史对话{typeof count === 'number' ? `（${count}）` : ''}
+      </h3>
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+        {selectionMode && selectedIds.size > 0 && (
+          <button
+            onClick={handleDeleteSelected}
+            style={{
+              padding: '5px 9px', fontSize: 11,
+              border: '1px solid rgba(196,90,58,0.34)', borderRadius: 7,
+              background: 'rgba(196,90,58,0.08)', color: C.danger,
+              cursor: 'pointer',
+            }}
+          >
+            删除选中
+          </button>
+        )}
+        <button
+          onClick={onNewSession}
+          style={{
+            padding: '5px 10px', fontSize: 11,
+            border: `1px solid ${C.accent}`, borderRadius: 7,
+            background: C.accent, color: '#fff',
+            cursor: 'pointer', fontWeight: 600,
+          }}
+        >
+          新增
+        </button>
+        {sessions.length > 0 && (
+          <button
+            onClick={() => {
+              setSelectionMode(v => !v)
+              setSelectedIds(new Set())
+              setRenamingId(null)
+            }}
+            style={{
+              padding: '5px 10px', fontSize: 11,
+              border: `1px solid ${selectionMode ? C.accent : C.border}`,
+              borderRadius: 7,
+              background: selectionMode ? C.accentLight : 'transparent',
+              color: selectionMode ? C.accentDark : C.textMuted,
+              cursor: 'pointer',
+            }}
+          >
+            {selectionMode ? '完成' : '多选'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+
   if (loading) {
     return (
       <section style={{ marginBottom: 44 }}>
-        <SectionLabel>历史对话</SectionLabel>
+        {header()}
         <div style={{ fontSize: 12, color: C.textFaint, padding: '8px 0' }}>加载中…</div>
       </section>
     )
@@ -617,7 +757,7 @@ function HistorySessionsSection({
   if (sessions.length === 0) {
     return (
       <section style={{ marginBottom: 44 }}>
-        <SectionLabel>历史对话</SectionLabel>
+        {header(0)}
         <div style={{
           fontSize: 12, color: C.textFaint, padding: '10px 14px',
           background: C.bgWarm, border: `1px dashed ${C.border}`, borderRadius: 4,
@@ -628,45 +768,129 @@ function HistorySessionsSection({
 
   return (
     <section style={{ marginBottom: 44 }}>
-      <SectionLabel>历史对话（{sessions.length}）</SectionLabel>
-      <div style={{
-        display: 'flex', flexDirection: 'column', gap: 1,
-        background: C.border, border: `1px solid ${C.border}`,
-      }}>
-        {sessions.map(s => (
-          <div
-            key={s.sessionId}
-            onClick={() => onOpenSession(s.sessionId)}
-            style={{
-              padding: '12px 16px', background: C.bgCard, cursor: 'pointer',
-              display: 'flex', alignItems: 'center', gap: 12,
-              transition: 'background 0.15s',
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = C.bgWarm }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = C.bgCard }}
-          >
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{
-                fontSize: 13, color: C.text, lineHeight: 1.5,
-                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              }}>{s.firstPreview || '(空白会话)'}</div>
-              <div style={{ fontSize: 11, color: C.textFaint, marginTop: 3, letterSpacing: '0.3px' }}>
-                {new Date(s.startedAt).toLocaleString('zh-CN')} · {s.messageCount} 轮对话
-              </div>
-            </div>
-            <button
-              onClick={(e) => { e.stopPropagation(); handleDelete(s.sessionId) }}
-              title="删除此对话"
-              style={{
-                background: 'none', border: 'none', padding: '4px 6px',
-                fontSize: 11, color: C.textFaint, cursor: 'pointer',
-                flexShrink: 0,
+      {header(sessions.length)}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+        {sessions.map(s => {
+          const selected = selectedIds.has(s.sessionId)
+          const renaming = renamingId === s.sessionId
+          const title = s.title || s.firstPreview || '(空白会话)'
+          return (
+            <div
+              key={s.sessionId}
+              onClick={() => {
+                if (renaming) return
+                if (selectionMode) {
+                  toggleSelect(s.sessionId)
+                  return
+                }
+                onOpenSession(s.sessionId)
               }}
-              onMouseEnter={(e) => { e.currentTarget.style.color = C.danger }}
-              onMouseLeave={(e) => { e.currentTarget.style.color = C.textFaint }}
-            >删除</button>
-          </div>
-        ))}
+              style={{
+                padding: '10px 12px',
+                background: selected ? C.accentLight : C.bgCard,
+                border: `1px solid ${selected ? C.accent : C.border}`,
+                borderRadius: 9,
+                cursor: renaming ? 'default' : 'pointer',
+                display: 'flex', alignItems: 'center', gap: 10,
+                transition: 'background 0.15s, border-color 0.15s',
+              }}
+              onMouseEnter={(e) => { if (!selected) e.currentTarget.style.background = C.bgWarm }}
+              onMouseLeave={(e) => { if (!selected) e.currentTarget.style.background = C.bgCard }}
+            >
+              {selectionMode && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); toggleSelect(s.sessionId) }}
+                  style={{
+                    width: 18, height: 18, padding: 0, borderRadius: 6,
+                    border: `1.5px solid ${selected ? C.accent : C.border}`,
+                    background: selected ? C.accent : C.bg,
+                    color: '#fff', cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    flexShrink: 0,
+                  }}
+                >
+                  {selected && (
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="4 12 10 18 20 6"/>
+                    </svg>
+                  )}
+                </button>
+              )}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {renaming ? (
+                  <input
+                    autoFocus
+                    value={renameDraft}
+                    onChange={e => setRenameDraft(e.target.value)}
+                    onClick={e => e.stopPropagation()}
+                    onFocus={e => e.currentTarget.select()}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') { e.preventDefault(); void commitRename(s.sessionId) }
+                      if (e.key === 'Escape') { e.preventDefault(); cancelRename() }
+                    }}
+                    style={{
+                      width: '100%', boxSizing: 'border-box',
+                      padding: '5px 8px',
+                      border: `1px solid ${C.accent}`, borderRadius: 7,
+                      outline: 'none', background: C.bg, color: C.text,
+                      fontSize: 13,
+                    }}
+                  />
+                ) : (
+                  <div style={{
+                    fontSize: 13, color: C.text, lineHeight: 1.5, fontWeight: 600,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>{title}</div>
+                )}
+                <div style={{ fontSize: 11, color: C.textFaint, marginTop: 3, letterSpacing: '0.3px' }}>
+                  {new Date(s.startedAt).toLocaleString('zh-CN')} · {s.messageCount} 条消息
+                  {s.title && s.firstPreview && s.firstPreview !== s.title && (
+                    <span style={{ marginLeft: 8 }}>{s.firstPreview}</span>
+                  )}
+                </div>
+              </div>
+              {!selectionMode && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+                  {renaming ? (
+                    <>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); void commitRename(s.sessionId) }}
+                        style={{ padding: '4px 8px', fontSize: 11, border: `1px solid ${C.accent}`, borderRadius: 6, background: C.accent, color: '#fff', cursor: 'pointer' }}
+                      >
+                        保存
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); cancelRename() }}
+                        style={{ padding: '4px 8px', fontSize: 11, border: `1px solid ${C.border}`, borderRadius: 6, background: 'transparent', color: C.textMuted, cursor: 'pointer' }}
+                      >
+                        取消
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); startRename(s) }}
+                        style={{ padding: '4px 7px', fontSize: 11, border: `1px solid ${C.borderLight}`, borderRadius: 6, background: 'transparent', color: C.textMuted, cursor: 'pointer' }}
+                      >
+                        重命名
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); requestDelete([s.sessionId]) }}
+                        title="删除此对话"
+                        style={{ padding: '4px 7px', fontSize: 11, border: '1px solid transparent', borderRadius: 6, background: 'transparent', color: C.textFaint, cursor: 'pointer' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = C.danger; e.currentTarget.style.borderColor = 'rgba(196,90,58,0.24)' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = C.textFaint; e.currentTarget.style.borderColor = 'transparent' }}
+                      >
+                        删除
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })}
       </div>
       {/* Batch 43: ConfirmDialog 替代 window.confirm */}
       {confirmDialog}

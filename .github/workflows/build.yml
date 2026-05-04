@@ -18,8 +18,8 @@ jobs:
       - run: npm ci
       - run: npx electron-vite build
 
-      # 1. electron-packager path (produces raw-dir zip and extracts app.asar for patch updates)
-      - run: npx electron-packager . "拾卷" --platform=win32 --arch=x64 --out=dist-packager --icon=build/icon.ico --asar --overwrite
+      # 1. Optimized electron-packager path (produces raw-dir zip and extracts app.asar for patch updates)
+      - run: node scripts/pack-portable.mjs
       - name: Zip Windows build (packager)
         run: Compress-Archive -Path "dist-packager\拾卷-win32-x64\*" -DestinationPath "dist-packager\shijuan-win-x64.zip"
         shell: pwsh
@@ -87,7 +87,7 @@ jobs:
           path: dist/shijuan-win-x64-portable.exe
 
   build-macos-intel:
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -138,6 +138,18 @@ jobs:
         with:
           name: 拾卷 ${{ github.ref_name }}
           draft: false
+          make_latest: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          body: |
+            ## 拾卷 ${{ github.ref_name }}
+
+            - 优化阅读器舒适度与防眩光显示，并修复 PDF / OCR 文本切换时的加载状态问题。
+            - 上线召唤社区与首批人物 skill，保留孔子、老子、墨子、苏格拉底、柏拉图、亚里士多德。
+            - 改进注释召唤、学徒输出、知识图谱路径线与节点管理体验。
+            - 增加腾讯混元模型与 RapidOCR 本地 OCR 的接入准备。
+
+            Windows 与 macOS 版本均由 GitHub Actions 自动构建；macOS 分为 Apple Silicon 与 Intel 两个 zip 包。
           files: |
             artifacts/shijuan-win-x64/shijuan-win-x64.zip
             artifacts/shijuan-win-setup/*.exe

@@ -7,6 +7,7 @@ import { openEntryById } from '../../utils/openEntryById'
 import type { Annotation, HistoryEntry, BlockRef } from '../../types/library'
 import { useAnnotationAiJobsStore, jobKey } from '../../store/annotationAiJobsStore'
 import { fetchAiConfig, subscribeAiConfig } from '../../utils/aiConfigCache'
+import { normalizeMixedChineseToSimplified } from '../../utils/chineseText'
 import { fetchAgentMemory, invalidateAgentMemoryCache } from '../../utils/agentMemoryCache'
 import { humanizeAiError } from '../../utils/humanizeAiError'
 import { readNumber } from '../../utils/safeStorageRead'
@@ -314,6 +315,16 @@ const HistoryEntryItem = React.memo(function HistoryEntryItem({
   const isRunning = effectiveStatus === 'running'
 
   const display = getTypeDisplay(entry.type)
+  const headerLabel = entry.author === 'user'
+    ? '我'
+    : entry.type === 'ai_persona'
+      ? (entry.personaName || entry.modelLabel || '召唤')
+      : (entry.modelLabel || 'AI')
+  const headerColor = entry.author === 'user'
+    ? 'var(--accent)'
+    : entry.type === 'ai_persona'
+      ? display.color
+      : 'var(--success)'
 
   const handleSave = () => {
     onEdit(entry.id, editText)
@@ -323,8 +334,8 @@ const HistoryEntryItem = React.memo(function HistoryEntryItem({
   return (
     <div className={`history-entry ${display.bgClass}`}>
       <div className="history-entry-header">
-        <span style={{ fontSize: 12.5, fontWeight: 500, color: entry.author === 'user' ? 'var(--accent)' : 'var(--success)', display: 'inline-flex', alignItems: 'center', gap: 8, letterSpacing: '0.2px' }}>
-          {entry.author === 'user' ? '我' : (entry.modelLabel || 'AI')}
+        <span style={{ fontSize: 12.5, fontWeight: 500, color: headerColor, display: 'inline-flex', alignItems: 'center', gap: 8, letterSpacing: '0.2px' }}>
+          {headerLabel}
           {/* AI job status chip: icon-in-circle + small label. Status chip
               uses 1px soft border + faint tinted bg — reads as a proper
               badge rather than a bare unicode symbol. */}
@@ -432,6 +443,13 @@ const HistoryEntryItem = React.memo(function HistoryEntryItem({
       {entry.type === 'ai_qa' && entry.userQuery && (
         <div style={{ fontSize: 14, color: 'var(--accent)', marginBottom: 8, fontWeight: 600, lineHeight: 1.55 }}>
           问：{entry.userQuery}
+        </div>
+      )}
+      {entry.type === 'ai_persona' && entry.userQuery && (
+        <div style={{ fontSize: 13.5, color: 'var(--accent)', marginBottom: 8, fontWeight: 600, lineHeight: 1.55 }}>
+          {entry.userQuery === '（无追问，纯批注）'
+            ? `召唤：${entry.personaName || '名家'} 批注`
+            : `追问 ${entry.personaName || '名家'}：${entry.userQuery}`}
         </div>
       )}
       {entry.linkedRef && (
@@ -1096,8 +1114,8 @@ export default function AnnotationPanel() {
         try {
           const ocr = await window.electronAPI.readOcrText(currentEntry.absPath)
           if (ocr.exists && ocr.text) {
-            const full = ocr.text
-            const needle = selectedText.slice(0, 50).trim()  // short probe — OCR may differ subtly
+            const full = normalizeMixedChineseToSimplified(ocr.text)
+            const needle = normalizeMixedChineseToSimplified(selectedText).slice(0, 50).trim()  // short probe — OCR may differ subtly
             const idx = needle ? full.indexOf(needle) : -1
             if (idx >= 0) {
               const s = Math.max(0, idx - 500)
@@ -1532,6 +1550,11 @@ export default function AnnotationPanel() {
     if (!displayAnnotation && !textSelection) { setSummonErr({ message: '请先选中一段文字再召唤' }); return }
     const anchorText = displayAnnotation?.anchor.selectedText || textSelection?.text || ''
     if (!anchorText.trim()) return
+    const currentEntryId = useLibraryStore.getState().currentEntry?.id
+    if (!currentEntryId) {
+      setSummonErr({ message: '当前没有打开的文献，无法保存召唤批注' })
+      return
+    }
     setAiLoading(true)
     setStreamingText('')
     try {
@@ -1546,51 +1569,18 @@ export default function AnnotationPanel() {
         ? `请以你的视角批注下面这段文字，并回应用户的问题。\n\n【选中文字】\n${anchorText}\n\n【用户追问】\n${noteInput.trim()}`
         : `请以你的视角批注下面这段文字——你会注意什么、挑剔什么、反问什么？\n\n【选中文字】\n${anchorText}`
 
-      const streamId = uuid()
-      let fullText = ''
-      // Idle timeout — same pattern as the 注释问答 path above. 180s of no
-      // new chunks = stream is dead; any activity resets the clock.
-      let idleTimer: ReturnType<typeof setTimeout> | null = null
-      let resolveTimeout: ((v: { success: false; error: string }) => void) | null = null
-      const armIdle = () => {
-        if (idleTimer) clearTimeout(idleTimer)
-        idleTimer = setTimeout(() => {
-          resolveTimeout?.({ success: false, error: 'AI 超时（180 秒未收到新内容）' })
-        }, 180_000)
-      }
-      const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => {
-        if (sid !== streamId) return
-        fullText += chunk
-        setStreamingText(fullText)
-        armIdle()
-      })
-      armIdle()
-      try {
-        const res = await Promise.race([
-          window.electronAPI.aiChatStream(streamId, aiModel, [
-            { role: 'system', content: sysRes.systemPrompt },
-            { role: 'user', content: userQ },
-          ]),
-          new Promise<{ success: false; error: string }>((resolve) => { resolveTimeout = resolve }),
-        ])
-        if (!res.success) throw new Error(res.error || 'AI 调用失败')
-        if ((res as any).text) fullText = (res as any).text
-      } finally {
-        if (idleTimer) clearTimeout(idleTimer)
-        cleanup()
-      }
-      setStreamingText('')
-
+      const historyEntryId = uuid()
       const entry: HistoryEntry = {
-        id: uuid(),
+        id: historyEntryId,
         type: 'ai_persona',
-        content: fullText,
+        content: '',
         userQuery: noteInput.trim() || '（无追问，纯批注）',
         author: 'ai',
         modelLabel: getModelLabel(aiModel),
         personaId,
         personaName,
         createdAt: new Date().toISOString(),
+        aiStatus: 'running',
       }
 
       // Attach entry to the active/selected annotation, creating one if the
@@ -1599,6 +1589,7 @@ export default function AnnotationPanel() {
         ? currentPdfMeta?.annotations.find(a => a.anchor.selectedText === textSelection.text)
         : null)
       if (existingAnn) {
+        const targetAnnotationId = existingAnn.id
         await updatePdfMeta(meta => ({
           ...meta,
           annotations: meta.annotations.map(a =>
@@ -1608,6 +1599,36 @@ export default function AnnotationPanel() {
           )
         }))
         if (!activeAnnotationId) setActiveAnnotation(existingAnn.id)
+        setNoteInput('')
+        setAiLoading(false)
+        const updateStore = useLibraryStore.getState()
+        void useAnnotationAiJobsStore.getState().startJob({
+          entryId: currentEntryId,
+          annotationId: targetAnnotationId,
+          historyEntryId,
+          model: aiModel,
+          modelLabel: getModelLabel(aiModel),
+          messages: [
+            { role: 'system', content: sysRes.systemPrompt },
+            { role: 'user', content: userQ },
+          ],
+          updater: async (eid, aid, hid, patch) => {
+            await updateStore.updatePdfMetaByEntryId(eid, (meta) => ({
+              ...meta,
+              annotations: meta.annotations.map(a =>
+                a.id === aid
+                  ? {
+                      ...a,
+                      historyChain: a.historyChain.map(h =>
+                        h.id === hid ? { ...h, ...patch } : h
+                      ),
+                      updatedAt: new Date().toISOString(),
+                    }
+                  : a
+              ),
+            }))
+          },
+        })
       } else if (textSelection) {
         const newAnnotation: Annotation = {
           id: uuid(),
@@ -1626,8 +1647,37 @@ export default function AnnotationPanel() {
           annotations: [...meta.annotations, newAnnotation]
         }))
         setActiveAnnotation(newAnnotation.id)
+        setNoteInput('')
+        setAiLoading(false)
+        const updateStore = useLibraryStore.getState()
+        void useAnnotationAiJobsStore.getState().startJob({
+          entryId: currentEntryId,
+          annotationId: newAnnotation.id,
+          historyEntryId,
+          model: aiModel,
+          modelLabel: getModelLabel(aiModel),
+          messages: [
+            { role: 'system', content: sysRes.systemPrompt },
+            { role: 'user', content: userQ },
+          ],
+          updater: async (eid, aid, hid, patch) => {
+            await updateStore.updatePdfMetaByEntryId(eid, (meta) => ({
+              ...meta,
+              annotations: meta.annotations.map(a =>
+                a.id === aid
+                  ? {
+                      ...a,
+                      historyChain: a.historyChain.map(h =>
+                        h.id === hid ? { ...h, ...patch } : h
+                      ),
+                      updatedAt: new Date().toISOString(),
+                    }
+                  : a
+              ),
+            }))
+          },
+        })
       }
-      setNoteInput('')
     } catch (err: any) {
       // P0-3: 用 in-app toast 替代 alert()
       // Batch 43: humanizeAiError 把 raw 后端字符串转成中文

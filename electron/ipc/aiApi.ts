@@ -91,6 +91,20 @@ function reportOcrProgress(entryId: string | undefined, chunkIndex: number, tota
   }
 }
 
+type OcrEngineId = 'glm' | 'rapidocr'
+
+interface OcrPdfResult {
+  success: boolean
+  text?: string
+  pageTexts?: string[]
+  pageCount?: number
+  chunks?: number
+  actualStartPage?: number
+  actualEndPage?: number
+  engine?: OcrEngineId
+  error?: string
+}
+
 // ===== Provider definitions =====
 
 interface AiProvider {
@@ -132,6 +146,23 @@ const PROVIDERS: AiProvider[] = [
     authHeader: (key) => ({ 'Authorization': `Bearer ${key}` }),
     apiKeyUrl: 'https://bigmodel.cn/usercenter/proj-mgmt/apikeys',
     freeTierHint: 'GLM-4-Flash 完全免费；注册送新用户额度',
+  },
+  {
+    // Tencent TokenHub is Tencent Cloud's current OpenAI-compatible entry for
+    // newer Hunyuan models. The older Hunyuan endpoint still exists, but the
+    // official docs now point new model capabilities toward TokenHub.
+    id: 'hunyuan',
+    name: '腾讯混元 (TokenHub)',
+    chatUrl: 'https://tokenhub.tencentmaas.com/v1/chat/completions',
+    models: [
+      { id: 'hy3-preview', name: 'Hy3 Preview（旗舰 · 256K）' },
+      { id: 'hunyuan-2.0-thinking-20251109', name: 'HY 2.0 Think（深度思考）' },
+      { id: 'hunyuan-2.0-instruct-20251111', name: 'HY 2.0 Instruct' },
+      { id: 'hunyuan-role-latest', name: 'Hunyuan Role（角色扮演）' },
+    ],
+    authHeader: (key) => ({ 'Authorization': `Bearer ${key}` }),
+    apiKeyUrl: 'https://console.cloud.tencent.com/tione/tokenhub',
+    freeTierHint: '腾讯云 TokenHub；大陆直连，支持 OpenAI 兼容接口',
   },
   {
     id: 'openai',
@@ -376,6 +407,11 @@ export function modelSupportsEffort(providerId: string, modelId: string): boolea
   if (providerId === 'qwen') {
     return m.includes('max') || m.includes('thinking')
   }
+  // Tencent TokenHub exposes Hunyuan thinking controls through OpenAI-compatible
+  // reasoning_effort / thinking fields on Hy3 and HY 2.0 Think.
+  if (providerId === 'hunyuan') {
+    return m.includes('hy3') || m.includes('thinking')
+  }
   // GLM-5 / Kimi K2.6 可开 thinking 但只是布尔开关，UI 上把 effort=high 视为"开"
   if (providerId === 'glm') {
     return m.includes('glm-5')
@@ -417,6 +453,9 @@ function injectEffort(body: any, providerId: string, modelId: string, effort?: E
   } else if (providerId === 'qwen') {
     body.extra_body = body.extra_body || {}
     body.extra_body.enable_thinking = effort === 'high' || effort === 'medium'
+  } else if (providerId === 'hunyuan') {
+    body.reasoning_effort = effort
+    body.thinking = { type: effort === 'low' ? 'disabled' : 'enabled' }
   } else if (providerId === 'glm') {
     // GLM-5 thinking 是布尔开关：high → 开，low/medium → 关
     if (effort === 'high') body.thinking = { type: 'enabled' }
@@ -795,6 +834,8 @@ export async function callChatStream(
     if (webSearch) {
       if (providerHasNativeWebSearch(providerId)) {
         tools = buildWebSearchTools(providerId)
+      } else if (providerUsesWebSearchRequestFlag(providerId)) {
+        // Qwen enables provider-side search with a request-body flag below.
       } else {
         console.warn(`[aiApi] Provider ${providerId} 不支持 web search（无原生 + 不在 manual loop 名单），忽略 webSearch=true`)
       }
@@ -809,6 +850,10 @@ export async function callChatStream(
     // Batch 43 · effort 注入（OpenAI/DeepSeek/Gemini/Qwen/GLM/Kimi 各家字段不同）
     // 第 5 个参数 hasWebSearch 让 Kimi 在 webSearch=true 时跳过 thinking（官方冲突）
     injectEffort(body, providerId, model, opts?.effort, !!tools)
+    if (webSearch && providerUsesWebSearchRequestFlag(providerId)) {
+      body.enable_search = true
+      body.search_options = { search_strategy: 'agent' }
+    }
 
     const response = await fetch(provider.chatUrl, {
       method: 'POST',
@@ -843,7 +888,11 @@ function isManualFunctionCallingProvider(providerId: string): boolean {
   // **不接受** native google_search tool（仅 gemini-3-pro-image-preview 支持）。
   // 文本 chat completions 必须走标准 function calling。所以把 Gemini 从原生
   // web search 名单挪到 manual loop 名单，让 callWithManualSearchLoop 兜底。
-  return ['openai', 'deepseek', 'doubao', 'gemini'].includes(providerId)
+  return ['openai', 'deepseek', 'doubao', 'gemini', 'kimi', 'hunyuan'].includes(providerId)
+}
+
+function providerUsesWebSearchRequestFlag(providerId: string): boolean {
+  return providerId === 'qwen'
 }
 
 // Batch 43 · DSML（DeepSeek Markup Language）tool-call 协议解析。
@@ -953,7 +1002,7 @@ async function fetchUrlAsText(url: string, maxChars = 8000): Promise<string> {
 // 原生意味着：透传 tools 字段后 provider 服务器自跑搜索循环，最终 stream 出文本。
 // 2026-04-27 · 移除 gemini —— OpenAI-compat 文本端点不接受 google_search tool
 export function providerHasNativeWebSearch(providerId: string): boolean {
-  return ['glm', 'claude', 'kimi'].includes(providerId)
+  return ['glm', 'claude'].includes(providerId)
 }
 
 // Batch 43 · Which providers support web search **at all**（原生或我们 manual loop）。
@@ -961,7 +1010,7 @@ export function providerHasNativeWebSearch(providerId: string): boolean {
 // 并提供 web_search + web_fetch 双工具，所以 OpenAI/DeepSeek/Doubao 也支持了。
 // 不支持的：Ollama / Claude CLI（无 tools 调用接口）。
 export function providerSupportsWebSearch(providerId: string): boolean {
-  return providerHasNativeWebSearch(providerId) || isManualFunctionCallingProvider(providerId)
+  return providerHasNativeWebSearch(providerId) || isManualFunctionCallingProvider(providerId) || providerUsesWebSearchRequestFlag(providerId)
 }
 
 // 2026-04-28 · 哪些 provider 的 web search 是**单独计费的付费工具**（除了模型 token 之外）。
@@ -978,9 +1027,6 @@ export function providerWebSearchIsPaid(providerId: string): boolean {
 // Build the appropriate tools payload per provider for server-side web search.
 function buildWebSearchTools(providerId: string): any[] {
   switch (providerId) {
-    case 'kimi':
-      // Moonshot builtin function
-      return [{ type: 'builtin_function', function: { name: '$web_search' } }]
     case 'glm':
       // 2026-04-27 Batch 43 · 按 docs.bigmodel.cn/cn/guide/tools/web-search 修正格式
       // GLM 严格校验：enable / search_result 必须是**字符串** "True" 不是 boolean；
@@ -996,7 +1042,7 @@ function buildWebSearchTools(providerId: string): any[] {
           search_result: 'True',
           search_prompt: '基于用户问题主动搜索互联网，包括预测类、评估类、当前事件、人物动态、最新数据等问题——所有具体的事实问题都应当搜索后再回答，不要凭训练记忆作答。',
           search_recency_filter: 'oneMonth',
-          count: 10,
+          count: '5',
           content_size: 'high',
         },
       }]
@@ -1028,9 +1074,14 @@ async function callWithManualSearchLoop(
   // Lazy-import search from personas module to avoid a dependency cycle.
   // We call the same HTTP sources the `nuwa-search` IPC uses but inline.
   const { multiSourceSearchInline } = await import('./personas-search-helper')
+  const isKimiWebSearch = provider.id === 'kimi'
 
   // Batch 43 · 双工具：web_search（关键词搜）+ web_fetch（拉 URL 全文）
   // V4 偏好直接调 web_fetch；其他模型一般调 web_search。两个都暴露让 AI 自选。
+  const kimiWebSearchTool = {
+    type: 'builtin_function',
+    function: { name: '$web_search' },
+  }
   const webSearchTool = {
     type: 'function',
     function: {
@@ -1059,10 +1110,13 @@ async function callWithManualSearchLoop(
       },
     },
   }
-  const tools = [webSearchTool, webFetchTool]
+  const tools = isKimiWebSearch ? [kimiWebSearchTool] : [webSearchTool, webFetchTool]
 
   // 执行单个工具调用，返回字符串结果
   async function runTool(toolName: string, args: Record<string, unknown>): Promise<string> {
+    if (toolName === '$web_search') {
+      return JSON.stringify(args || {})
+    }
     if (toolName === 'web_search') {
       const query = String(args.query || '').trim()
       if (!query) return '(未提供搜索关键词)'
@@ -1095,10 +1149,14 @@ async function callWithManualSearchLoop(
 
   while (iter < MAX_ITER) {
     // Non-streaming call to detect tool_calls
+    const requestBody: any = { model, messages: conversation, tools, stream: false, max_tokens: 16384 }
+    if (isKimiWebSearch) {
+      requestBody.thinking = { type: 'disabled' }
+    }
     const res = await fetch(provider.chatUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...provider.authHeader(key) },
-      body: JSON.stringify({ model, messages: conversation, tools, stream: false, max_tokens: 16384 }),
+      body: JSON.stringify(requestBody),
       signal,
     })
     if (!res.ok) {
@@ -1149,20 +1207,26 @@ async function callWithManualSearchLoop(
     conversation.push(msg)  // append assistant's tool_call message
     await Promise.all(toolCalls.map(async (tc) => {
       const resultText = await runTool(tc.toolName, tc.args)
-      conversation.push({
+      const toolMessage: any = {
         role: 'tool',
         tool_call_id: tc.id || `tool-${iter}`,
         content: resultText,
-      })
+      }
+      if (isKimiWebSearch) toolMessage.name = tc.toolName
+      conversation.push(toolMessage)
     }))
     iter++
   }
 
   // After loop: stream the final answer (no more tools)
+  const finalBody: any = { model, messages: conversation, stream: true, max_tokens: 16384 }
+  if (isKimiWebSearch) {
+    finalBody.thinking = { type: 'disabled' }
+  }
   const finalRes = await fetch(provider.chatUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...provider.authHeader(key) },
-    body: JSON.stringify({ model, messages: conversation, stream: true, max_tokens: 16384 }),
+    body: JSON.stringify(finalBody),
     signal,
   })
   if (!finalRes.ok) {
@@ -1317,6 +1381,343 @@ async function parseSSEStream(
 // ===== GLM OCR (stays GLM-specific) =====
 
 const GLM_OCR_URL = 'https://open.bigmodel.cn/api/paas/v4/layout_parsing'
+
+// ===== RapidOCR local bridge =====
+//
+// RapidOCR is a Python package. Instead of bundling a heavyweight native stack
+// into Electron, Shijuan talks to a tiny Python bridge stored under
+// ~/.lit-manager/runtime. Users can install the local engine with:
+//   python -m pip install rapidocr onnxruntime pymupdf
+//
+// PyMuPDF renders PDF pages to temporary PNGs; RapidOCR reads each image and
+// returns line text. GLM still remains the cloud OCR path.
+const RAPID_OCR_INSTALL_COMMAND = 'python -m pip install rapidocr onnxruntime pymupdf'
+
+const RAPID_OCR_BRIDGE = String.raw`
+import argparse
+import json
+import os
+import sys
+import tempfile
+import traceback
+
+RESULT_PREFIX = "SJ_RESULT "
+PROGRESS_PREFIX = "SJ_PROGRESS "
+
+def emit_result(payload):
+    print(RESULT_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
+
+def emit_progress(payload):
+    print(PROGRESS_PREFIX + json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
+
+def fail(message, detail=None):
+    payload = {"success": False, "error": message}
+    if detail:
+        payload["detail"] = detail
+    emit_result(payload)
+    sys.exit(0)
+
+def import_rapidocr():
+    try:
+        from rapidocr import RapidOCR
+        import rapidocr
+        version = getattr(rapidocr, "__version__", "unknown")
+        api = "rapidocr"
+        return RapidOCR, version, api
+    except Exception as first:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            import rapidocr_onnxruntime
+            version = getattr(rapidocr_onnxruntime, "__version__", "unknown")
+            api = "rapidocr_onnxruntime"
+            return RapidOCR, version, api
+        except Exception:
+            raise first
+
+def probe():
+    try:
+        RapidOCR, version, api = import_rapidocr()
+        try:
+            import onnxruntime
+            ort_version = getattr(onnxruntime, "__version__", "unknown")
+        except Exception as exc:
+            fail("RapidOCR 已安装，但缺少 onnxruntime。请执行: python -m pip install onnxruntime", repr(exc))
+            return
+        try:
+            import fitz
+            fitz_version = getattr(fitz, "__doc__", "")[:60]
+        except Exception as exc:
+            fail("RapidOCR PDF 识别需要 PyMuPDF。请执行: python -m pip install pymupdf", repr(exc))
+            return
+        emit_result({
+            "success": True,
+            "available": True,
+            "version": version,
+            "api": api,
+            "onnxruntime": ort_version,
+            "pymupdf": fitz_version,
+        })
+    except Exception as exc:
+        fail("未检测到 RapidOCR。本地 OCR 需要执行: python -m pip install rapidocr onnxruntime pymupdf", repr(exc))
+
+def extract_txts(output):
+    # rapidocr>=3 returns RapidOCROutput with .txts. rapidocr_onnxruntime 1.x
+    # returns (result, elapse), where result rows are [box, text, score].
+    if output is None:
+        return []
+    if hasattr(output, "txts"):
+        return [str(t) for t in (getattr(output, "txts", None) or []) if str(t).strip()]
+    if isinstance(output, tuple) and output:
+        rows = output[0]
+        if rows is None:
+            return []
+        txts = []
+        for row in rows:
+            try:
+                if isinstance(row, (list, tuple)) and len(row) >= 2:
+                    txts.append(str(row[1]))
+            except Exception:
+                continue
+        return [t for t in txts if t.strip()]
+    return []
+
+def ocr_image(engine, image_path):
+    out = engine(image_path)
+    return "\n".join(extract_txts(out)).strip()
+
+def run_pdf(args):
+    try:
+        import fitz
+        RapidOCR, version, api = import_rapidocr()
+        engine = RapidOCR()
+
+        pdf_path = args.pdf
+        if not pdf_path or not os.path.exists(pdf_path):
+            fail("PDF 文件不存在")
+            return
+
+        doc = fitz.open(pdf_path)
+        page_count = doc.page_count
+        if page_count <= 0:
+            fail("PDF 没有可识别页面")
+            return
+
+        start = max(1, int(args.start or 1))
+        end = int(args.end or page_count)
+        end = max(start, min(page_count, end))
+        start = min(start, page_count)
+        total = end - start + 1
+        zoom = max(1.0, float(args.dpi or 180) / 72.0)
+        matrix = fitz.Matrix(zoom, zoom)
+
+        page_texts = []
+        with tempfile.TemporaryDirectory(prefix="shijuan_rapidocr_") as tmp:
+            for page_no in range(start, end + 1):
+                emit_progress({"page": page_no, "index": page_no - start, "total": total})
+                page = doc.load_page(page_no - 1)
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                img_path = os.path.join(tmp, f"page_{page_no}.png")
+                pix.save(img_path)
+                text = ocr_image(engine, img_path)
+                page_texts.append(text)
+
+        combined = "\n\n".join(
+            f"=== 第 {start + i} 页 ===\n\n{text}".strip()
+            for i, text in enumerate(page_texts)
+        ).strip()
+
+        if not combined:
+            fail("RapidOCR 未能提取到文字")
+            return
+
+        emit_result({
+            "success": True,
+            "engine": "rapidocr",
+            "api": api,
+            "version": version,
+            "text": combined,
+            "pageTexts": page_texts,
+            "pageCount": page_count,
+            "chunks": total,
+            "actualStartPage": start,
+            "actualEndPage": end,
+        })
+    except Exception as exc:
+        fail(str(exc), traceback.format_exc())
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--probe", action="store_true")
+    parser.add_argument("--pdf")
+    parser.add_argument("--start", type=int)
+    parser.add_argument("--end", type=int)
+    parser.add_argument("--dpi", type=int, default=180)
+    args = parser.parse_args()
+    if args.probe:
+        probe()
+    elif args.pdf:
+        run_pdf(args)
+    else:
+        fail("未指定操作")
+
+if __name__ == "__main__":
+    main()
+`
+
+interface PythonCandidate {
+  command: string
+  argsPrefix: string[]
+  label: string
+}
+
+function pythonCandidates(): PythonCandidate[] {
+  if (process.platform === 'win32') {
+    return [
+      { command: 'python', argsPrefix: [], label: 'python' },
+      { command: 'py', argsPrefix: ['-3'], label: 'py -3' },
+      { command: 'python3', argsPrefix: [], label: 'python3' },
+    ]
+  }
+  return [
+    { command: 'python3', argsPrefix: [], label: 'python3' },
+    { command: 'python', argsPrefix: [], label: 'python' },
+  ]
+}
+
+async function rapidOcrBridgePath(): Promise<string> {
+  const dir = path.join(DATA_DIR, 'runtime')
+  await fs.mkdir(dir, { recursive: true })
+  const bridgePath = path.join(dir, 'rapidocr_bridge.py')
+  let current = ''
+  try { current = await fs.readFile(bridgePath, 'utf-8') } catch {}
+  if (current !== RAPID_OCR_BRIDGE) {
+    await fs.writeFile(bridgePath, RAPID_OCR_BRIDGE, 'utf-8')
+  }
+  return bridgePath
+}
+
+async function runRapidOcrBridge(
+  extraArgs: string[],
+  onProgress?: (payload: any) => void,
+): Promise<any> {
+  const bridge = await rapidOcrBridgePath()
+  const candidates = pythonCandidates()
+  let lastError = ''
+
+  for (const candidate of candidates) {
+    try {
+      const result = await new Promise<any>((resolve, reject) => {
+        const proc = spawn(candidate.command, [...candidate.argsPrefix, bridge, ...extraArgs], {
+          windowsHide: true,
+          env: {
+            ...process.env,
+            PYTHONIOENCODING: 'utf-8',
+            PYTHONUTF8: '1',
+          },
+        })
+        let stdout = ''
+        let stderr = ''
+        let stderrRemainder = ''
+        let settled = false
+
+        const finish = (err?: Error) => {
+          if (settled) return
+          settled = true
+          if (err) { reject(err); return }
+          const resultLine = stdout.split(/\r?\n/).reverse().find(line => line.startsWith('SJ_RESULT '))
+          if (!resultLine) {
+            reject(new Error(`RapidOCR 没有返回结果。${stderr.trim().slice(-800) || stdout.trim().slice(-800)}`))
+            return
+          }
+          try {
+            resolve({ ...JSON.parse(resultLine.slice('SJ_RESULT '.length)), python: candidate.label })
+          } catch (parseErr: any) {
+            reject(new Error(`RapidOCR 返回解析失败: ${parseErr.message}`))
+          }
+        }
+
+        proc.stdout.on('data', (d: Buffer) => { stdout += d.toString('utf-8') })
+        proc.stderr.on('data', (d: Buffer) => {
+          const text = d.toString('utf-8')
+          stderr += text
+          stderrRemainder += text
+          const lines = stderrRemainder.split(/\r?\n/)
+          stderrRemainder = lines.pop() || ''
+          for (const line of lines) {
+            if (!line.startsWith('SJ_PROGRESS ')) continue
+            try { onProgress?.(JSON.parse(line.slice('SJ_PROGRESS '.length))) } catch {}
+          }
+        })
+        proc.on('error', (err) => finish(err))
+        proc.on('close', () => finish())
+      })
+      return result
+    } catch (err: any) {
+      lastError = err?.message || String(err)
+    }
+  }
+
+  throw new Error(`无法启动 Python。请确认已安装 Python 3，并执行 ${RAPID_OCR_INSTALL_COMMAND}。${lastError ? `\n${lastError}` : ''}`)
+}
+
+async function probeRapidOcr(): Promise<{ available: boolean; python?: string; version?: string; api?: string; onnxruntime?: string; error?: string; installCommand: string }> {
+  try {
+    const result = await runRapidOcrBridge(['--probe'])
+    if (result.success && result.available !== false) {
+      return {
+        available: true,
+        python: result.python,
+        version: result.version,
+        api: result.api,
+        onnxruntime: result.onnxruntime,
+        installCommand: RAPID_OCR_INSTALL_COMMAND,
+      }
+    }
+    return {
+      available: false,
+      error: result.error || 'RapidOCR 不可用',
+      installCommand: RAPID_OCR_INSTALL_COMMAND,
+    }
+  } catch (err: any) {
+    return {
+      available: false,
+      error: err?.message || String(err),
+      installCommand: RAPID_OCR_INSTALL_COMMAND,
+    }
+  }
+}
+
+async function callRapidOcrPdf(
+  pdfAbsPath: string,
+  opts?: { entryId?: string; startPage?: number; endPage?: number },
+): Promise<OcrPdfResult> {
+  const args = ['--pdf', pdfAbsPath, '--dpi', '180']
+  if (opts?.startPage != null) args.push('--start', String(opts.startPage))
+  if (opts?.endPage != null) args.push('--end', String(opts.endPage))
+
+  const result = await runRapidOcrBridge(args, (p) => {
+    const total = Math.max(1, Number(p.total || 1))
+    const idx = Math.max(0, Number(p.index || 0))
+    reportOcrProgress(opts?.entryId, idx, total, 'start')
+  })
+
+  if (!result.success) {
+    reportOcrProgress(opts?.entryId, 0, 1, 'error')
+    throw new Error(result.error || 'RapidOCR 识别失败')
+  }
+  const total = Math.max(1, Number(result.chunks || result.pageTexts?.length || 1))
+  reportOcrProgress(opts?.entryId, total - 1, total, 'done')
+  return {
+    success: true,
+    engine: 'rapidocr',
+    text: result.text,
+    pageTexts: Array.isArray(result.pageTexts) ? result.pageTexts : undefined,
+    pageCount: result.pageCount,
+    chunks: result.chunks,
+    actualStartPage: result.actualStartPage,
+    actualEndPage: result.actualEndPage,
+  }
+}
 
 async function callGlmOcr(imageBase64: string): Promise<string> {
   const key = apiKeys['glm']
@@ -1703,7 +2104,20 @@ export function registerAiApiIpc(): void {
     return true
   })
 
-  // === OCR (GLM only) ===
+  // === OCR (cloud GLM + local RapidOCR) ===
+
+  ipcMain.handle('rapid-ocr-probe', async () => {
+    return probeRapidOcr()
+  })
+
+  ipcMain.handle('rapid-ocr-pdf', async (_event, pdfAbsPath: string, opts?: { entryId?: string; startPage?: number; endPage?: number }) => {
+    try {
+      const result = await callRapidOcrPdf(pdfAbsPath, opts)
+      return result
+    } catch (err: any) {
+      return { success: false, engine: 'rapidocr', error: err.message }
+    }
+  })
 
   ipcMain.handle('glm-ocr', async (_event, imageBase64: string) => {
     try {

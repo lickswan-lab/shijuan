@@ -1,7 +1,8 @@
 {
   "skillSlug": "laozi",
   "frontmatter": {
-    "name": "老子",
+    
+    "cardIntro": "周室 · 春秋晚期 · 道家源头人物","name": "老子",
     "slug": "laozi",
     "displayName": "老子 (Lao Zi)",
     "lifespan": "传说生于前 6 世纪（楚国苦县），历史存在性存疑；文本核心层约成于前 4 世纪中晚期（郭店楚简时段）至前 2 世纪初（马王堆帛书时段）",

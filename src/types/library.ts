@@ -16,6 +16,70 @@ export interface Library {
   // 2026-04-28 · readingLogs: ReadingLog[] 已删(readingLog 功能下线)
   // Lecture sessions
   lectureSessions: LectureSession[]
+  // Lightweight visual reading/writing graph
+  readingGraph?: ReadingGraph
+  readingGraphs?: ReadingGraph[]
+  activeReadingGraphId?: string
+}
+
+export interface ActivityStats {
+  firstAt?: string
+  lastAt?: string
+  totalMs: number
+  sessionCount: number
+  lastSessionMs?: number
+}
+
+export type ReadingGraphNodeType = 'entry' | 'memo'
+
+export interface ReadingGraphNodeRef {
+  type: ReadingGraphNodeType
+  id: string
+}
+
+export interface ReadingGraphNodePosition {
+  x: number
+  y: number
+}
+
+export interface ReadingGraphNode extends ReadingGraphNodeRef {
+  addedAt: string
+  updatedAt?: string
+  position?: ReadingGraphNodePosition
+}
+
+export type ReadingGraphConnectionSource = 'manual' | 'ai' | 'citation' | 'auto'
+
+export interface ReadingGraphLinkEvent {
+  id: string
+  source: ReadingGraphConnectionSource
+  kind?: 'connection' | 'record'
+  createdAt: string
+  title?: string
+  note?: string
+  from?: ReadingGraphNodeRef
+  to?: ReadingGraphNodeRef
+}
+
+export interface ReadingGraphEdge {
+  id: string
+  a: ReadingGraphNodeRef
+  b: ReadingGraphNodeRef
+  linkCount: number
+  weight: number
+  createdAt: string
+  updatedAt: string
+  events: ReadingGraphLinkEvent[]
+}
+
+export interface ReadingGraph {
+  id: string
+  name: string
+  version: string
+  nodes: ReadingGraphNode[]
+  edges: ReadingGraphEdge[]
+  createdAt: string
+  updatedAt: string
 }
 
 export interface VirtualFolder {
@@ -50,6 +114,7 @@ export interface LibraryEntry {
   ocrFilePath?: string     // Path to .ocr.txt (next to PDF)
   addedAt: string          // When imported
   lastOpenedAt?: string
+  readingStats?: ActivityStats
 }
 
 export interface PdfMeta {
@@ -101,7 +166,7 @@ export interface Annotation {
 export interface TextMark {
   id: string
   type: 'underline' | 'bold'
-  color?: string              // 预设色名（划线用），加重无颜色
+  color?: string              // 预设色名（划线/高光共用）
   pageNumber: number
   selectedText: string
   createdAt: string
@@ -169,6 +234,7 @@ export interface Memo {
   aiHistory: HistoryEntry[]    // AI conversations within memo writing
   createdAt: string
   updatedAt: string
+  writingStats?: ActivityStats
   snapshots: MemoSnapshot[]    // Version history
 }
 
@@ -392,6 +458,7 @@ export interface PersonaSkillArtifact {
   frontmatter: {
     name: string             // 人物名 "黑格尔"
     description: string      // "以黑格尔视角回答问题"
+    cardIntro?: string       // 卡片短身份：地域 / 时代 / 身份
     triggers: string[]       // ["黑格尔", "辩证法"]
     model?: string           // 推荐使用的模型
   }
@@ -451,6 +518,7 @@ export interface Persona {
   name: string               // 用户原始输入 "马克思"
   canonicalName?: string     // AI 确认的规范名
   identity?: string          // 一句话身份
+  cardIntro?: string         // 召唤人物卡片短身份，优先来自 skill frontmatter
   skillMode: 'legacy' | 'distilled' | 'imported'
 
   /** 主 markdown — legacy 时是档案；distilled/imported 时镜像 skill.fullMarkdown */
@@ -540,17 +608,30 @@ export interface FileTreeNode {
 }
 
 export function createDefaultLibrary(): Library {
+  const now = new Date().toISOString()
+  const defaultGraph: ReadingGraph = {
+    id: 'default',
+    name: '阅读图谱',
+    version: '1.0.0',
+    nodes: [],
+    edges: [],
+    createdAt: now,
+    updatedAt: now,
+  }
   return {
     version: '2.0.0',
-    createdAt: new Date().toISOString(),
-    lastOpenedAt: new Date().toISOString(),
+    createdAt: now,
+    lastOpenedAt: now,
     globalTags: [],
     folders: [],
     entries: [],
     memos: [],
     memoFolders: [],
     // 2026-04-28 · readingLogs 已删
-    lectureSessions: []
+    lectureSessions: [],
+    readingGraph: defaultGraph,
+    readingGraphs: [defaultGraph],
+    activeReadingGraphId: defaultGraph.id,
   }
 }
 

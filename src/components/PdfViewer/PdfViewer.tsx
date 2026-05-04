@@ -28,10 +28,76 @@ import OcrRangeModal, { type OcrRangeChoice } from '../BatchOcr/OcrRangeModal'
 import { fetchAiConfig, subscribeAiConfig } from '../../utils/aiConfigCache'
 // BUG-FIX R8#8 · localStorage 数字读 NaN 防御
 import { readNumber } from '../../utils/safeStorageRead'
+import { normalizeMixedChineseToSimplified } from '../../utils/chineseText'
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 
 // cleanOcrText and highlight utils are now in separate files
+
+type TextMarkType = 'underline' | 'bold'
+
+const MARK_COLOR_STORAGE_KEY = 'sj-last-mark-color'
+const MARK_TYPE_STORAGE_KEY = 'sj-last-mark-type'
+const PRESET_MARK_COLORS = [
+  { name: 'yellow', label: '黄', hex: '#FFD43B' },
+  { name: 'red', label: '红', hex: '#FF6B6B' },
+  { name: 'green', label: '绿', hex: '#51CF66' },
+  { name: 'blue', label: '蓝', hex: '#339AF0' },
+  { name: 'purple', label: '紫', hex: '#CC5DE8' },
+  { name: 'orange', label: '橙', hex: '#FF922B' },
+]
+
+function getTextMarkClassName(type: TextMarkType, color?: string): string {
+  const safeColor = color || 'yellow'
+  return type === 'bold'
+    ? `ocr-mark mark-highlight-${safeColor}`
+    : `ocr-mark mark-underline-${safeColor}`
+}
+
+function normalizeMarkText(text: string): string {
+  return normalizeMixedChineseToSimplified(text).replace(/\s+/g, '').trim()
+}
+
+function isSameMarkAnchor(
+  mark: { pageNumber?: number; selectedText: string },
+  target: { pageNumber: number; text: string },
+): boolean {
+  return (mark.pageNumber || 1) === target.pageNumber
+    && normalizeMarkText(mark.selectedText) === normalizeMarkText(target.text)
+}
+
+function normalizeAnnotationTargets<T extends { selectedText: string }>(items?: T[]): T[] {
+  return (items || []).map(item => ({
+    ...item,
+    selectedText: normalizeMixedChineseToSimplified(item.selectedText),
+  }))
+}
+
+function normalizeDocumentTextNodes(root: ParentNode | null | undefined) {
+  if (!root) return
+  const rootNode = root as Node
+  const doc = rootNode.nodeType === 9 ? (rootNode as any) : rootNode.ownerDocument
+  if (!doc) return
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement
+      if (!parent) return NodeFilter.FILTER_REJECT
+      if (/^(SCRIPT|STYLE|CODE|PRE)$/i.test(parent.tagName)) return NodeFilter.FILTER_REJECT
+      return NodeFilter.FILTER_ACCEPT
+    },
+  })
+  const nodes: Text[] = []
+  while (walker.nextNode()) nodes.push(walker.currentNode as Text)
+  for (const node of nodes) {
+    const next = normalizeMixedChineseToSimplified(node.nodeValue || '')
+    if (next !== node.nodeValue) node.nodeValue = next
+  }
+}
+
+function getReaderSurfaceColor(bgHue: number, bgSat: number, bgLight: number): string {
+  const light = Math.max(8, Math.min(96, bgLight - 2))
+  return `hsl(${bgHue}, ${bgSat}%, ${light}%)`
+}
 
 // ===== Append Annotation List (warm theme, grouped by page, with cross-entry support) =====
 import type { Annotation } from '../../types/library'
@@ -302,7 +368,8 @@ function findAndWrapAll(
         const wrapper = wrapFn(task.target)
         wrapper.textContent = match
 
-        if (after) parent.insertBefore(document.createTextNode(after), seg.node.nextSibling)
+        const doc = seg.node.ownerDocument || document
+        if (after) parent.insertBefore(doc.createTextNode(after), seg.node.nextSibling)
         parent.insertBefore(wrapper, seg.node.nextSibling)
         if (before) { seg.node.textContent = before } else { parent.removeChild(seg.node) }
       }
@@ -498,7 +565,12 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const cleaned = useMemo(() => cleanOcrText(text), [text])
-  const [markMenu, setMarkMenu] = useState<{ x: number; y: number; markId: string; markType: string } | null>(null)
+  const normalizedAnnotations = useMemo(() => normalizeAnnotationTargets(annotations), [annotations])
+  const normalizedMarks = useMemo(() => normalizeAnnotationTargets(marks), [marks])
+  const normalizedActiveSelectionText = useMemo(
+    () => activeSelectionText ? normalizeMixedChineseToSimplified(activeSelectionText) : activeSelectionText,
+    [activeSelectionText],
+  )
 
   // Split by page markers if present: "=== 第 N 页 ==="
   const hasPageMarkers = /=== 第 \d+ 页 ===/.test(cleaned)
@@ -507,14 +579,14 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
     : [cleaned]
 
   // Highlight annotations after render
-  useAnnotationHighlights(containerRef, annotations, onAnnotationClick, [cleaned, annotations])
+  useAnnotationHighlights(containerRef, normalizedAnnotations, onAnnotationClick, [cleaned, normalizedAnnotations])
   // Search highlight + auto-scroll to first hit
   useSearchHighlight(containerRef, searchHighlight, [cleaned, searchHighlight])
 
   // Render marks (underline/bold) after annotations
   useEffect(() => {
     const container = containerRef.current
-    if (!container || !marks || marks.length === 0) return
+    if (!container) return
 
     // Remove old marks
     container.querySelectorAll('.ocr-mark').forEach(el => {
@@ -528,36 +600,21 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
     })
     try { container.normalize() } catch {}
 
-    const targets = marks.map(m => ({ text: m.selectedText, id: m.id, type: m.type, color: m.color }))
+    if (!normalizedMarks || normalizedMarks.length === 0) return
+
+    const targets = normalizedMarks.map(m => ({ text: m.selectedText, id: m.id, type: m.type, color: m.color }))
 
     findAndWrapAll(container, targets, (target) => {
       const t = target as typeof targets[number]
       const span = document.createElement('span')
-      span.className = t.type === 'bold'
-        ? 'ocr-mark mark-bold'
-        : `ocr-mark mark-underline-${t.color || 'yellow'}`
+      span.className = getTextMarkClassName(t.type, t.color)
       span.dataset.markId = t.id
       span.dataset.markType = t.type
       return span
     }, 'ocr-mark')
 
-    // Right-click on marks — use coordinate hit-test since marks have pointer-events: none
-    const handleMarkContext = (e: MouseEvent) => {
-      const markEls = container.querySelectorAll('.ocr-mark[data-mark-id]')
-      for (const el of markEls) {
-        const rect = el.getBoundingClientRect()
-        if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
-          const markEl = el as HTMLElement
-          e.preventDefault()
-          e.stopPropagation()
-          setMarkMenu({ x: e.clientX, y: e.clientY, markId: markEl.dataset.markId!, markType: markEl.dataset.markType || '' })
-          return
-        }
-      }
-    }
-    container.addEventListener('contextmenu', handleMarkContext)
-    return () => container.removeEventListener('contextmenu', handleMarkContext)
-  }, [marks, cleaned])
+    return undefined
+  }, [normalizedMarks, cleaned])
 
   // Highlight active selection text
   useEffect(() => {
@@ -575,9 +632,9 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
     })
     try { container.normalize() } catch {}
 
-    if (!activeSelectionText || activeSelectionText.length < 2) return
+    if (!normalizedActiveSelectionText || normalizedActiveSelectionText.length < 2) return
 
-    const searchText = activeSelectionText.replace(/\s+/g, ' ').trim()
+    const searchText = normalizedActiveSelectionText.replace(/\s+/g, ' ').trim()
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
     while (walker.nextNode()) {
       const node = walker.currentNode as Text
@@ -589,8 +646,8 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
 
       try {
         const before = (node.textContent || '').substring(0, idx)
-        const match = (node.textContent || '').substring(idx, idx + activeSelectionText.length)
-        const after = (node.textContent || '').substring(idx + activeSelectionText.length)
+        const match = (node.textContent || '').substring(idx, idx + normalizedActiveSelectionText.length)
+        const after = (node.textContent || '').substring(idx + normalizedActiveSelectionText.length)
         const span = document.createElement('span')
         span.className = 'ocr-active-sel'
         span.textContent = match
@@ -602,7 +659,7 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
       } catch {}
       break
     }
-  }, [activeSelectionText, cleaned])
+  }, [normalizedActiveSelectionText, cleaned])
 
   return (
     <div className="ocr-markdown-content" ref={containerRef}>
@@ -639,37 +696,13 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
         ))}
       </div>
 
-      {/* Mark right-click menu */}
-      {markMenu && (
-        <div
-          style={{
-            position: 'fixed', left: markMenu.x, top: markMenu.y, zIndex: 1000,
-            background: 'var(--bg)', border: '1px solid var(--border)',
-            borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
-            padding: '4px 0', minWidth: 120,
-          }}
-          onMouseLeave={() => setMarkMenu(null)}
-        >
-          <div
-            onClick={() => {
-              onRemoveMark?.(markMenu.markId)
-              setMarkMenu(null)
-            }}
-            style={{ padding: '7px 14px', fontSize: 12, cursor: 'pointer', color: 'var(--danger)' }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-          >
-            {markMenu.markType === 'bold' ? '取消高亮' : '取消划线'}
-          </div>
-        </div>
-      )}
     </div>
   )
 }
 
 // HTML viewer: uses iframe for proper rendering + postMessage for text selection + annotation highlights
 function HtmlViewer({
-  absPath, onTextSelect, annotations,
+  absPath, onTextSelect, annotations, marks, onRemoveMark, onMarkEdit,
   fontSize = 16, fontWeight = 400, colorDepth = 80,
   bgHue = 38, bgSat = 55, bgLight = 92,
   onToolbarShow,
@@ -678,6 +711,9 @@ function HtmlViewer({
   absPath: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
   annotations?: Array<{ id: string; selectedText: string }>
+  marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
+  onRemoveMark?: (id: string) => void
+  onMarkEdit?: (markId: string, x: number, y: number) => void
   // Typography controls from parent toolbar — mirror EPUB/DOCX behavior.
   fontSize?: number
   fontWeight?: number
@@ -692,6 +728,125 @@ function HtmlViewer({
   onToolbarDismiss?: () => void
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const annotationSignature = JSON.stringify((annotations || []).map(a => [a.id, a.selectedText]))
+  const markSignature = JSON.stringify((marks || []).map(m => [m.id, m.type, m.color || '', m.selectedText]))
+  const latestReaderStateRef = useRef({
+    annotations,
+    marks,
+    fontSize,
+    fontWeight,
+    colorDepth,
+    bgHue,
+    bgSat,
+    bgLight,
+  })
+  latestReaderStateRef.current = {
+    annotations,
+    marks,
+    fontSize,
+    fontWeight,
+    colorDepth,
+    bgHue,
+    bgSat,
+    bgLight,
+  }
+
+  const applyReaderState = useCallback(() => {
+    const frame = iframeRef.current
+    const doc = frame?.contentDocument
+    const win = frame?.contentWindow
+    if (!doc?.body) return
+
+    const scrollY = win?.scrollY
+      ?? doc.documentElement?.scrollTop
+      ?? doc.body?.scrollTop
+      ?? 0
+    const state = latestReaderStateRef.current
+    const textColor = state.bgLight < 50
+      ? `hsl(40, 15%, ${60 + (100 - state.colorDepth) / 3}%)`
+      : `hsl(30, 20%, ${100 - state.colorDepth}%)`
+    const bgColor = getReaderSurfaceColor(state.bgHue, state.bgSat, state.bgLight)
+
+    let style = doc.getElementById('sj-html-dynamic-style') as HTMLStyleElement | null
+    if (!style) {
+      style = doc.createElement('style')
+      style.id = 'sj-html-dynamic-style'
+      ;(doc.head || doc.documentElement).appendChild(style)
+    }
+    style.textContent = `
+      html, body {
+        background: ${bgColor} !important;
+        color: ${textColor} !important;
+        font-size: ${state.fontSize}px !important;
+        font-weight: ${state.fontWeight} !important;
+        line-height: var(--reader-line-height, 1.85) !important;
+        font-family: var(--font-reading, "Noto Serif SC", "Source Han Serif SC", "Microsoft YaHei", Georgia, serif) !important;
+      }
+body { max-width: var(--reader-max-width, 920px); min-height: 100vh; margin: 0 auto; padding: 32px clamp(22px, 3vw, 36px) 68px; }
+      body > * { filter: var(--reader-content-filter, sepia(0.03) saturate(0.97) brightness(0.975) contrast(0.99)); }
+      p { margin: 0 0 var(--reader-paragraph-gap, 0.9em) 0; }
+      ::selection { background: rgba(200, 149, 108, 0.35); }
+      .sj-ann-hl { background: rgba(200,149,108,0.2); border-bottom: 2px solid rgba(200,149,108,0.5); border-radius: 2px; }
+      .ocr-mark { cursor: pointer; pointer-events: auto; }
+      .mark-underline-yellow { text-decoration: underline; text-decoration-color: #FFD43B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .mark-underline-red { text-decoration: underline; text-decoration-color: #FF6B6B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .mark-underline-green { text-decoration: underline; text-decoration-color: #51CF66; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .mark-underline-blue { text-decoration: underline; text-decoration-color: #339AF0; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .mark-underline-purple { text-decoration: underline; text-decoration-color: #CC5DE8; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .mark-underline-orange { text-decoration: underline; text-decoration-color: #FF922B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .mark-highlight-yellow { background: rgba(255,212,59,0.27); border-radius: 2px; }
+      .mark-highlight-red { background: rgba(255,107,107,0.22); border-radius: 2px; }
+      .mark-highlight-green { background: rgba(81,207,102,0.22); border-radius: 2px; }
+      .mark-highlight-blue { background: rgba(51,154,240,0.20); border-radius: 2px; }
+      .mark-highlight-purple { background: rgba(204,93,232,0.20); border-radius: 2px; }
+      .mark-highlight-orange { background: rgba(255,146,43,0.22); border-radius: 2px; }
+      img { max-width: 100%; height: auto; }
+    `
+
+    doc.body.querySelectorAll('.ocr-mark, .sj-ann-hl').forEach(el => {
+      try {
+        const parent = el.parentNode
+        if (!parent) return
+        while (el.firstChild) parent.insertBefore(el.firstChild, el)
+        parent.removeChild(el)
+      } catch {}
+    })
+    try {
+      normalizeDocumentTextNodes(doc.body)
+      doc.body.normalize()
+    } catch {}
+
+    const annTargets = normalizeAnnotationTargets(state.annotations)
+      .map(a => ({ text: a.selectedText, id: a.id }))
+      .filter(a => a.text.length >= 2)
+    if (annTargets.length) {
+      findAndWrapAll(doc.body, annTargets, (target) => {
+        const span = doc.createElement('span')
+        span.className = 'sj-ann-hl'
+        span.dataset.annotationId = target.id
+        return span
+      }, 'sj-ann-hl')
+    }
+
+    const markTargets = normalizeAnnotationTargets(state.marks).map(m => ({
+      text: m.selectedText,
+      id: m.id,
+      type: m.type,
+      color: m.color,
+    })).filter(m => m.text.length >= 2)
+    if (markTargets.length) {
+      findAndWrapAll(doc.body, markTargets, (target) => {
+        const t = target as typeof markTargets[number]
+        const span = doc.createElement('span')
+        span.className = getTextMarkClassName(t.type, t.color)
+        span.dataset.markId = t.id
+        span.dataset.markType = t.type
+        return span
+      }, 'ocr-mark')
+    }
+
+    if (win && scrollY > 0) requestAnimationFrame(() => win.scrollTo(0, scrollY))
+  }, [currentEntry?.id])
 
   // Listen for selection messages from iframe. Two types:
   //   'text-selection' — fires on mouseup inside iframe with coords+text
@@ -699,49 +854,43 @@ function HtmlViewer({
   //   does that via setTextSelection.)
   useEffect(() => {
     const handler = (e: MessageEvent) => {
-      if (e.data?.type !== 'text-selection') return
-      if (!e.data.text) return
       const iframeRect = iframeRef.current?.getBoundingClientRect()
       const x = (iframeRect?.left || 0) + (e.data.x || 0)
       const y = (iframeRect?.top || 0) + (e.data.y || 0)
-      onToolbarShow?.(x, y, e.data.text)
+      if (e.data?.type === 'text-selection') {
+        if (!e.data.text) return
+        onToolbarShow?.(x, y, e.data.text)
+        return
+      }
+      if (e.data?.type === 'mark-click') {
+        onMarkEdit?.(e.data.markId || '', x, y)
+        return
+      }
+      if (e.data?.type === 'reader-dismiss') {
+        onToolbarDismiss?.()
+      }
     }
     window.addEventListener('message', handler)
     return () => window.removeEventListener('message', handler)
-  }, [onToolbarShow])
+  }, [onMarkEdit, onToolbarDismiss, onToolbarShow])
 
   // Load HTML and inject selection script + annotation highlights
   useEffect(() => {
     if (!iframeRef.current) return
+    const frame = iframeRef.current
+    const previousScrollY = frame.contentWindow?.scrollY
+      ?? frame.contentDocument?.documentElement?.scrollTop
+      ?? frame.contentDocument?.body?.scrollTop
+      ?? 0
+    const restoreScroll = () => {
+      const win = frame.contentWindow
+      if (!win || previousScrollY <= 0) return
+      requestAnimationFrame(() => win.scrollTo(0, previousScrollY))
+    }
+
     window.electronAPI.readFileBuffer(absPath).then(buf => {
       const decoder = new TextDecoder('utf-8')
-      let html = decoder.decode(buf)
-
-      // Build annotation highlight data
-      const annTexts = (annotations || []).map(a => a.selectedText).filter(t => t.length >= 2)
-      const annHighlightJS = annTexts.length > 0 ? `
-var annTexts = ${JSON.stringify(annTexts)};
-function highlightAnnotations() {
-  var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-  var textNodes = [];
-  while (walker.nextNode()) textNodes.push(walker.currentNode);
-  annTexts.forEach(function(searchText) {
-    textNodes.forEach(function(node) {
-      var idx = node.textContent.indexOf(searchText);
-      if (idx >= 0 && node.parentNode && !node.parentNode.classList?.contains('sj-ann-hl')) {
-        var range = document.createRange();
-        range.setStart(node, idx);
-        range.setEnd(node, idx + searchText.length);
-        var span = document.createElement('span');
-        span.className = 'sj-ann-hl';
-        span.style.cssText = 'background: rgba(200,149,108,0.2); border-bottom: 2px solid rgba(200,149,108,0.5); border-radius: 2px;';
-        range.surroundContents(span);
-      }
-    });
-  });
-}
-setTimeout(highlightAnnotations, 200);
-` : ''
+      let html = normalizeMixedChineseToSimplified(decoder.decode(buf))
 
       // Reading typography & selection bridge — injected into iframe <body>.
       // Script posts { type, text, x, y } on mouseup so the parent can place
@@ -750,7 +899,7 @@ setTimeout(highlightAnnotations, 200);
       const textColor = bgLight < 50
         ? `hsl(40, 15%, ${60 + (100 - colorDepth) / 3}%)`
         : `hsl(30, 20%, ${100 - colorDepth}%)`
-      const bgColor = `hsl(${bgHue}, ${bgSat}%, ${bgLight}%)`
+      const bgColor = getReaderSurfaceColor(bgHue, bgSat, bgLight)
       const typographyStyle = `
 <style id="sj-html-typography">
   html, body {
@@ -761,15 +910,39 @@ setTimeout(highlightAnnotations, 200);
     line-height: var(--reader-line-height, 1.85) !important;
     font-family: var(--font-reading, "Noto Serif SC", "Source Han Serif SC", "Microsoft YaHei", Georgia, serif) !important;
   }
-  body { max-width: var(--reader-max-width, 760px); margin: 0 auto; padding: 36px 44px 72px; }
+body { max-width: var(--reader-max-width, 920px); min-height: 100vh; margin: 0 auto; padding: 32px clamp(22px, 3vw, 36px) 68px; }
   p { margin: 0 0 var(--reader-paragraph-gap, 0.9em) 0; }
-  body { filter: var(--reader-content-filter, sepia(0.03) saturate(0.97) brightness(0.975) contrast(0.99)); }
+  body > * { filter: var(--reader-content-filter, sepia(0.03) saturate(0.97) brightness(0.975) contrast(0.99)); }
   ::selection { background: rgba(200, 149, 108, 0.35); }
+  .ocr-mark { cursor: pointer; pointer-events: auto; }
+  .mark-underline-yellow { text-decoration: underline; text-decoration-color: #FFD43B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  .mark-underline-red { text-decoration: underline; text-decoration-color: #FF6B6B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  .mark-underline-green { text-decoration: underline; text-decoration-color: #51CF66; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  .mark-underline-blue { text-decoration: underline; text-decoration-color: #339AF0; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  .mark-underline-purple { text-decoration: underline; text-decoration-color: #CC5DE8; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  .mark-underline-orange { text-decoration: underline; text-decoration-color: #FF922B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  .mark-highlight-yellow { background: rgba(255,212,59,0.27); border-radius: 2px; }
+  .mark-highlight-red { background: rgba(255,107,107,0.22); border-radius: 2px; }
+  .mark-highlight-green { background: rgba(81,207,102,0.22); border-radius: 2px; }
+  .mark-highlight-blue { background: rgba(51,154,240,0.20); border-radius: 2px; }
+  .mark-highlight-purple { background: rgba(204,93,232,0.20); border-radius: 2px; }
+  .mark-highlight-orange { background: rgba(255,146,43,0.22); border-radius: 2px; }
   img { max-width: 100%; height: auto; }
 </style>`
       const selectionScript = `
 <script>
-document.addEventListener('mouseup', function() {
+document.addEventListener('click', function(e) {
+  var target = e.target && e.target.closest ? e.target.closest('.ocr-mark[data-mark-id]') : null;
+  if (!target) return;
+  window.parent.postMessage({
+    type: 'mark-click',
+    markId: target.dataset.markId,
+    x: e.clientX,
+    y: e.clientY
+  }, '*');
+});
+document.addEventListener('mouseup', function(e) {
+  var markTarget = e.target && e.target.closest ? e.target.closest('.ocr-mark[data-mark-id]') : null;
   var sel = window.getSelection();
   if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
     var text = sel.toString().trim();
@@ -779,12 +952,15 @@ document.addEventListener('mouseup', function() {
         type: 'text-selection',
         text: text,
         x: rect.left + rect.width / 2,
-        y: rect.bottom + 6
+        y: rect.top - 8
       }, '*');
+      return;
     }
   }
+  if (!markTarget) {
+    window.parent.postMessage({ type: 'reader-dismiss' }, '*');
+  }
 });
-${annHighlightJS}
 </script>`
 
       if (html.includes('</head>')) {
@@ -801,16 +977,25 @@ ${annHighlightJS}
         html += selectionScript
       }
 
-      iframeRef.current!.srcdoc = html
+      frame.onload = () => {
+        restoreScroll()
+        applyReaderState()
+      }
+      frame.srcdoc = html
+      window.setTimeout(restoreScroll, 120)
     }).catch(() => {
       if (iframeRef.current) iframeRef.current.srcdoc = '<p>无法加载文件</p>'
     })
-  }, [absPath, annotations, fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight])
+  }, [absPath, applyReaderState])
+
+  useEffect(() => {
+    applyReaderState()
+  }, [applyReaderState, annotationSignature, markSignature, fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight])
 
   return (
     <iframe
       ref={iframeRef}
-      style={{ width: '100%', height: '100%', border: 'none', background: 'var(--bg)' }}
+      style={{ width: '100%', height: '100%', border: 'none', background: getReaderSurfaceColor(bgHue, bgSat, bgLight) }}
       sandbox="allow-scripts allow-same-origin"
     />
   )
@@ -830,7 +1015,7 @@ ${annHighlightJS}
 // findAndWrapAll that respects Node.ownerDocument.
 function EpubViewer({
   absPath, onTextSelect, annotations, onAnnotationClick,
-  marks, onRemoveMark,
+  marks, onRemoveMark, onMarkEdit,
   fontSize = 17, fontWeight = 400, colorDepth = 80,
   bgHue = 38, bgSat = 55, bgLight = 92,
   onToolbarShow,
@@ -840,9 +1025,10 @@ function EpubViewer({
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
   annotations?: Array<{ id: string; selectedText: string }>
   onAnnotationClick?: (id: string) => void
-  // Inline marks (高光 + 6-color underline), same shape as DocxViewer
+  // Inline marks (6-color 高光 + 6-color underline), same shape as DocxViewer
   marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
   onRemoveMark?: (id: string) => void
+  onMarkEdit?: (markId: string, x: number, y: number) => void
   // Reading typography + background color — forwarded from PdfViewer's top
   // toolbar so EPUB matches OCR/DOCX/TXT behavior.
   fontSize?: number
@@ -883,18 +1069,14 @@ function EpubViewer({
   // Keep the latest annotation list + click handler in refs so the
   // applyHighlights closure (wired into rendition events) always sees the
   // freshest data without needing to re-register event listeners.
-  const annsRef = useRef(annotations || [])
-  annsRef.current = annotations || []
+  const annsRef = useRef(normalizeAnnotationTargets(annotations))
+  annsRef.current = normalizeAnnotationTargets(annotations)
   const onClickRef = useRef(onAnnotationClick)
   onClickRef.current = onAnnotationClick
-  const marksRef = useRef(marks || [])
-  marksRef.current = marks || []
-  const onRemoveMarkRef = useRef(onRemoveMark)
-  onRemoveMarkRef.current = onRemoveMark
-  // Floating menu shown when the user right-clicks a mark span inside the
-  // iframe. Coords are translated to the parent document so the menu sits
-  // under the actual cursor position.
-  const [markMenu, setMarkMenu] = useState<{ x: number; y: number; markId: string; markType: string } | null>(null)
+  const marksRef = useRef(normalizeAnnotationTargets(marks))
+  marksRef.current = normalizeAnnotationTargets(marks)
+  const onMarkEditRef = useRef(onMarkEdit)
+  onMarkEditRef.current = onMarkEdit
   // Same trick for typography props — refs let us read latest values from
   // inside the rendition.on('rendered') closure without re-registering.
   const styleRef = useRef({ fontSize, fontWeight, colorDepth, bgHue, bgSat, bgLight })
@@ -954,6 +1136,7 @@ function EpubViewer({
   const applyHighlights = (contents: any) => {
     const doc = contents?.document as Document | undefined
     if (!doc || !doc.body) return
+    doc.body.oncontextmenu = null
 
     // Inject / refresh the reading-layout + highlight stylesheet inside the
     // iframe. Re-runs every applyHighlights call so font size / weight /
@@ -968,21 +1151,30 @@ function EpubViewer({
     }
     const { fontSize: fs, fontWeight: fw, bgHue: bh, bgSat: bsa, bgLight: bl } = styleRef.current
     const textColor = computeTextColor()
-    const bgColor = `hsl(${bh}, ${bsa}%, ${bl}%)`
+    const bgColor = getReaderSurfaceColor(bh, bsa, bl)
     style.textContent = `
-      html, body { box-sizing: border-box !important; background: ${bgColor} !important; }
+      html {
+        box-sizing: border-box !important;
+        background: ${bgColor} !important;
+        min-height: 100% !important;
+      }
       body {
-        max-width: var(--reader-max-width, 760px) !important;
+        box-sizing: border-box !important;
+        background: ${bgColor} !important;
+        min-height: 100vh !important;
+      }
+      body {
+max-width: var(--reader-max-width, 920px) !important;
         margin: 0 auto !important;
-        padding: 44px 48px 80px !important;
+padding: 36px clamp(20px, 3vw, 38px) 72px !important;
         font-family: var(--font-reading, "Noto Serif SC", "Source Han Serif SC", "Microsoft YaHei", Georgia, serif) !important;
         line-height: var(--reader-line-height, 1.85) !important;
         font-size: ${fs}px !important;
         font-weight: ${fw} !important;
         color: ${textColor} !important;
         text-align: start !important;
-        filter: var(--reader-content-filter, sepia(0.03) saturate(0.97) brightness(0.975) contrast(0.99)) !important;
       }
+      body > * { filter: var(--reader-content-filter, sepia(0.03) saturate(0.97) brightness(0.975) contrast(0.99)) !important; }
       p { margin: 0 0 var(--reader-paragraph-gap, 0.9em) 0 !important; text-indent: 2em !important; }
       h1, h2, h3 {
         font-family: -apple-system, "Microsoft YaHei", sans-serif !important;
@@ -993,16 +1185,21 @@ function EpubViewer({
       }
       img { max-width: 100% !important; height: auto !important; display: block !important; margin: 1em auto !important; }
       ::selection { background: rgba(200, 149, 108, 0.35); }
-      /* 6-color underline marks + bold highlight, kept in sync with globals.css */
+      /* 6-color underline + highlight marks, kept in sync with globals.css */
       .mark-underline-yellow { text-decoration: underline; text-decoration-color: #FFD43B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
       .mark-underline-red    { text-decoration: underline; text-decoration-color: #FF6B6B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
       .mark-underline-green  { text-decoration: underline; text-decoration-color: #51CF66; text-decoration-thickness: 1px; text-underline-offset: 3px; }
       .mark-underline-blue   { text-decoration: underline; text-decoration-color: #339AF0; text-decoration-thickness: 1px; text-underline-offset: 3px; }
       .mark-underline-purple { text-decoration: underline; text-decoration-color: #CC5DE8; text-decoration-thickness: 1px; text-underline-offset: 3px; }
       .mark-underline-orange { text-decoration: underline; text-decoration-color: #FF922B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-      .mark-bold { background: rgba(255,212,59,0.25); border-radius: 2px; }
-      /* pointer-events: auto so right-click removal works; marks keep text selectable */
-      .ocr-mark { cursor: text; }
+      .mark-highlight-yellow { background: rgba(255,212,59,0.27); border-radius: 2px; }
+      .mark-highlight-red    { background: rgba(255,107,107,0.22); border-radius: 2px; }
+      .mark-highlight-green  { background: rgba(81,207,102,0.22); border-radius: 2px; }
+      .mark-highlight-blue   { background: rgba(51,154,240,0.20); border-radius: 2px; }
+      .mark-highlight-purple { background: rgba(204,93,232,0.20); border-radius: 2px; }
+      .mark-highlight-orange { background: rgba(255,146,43,0.22); border-radius: 2px; }
+      .mark-bold { background: rgba(255,212,59,0.27); border-radius: 2px; }
+      .ocr-mark { cursor: pointer; pointer-events: auto; }
       .ocr-ann-underline {
         text-decoration: underline;
         text-decoration-color: rgba(200,149,108,0.5);
@@ -1027,6 +1224,8 @@ function EpubViewer({
       .ocr-ann-marker:hover { opacity: 1; transform: scale(1.5); }
     `
 
+    normalizeDocumentTextNodes(doc.body)
+
     // Clear previous annotation + mark spans — unwrap underlines, remove markers.
     doc.body.querySelectorAll('.ocr-ann-underline, .ocr-ann-marker, .ocr-mark').forEach(el => {
       try {
@@ -1039,7 +1238,7 @@ function EpubViewer({
     })
     try { doc.body.normalize() } catch {}
 
-    // Render inline marks (bold + 6-color underlines) same way DocxViewer does,
+    // Render inline marks (6-color highlights + 6-color underlines) same way DocxViewer does,
     // but inside the iframe document.
     const mks = marksRef.current
     if (mks.length) {
@@ -1047,29 +1246,20 @@ function EpubViewer({
       findAndWrapAll(doc.body, markTargets, (target) => {
         const t = target as typeof markTargets[number]
         const span = doc.createElement('span')
-        span.className = t.type === 'bold' ? 'ocr-mark mark-bold' : `ocr-mark mark-underline-${t.color || 'yellow'}`
+        span.className = getTextMarkClassName(t.type, t.color)
         ;(span as any).dataset.markId = t.id
         ;(span as any).dataset.markType = t.type
         return span
       }, 'ocr-mark')
-      // Right-click a mark inside the iframe opens the mark menu (parent doc
-      // floating div). Translate iframe coords to parent coords so the menu
-      // appears under the real cursor position.
       const iframeEl: HTMLIFrameElement | null =
         (contents as any).iframe || (doc.defaultView?.frameElement as HTMLIFrameElement | null)
-      doc.body.oncontextmenu = (e: Event) => {
+      doc.body.onclick = (e: Event) => {
         const me = e as MouseEvent
         const target = me.target as HTMLElement | null
         const span = target?.closest?.('.ocr-mark[data-mark-id]') as HTMLElement | null
         if (!span) return
-        e.preventDefault()
         const iframeRect = iframeEl?.getBoundingClientRect() || { left: 0, top: 0 }
-        setMarkMenu({
-          x: iframeRect.left + me.clientX,
-          y: iframeRect.top + me.clientY,
-          markId: span.dataset.markId || '',
-          markType: span.dataset.markType || '',
-        })
+        onMarkEditRef.current?.(span.dataset.markId || '', iframeRect.left + me.clientX, iframeRect.top + me.clientY)
       }
     }
 
@@ -1452,7 +1642,7 @@ function EpubViewer({
   } as const
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: 'var(--bg)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: getReaderSurfaceColor(bgHue, bgSat, bgLight) }}>
       {/* Top nav bar — chapter dropdown + prev/next + progress */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,
@@ -1490,35 +1680,7 @@ function EpubViewer({
       {/* Book content. overflow-anchor:auto lets the browser keep the
           currently-visible content pinned when epub.js prepends a previous
           section above (fixes "向上翻闪回下来"). */}
-      <div ref={containerRef} style={{ flex: 1, width: '100%', overflow: 'auto', overflowAnchor: 'auto', background: 'var(--bg)' }} />
-      {/* Mark remove menu — floats at translated cursor position */}
-      {markMenu && (
-        <div style={{
-          position: 'fixed', left: markMenu.x, top: markMenu.y, zIndex: 1000,
-          background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6,
-          boxShadow: '0 2px 8px rgba(0,0,0,0.15)', padding: 4, minWidth: 120,
-        }}
-          onMouseLeave={() => setMarkMenu(null)}
-        >
-          <button
-            onClick={() => {
-              onRemoveMarkRef.current?.(markMenu.markId)
-              setMarkMenu(null)
-            }}
-            style={{ padding: '6px 12px', fontSize: 12, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text)', width: '100%', textAlign: 'left', borderRadius: 4 }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
-            onMouseLeaveCapture={e => (e.currentTarget.style.background = 'none')}
-          >
-            {markMenu.markType === 'bold' ? '取消高亮' : '取消划线'}
-          </button>
-          <button
-            onClick={() => setMarkMenu(null)}
-            style={{ padding: '6px 12px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', width: '100%', textAlign: 'left', borderRadius: 4 }}
-          >
-            关闭
-          </button>
-        </div>
-      )}
+      <div ref={containerRef} style={{ flex: 1, width: '100%', overflow: 'auto', overflowAnchor: 'auto', background: getReaderSurfaceColor(bgHue, bgSat, bgLight) }} />
     </div>
   )
 }
@@ -1537,7 +1699,6 @@ function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationCli
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const [markMenu, setMarkMenu] = useState<{ x: number; y: number; markId: string; markType: string } | null>(null)
 
   useEffect(() => {
     async function convert() {
@@ -1545,7 +1706,7 @@ function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationCli
         const mammoth = await import('mammoth')
         const buf = await window.electronAPI.readFileBuffer(absPath)
         const result = await mammoth.convertToHtml({ arrayBuffer: buf.buffer })
-        setHtml(result.value)
+        setHtml(normalizeMixedChineseToSimplified(result.value))
       } catch (err: any) {
         setError(err.message)
       }
@@ -1554,38 +1715,35 @@ function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationCli
   }, [absPath])
 
   // Highlight annotations
-  useAnnotationHighlights(containerRef, annotations || [], onAnnotationClick || (() => {}), [html, annotations])
+  const normalizedAnnotations = useMemo(() => normalizeAnnotationTargets(annotations), [annotations])
+  const normalizedMarks = useMemo(() => normalizeAnnotationTargets(marks), [marks])
+  const normalizedActiveSelectionText = useMemo(
+    () => activeSelectionText ? normalizeMixedChineseToSimplified(activeSelectionText) : activeSelectionText,
+    [activeSelectionText],
+  )
+
+  useAnnotationHighlights(containerRef, normalizedAnnotations, onAnnotationClick || (() => {}), [html, normalizedAnnotations])
   // Search highlight
   useSearchHighlight(containerRef, searchHighlight, [html, searchHighlight])
 
   // Render marks
   useEffect(() => {
     const container = containerRef.current
-    if (!container || !marks || marks.length === 0) return
+    if (!container) return
     container.querySelectorAll('.ocr-mark').forEach(el => {
       try { const p = el.parentNode; if (p) { while (el.firstChild) p.insertBefore(el.firstChild, el); p.removeChild(el) } } catch {}
     })
     try { container.normalize() } catch {}
-    const targets = marks.map(m => ({ text: m.selectedText, id: m.id, type: m.type, color: m.color }))
+    if (!normalizedMarks || normalizedMarks.length === 0) return
+    const targets = normalizedMarks.map(m => ({ text: m.selectedText, id: m.id, type: m.type, color: m.color }))
     findAndWrapAll(container, targets, (target) => {
       const t = target as typeof targets[number]
       const span = document.createElement('span')
-      span.className = t.type === 'bold' ? 'ocr-mark mark-bold' : `ocr-mark mark-underline-${t.color || 'yellow'}`
+      span.className = getTextMarkClassName(t.type, t.color)
       span.dataset.markId = t.id; span.dataset.markType = t.type
       return span
     }, 'ocr-mark')
-    const handleCtx = (e: MouseEvent) => {
-      container.querySelectorAll('.ocr-mark[data-mark-id]').forEach(el => {
-        const r = el.getBoundingClientRect()
-        if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
-          e.preventDefault(); e.stopPropagation()
-          setMarkMenu({ x: e.clientX, y: e.clientY, markId: (el as HTMLElement).dataset.markId!, markType: (el as HTMLElement).dataset.markType || '' })
-        }
-      })
-    }
-    container.addEventListener('contextmenu', handleCtx)
-    return () => container.removeEventListener('contextmenu', handleCtx)
-  }, [marks, html])
+  }, [normalizedMarks, html])
 
   if (error) return <div className="empty-state"><span>DOCX 解析失败：{error}</span></div>
   if (!html) return <div className="empty-state"><span className="loading-spinner" /><span>正在转换 DOCX...</span></div>
@@ -1594,23 +1752,14 @@ function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationCli
     <>
       <div ref={containerRef}
         style={{
-          maxWidth: 'min(100%, calc(var(--reader-max-width) + 120px))', margin: '0 auto',
-          padding: '32px clamp(28px, 4vw, 72px) 80px',
+          maxWidth: 'min(100%, calc(var(--reader-max-width) + 72px))', margin: '0 auto',
+          padding: '30px clamp(20px, 3vw, 44px) 72px',
           fontSize: 'inherit', fontWeight: 'inherit', color: 'inherit',
           lineHeight: 'var(--reader-line-height)', fontFamily: 'var(--font-reading)', position: 'relative',
           filter: 'var(--reader-content-filter)',
         }}
         dangerouslySetInnerHTML={{ __html: html }}
       />
-      {markMenu && (
-        <div style={{ position: 'fixed', left: markMenu.x, top: markMenu.y, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, boxShadow: '0 2px 8px rgba(0,0,0,0.15)', zIndex: 100, padding: 4 }}>
-          <button onClick={() => { onRemoveMark?.(markMenu.markId); setMarkMenu(null) }}
-            style={{ padding: '4px 12px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--danger)', width: '100%', textAlign: 'left' }}>
-            取消{markMenu.markType === 'bold' ? '加粗' : '划线'}
-          </button>
-          <button onClick={() => setMarkMenu(null)} style={{ padding: '4px 12px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', width: '100%', textAlign: 'left' }}>关闭</button>
-        </div>
-      )}
     </>
   )
 }
@@ -1630,24 +1779,30 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
 }) {
   const [text, setText] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const [markMenu, setMarkMenu] = useState<{ x: number; y: number; markId: string; markType: string } | null>(null)
 
   useEffect(() => {
     window.electronAPI.readFileBuffer(absPath).then(buf => {
       const decoder = new TextDecoder('utf-8')
-      setText(decoder.decode(buf))
+      setText(normalizeMixedChineseToSimplified(decoder.decode(buf)))
     }).catch(() => setText('无法读取文件'))
   }, [absPath])
 
+  const normalizedAnnotations = useMemo(() => normalizeAnnotationTargets(annotations), [annotations])
+  const normalizedMarks = useMemo(() => normalizeAnnotationTargets(marks), [marks])
+  const normalizedActiveSelectionText = useMemo(
+    () => activeSelectionText ? normalizeMixedChineseToSimplified(activeSelectionText) : activeSelectionText,
+    [activeSelectionText],
+  )
+
   // Highlight annotations
-  useAnnotationHighlights(containerRef, annotations || [], onAnnotationClick || (() => {}), [text, annotations])
+  useAnnotationHighlights(containerRef, normalizedAnnotations, onAnnotationClick || (() => {}), [text, normalizedAnnotations])
   // Search highlight
   useSearchHighlight(containerRef, searchHighlight, [text, searchHighlight])
 
   // Render marks (underline/bold)
   useEffect(() => {
     const container = containerRef.current
-    if (!container || !marks || marks.length === 0) return
+    if (!container) return
 
     container.querySelectorAll('.ocr-mark').forEach(el => {
       try {
@@ -1657,30 +1812,18 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
     })
     try { container.normalize() } catch {}
 
-    const targets = marks.map(m => ({ text: m.selectedText, id: m.id, type: m.type, color: m.color }))
+    if (!normalizedMarks || normalizedMarks.length === 0) return
+
+    const targets = normalizedMarks.map(m => ({ text: m.selectedText, id: m.id, type: m.type, color: m.color }))
     findAndWrapAll(container, targets, (target) => {
       const t = target as typeof targets[number]
       const span = document.createElement('span')
-      span.className = t.type === 'bold' ? 'ocr-mark mark-bold' : `ocr-mark mark-underline-${t.color || 'yellow'}`
+      span.className = getTextMarkClassName(t.type, t.color)
       span.dataset.markId = t.id
       span.dataset.markType = t.type
       return span
     }, 'ocr-mark')
-
-    const handleMarkContext = (e: MouseEvent) => {
-      const markEls = container.querySelectorAll('.ocr-mark[data-mark-id]')
-      for (const el of markEls) {
-        const rect = el.getBoundingClientRect()
-        if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
-          e.preventDefault(); e.stopPropagation()
-          setMarkMenu({ x: e.clientX, y: e.clientY, markId: (el as HTMLElement).dataset.markId!, markType: (el as HTMLElement).dataset.markType || '' })
-          return
-        }
-      }
-    }
-    container.addEventListener('contextmenu', handleMarkContext)
-    return () => container.removeEventListener('contextmenu', handleMarkContext)
-  }, [marks, text])
+  }, [normalizedMarks, text])
 
   // Highlight active selection
   useEffect(() => {
@@ -1690,15 +1833,15 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
       const parent = el.parentNode
       if (parent) { while (el.firstChild) parent.insertBefore(el.firstChild, el); parent.removeChild(el) }
     })
-    if (!activeSelectionText) return
+    if (!normalizedActiveSelectionText) return
     try { container.normalize() } catch {}
-    findAndWrapAll(container, [{ text: activeSelectionText }], () => {
+    findAndWrapAll(container, [{ text: normalizedActiveSelectionText }], () => {
       const span = document.createElement('span')
       span.className = 'active-selection-highlight'
       span.style.cssText = 'background: rgba(200, 149, 108, 0.25); border-radius: 2px;'
       return span
     })
-  }, [activeSelectionText, text])
+  }, [normalizedActiveSelectionText, text])
 
   if (!text) return <div style={{ color: 'var(--text-muted)' }}>加载中...</div>
   return (
@@ -1712,15 +1855,6 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
       <div style={{ filter: 'var(--reader-content-filter)' }}>
         <Markdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{text}</Markdown>
       </div>
-      {markMenu && (
-        <div style={{ position: 'fixed', left: markMenu.x, top: markMenu.y, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, boxShadow: '0 2px 8px rgba(0,0,0,0.15)', zIndex: 100, padding: 4 }}>
-          <button onClick={() => { onRemoveMark?.(markMenu.markId); setMarkMenu(null) }}
-            style={{ padding: '4px 12px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--danger)', width: '100%', textAlign: 'left' }}>
-            取消{markMenu.markType === 'bold' ? '加粗' : '划线'}
-          </button>
-          <button onClick={() => setMarkMenu(null)} style={{ padding: '4px 12px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', width: '100%', textAlign: 'left' }}>关闭</button>
-        </div>
-      )}
     </div>
   )
 }
@@ -1765,12 +1899,13 @@ type ViewMode = 'pdf' | 'ocr'
 // This is the key fix for big-PDF lag: a 500-page document used to mount
 // 500 <Page> canvases on load; now only ~5 mount at a time.
 function LazyPdfPage({
-  pageNum, scale, inRange, onVisible,
+  pageNum, scale, inRange, onVisible, docKey,
 }: {
   pageNum: number
   scale: number
   inRange: boolean
   onVisible: (pageNum: number) => void
+  docKey: string
 }) {
   const ref = useRef<HTMLDivElement>(null)
   // Widen-mounted observer: 400px rootMargin expands the preload range as the
@@ -1809,6 +1944,7 @@ function LazyPdfPage({
       </div>
       {inRange ? (
         <Page
+          key={`${docKey}-${pageNum}`}
           pageNumber={pageNum}
           scale={scale}
           renderTextLayer={true}
@@ -1843,6 +1979,8 @@ export default function PdfViewer() {
   const setTextSelection = useUiStore(s => s.setTextSelection)
   const setActiveAnnotation = useUiStore(s => s.setActiveAnnotation)
   const glmApiKeyStatus = useUiStore(s => s.glmApiKeyStatus)
+  const ocrEngine = useUiStore(s => s.ocrEngine)
+  const setOcrEngine = useUiStore(s => s.setOcrEngine)
   // 2026-04-28 CLEAN · immersiveMode + dualPageMode 已下线,所有 immersive 分支
   //   都按"非沉浸式"路径执行(等价于 immersiveMode 永远 false)。
   const darkMode = useUiStore(s => s.darkMode)
@@ -1883,7 +2021,9 @@ export default function PdfViewer() {
   // saved scrollTop applies to the right layout). Only auto-switches once
   // per doc-open — user can still toggle freely.
   useEffect(() => {
-    const saved = useLibraryStore.getState().currentPdfMeta?.lastReadViewMode
+    const meta = useLibraryStore.getState().currentPdfMeta
+    if (!currentEntry?.id || meta?.entryId !== currentEntry.id) return
+    const saved = meta?.lastReadViewMode
     if (saved && saved !== viewMode) setViewMode(saved)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentEntry?.id, currentPdfMeta?.entryId])
@@ -2176,6 +2316,13 @@ export default function PdfViewer() {
     setLoadProgress(0)
     setNumPages(0)
     setLoadError(null)
+    setPageRenderRange({ start: 1, end: 3 })
+    setOutline(null)
+    setShowOutline(false)
+    pdfDocRef.current = null
+    setPageJumpInput('')
+    setTextSelection(null)
+    useUiStore.getState().setCurrentVisiblePage(1)
     setOcrFullText(null)
     setOcrFilePath(null)
     setHtmlContent(null)
@@ -2196,9 +2343,10 @@ export default function PdfViewer() {
     //      it arrives. If AI fails or isn't configured, static stays.
     if (currentEntry.lastOpenedAt) {
       // 2026-04-28 · 本次会话内已经查看过这本注释 → 切出再切入时跳过提示。
-      if (rereadingViewedThisSession.has(currentEntry.id)) return
-      const capturedEntryId = currentEntry.id
-      window.electronAPI.loadPdfMeta(currentEntry.id).then(async meta => {
+      const shouldSkipRereadingNudge = rereadingViewedThisSession.has(currentEntry.id)
+      if (!shouldSkipRereadingNudge) {
+        const capturedEntryId = currentEntry.id
+        window.electronAPI.loadPdfMeta(currentEntry.id).then(async meta => {
         if (!meta || !meta.annotations || meta.annotations.length < 2) return
         // Only act if we're still on the same entry (user may have switched)
         if (useLibraryStore.getState().currentEntry?.id !== capturedEntryId) return
@@ -2292,7 +2440,8 @@ export default function PdfViewer() {
           console.warn('[rereading] AI greeting failed:', err)
           setRereadingReminder(prev => prev ? { ...prev, aiLoading: false } : null)
         }
-      }).catch(() => {})
+        }).catch(() => {})
+      }
     }
 
     const ext = currentEntry.absPath.split('.').pop()?.toLowerCase() || ''
@@ -2329,18 +2478,30 @@ export default function PdfViewer() {
     if (['html', 'htm'].includes(ext)) {
       window.electronAPI.readFileBuffer(currentEntry.absPath).then(buf => {
         const decoder = new TextDecoder('utf-8')
-        setHtmlContent(decoder.decode(buf))
+        setHtmlContent(normalizeMixedChineseToSimplified(decoder.decode(buf)))
       }).catch(() => setHtmlContent(null))
     }
 
     // Check for existing OCR text file, default to OCR view if available (PDF only)
     const setDocText = useUiStore.getState().setCurrentDocText
     setDocText(null)
+    const ocrEntryId = currentEntry.id
     window.electronAPI.readOcrText(currentEntry.absPath).then((result) => {
+      if (useLibraryStore.getState().currentEntry?.id !== ocrEntryId) return
       if (result.exists && result.text) {
-        setOcrFullText(result.text)
+        const normalized = normalizeMixedChineseToSimplified(result.text)
+        setOcrFullText(normalized)
         setOcrFilePath(result.path)
-        setDocText(result.text)
+        setDocText(normalized)
+        const latestEntry = useLibraryStore.getState().library?.entries.find(e => e.id === ocrEntryId)
+        if (latestEntry && (latestEntry.ocrStatus !== 'complete' || latestEntry.ocrFilePath !== result.path)) {
+          updateEntry(ocrEntryId, {
+            ocrStatus: 'complete',
+            ocrFilePath: result.path,
+            ocrStatusUpdatedAt: new Date().toISOString(),
+            ocrError: undefined,
+          }).catch(() => {})
+        }
         if (ext === 'pdf') setViewMode('ocr')
         else setViewMode('pdf')
       } else {
@@ -2353,7 +2514,7 @@ export default function PdfViewer() {
     // Also load text for non-PDF formats
     if (['txt', 'md'].includes(ext)) {
       window.electronAPI.readFileBuffer(currentEntry.absPath).then(buf => {
-        const content = new TextDecoder('utf-8').decode(buf)
+        const content = normalizeMixedChineseToSimplified(new TextDecoder('utf-8').decode(buf))
         setDocText(content)
         setTxtContent(content)
       }).catch(() => {})
@@ -2364,15 +2525,15 @@ export default function PdfViewer() {
           mammoth.extractRawText({ arrayBuffer: buf.buffer }),
           mammoth.convertToHtml({ arrayBuffer: buf.buffer }),
         ])
-        setDocText(rawResult.value)
-        setDocxHtml(htmlResult.value)
+        setDocText(normalizeMixedChineseToSimplified(rawResult.value))
+        setDocxHtml(normalizeMixedChineseToSimplified(htmlResult.value))
       }).catch(() => {})
     } else if (['html', 'htm'].includes(ext)) {
       window.electronAPI.readFileBuffer(currentEntry.absPath).then(buf => {
-        const html = new TextDecoder('utf-8').decode(buf)
+        const html = normalizeMixedChineseToSimplified(new TextDecoder('utf-8').decode(buf))
         const tmp = document.createElement('div')
         tmp.innerHTML = html
-        setDocText(tmp.textContent || tmp.innerText || '')
+        setDocText(normalizeMixedChineseToSimplified(tmp.textContent || tmp.innerText || ''))
       }).catch(() => {})
     }
   }, [currentEntry?.id])
@@ -2394,7 +2555,12 @@ export default function PdfViewer() {
   }, [currentEntry?.id])
 
   const onDocumentLoadSuccess = useCallback(async (pdf: any) => {
+    const entryIdAtLoad = currentEntry?.id
+    if (!entryIdAtLoad || useLibraryStore.getState().currentEntry?.id !== entryIdAtLoad) return
     setNumPages(pdf.numPages)
+    setLoadProgress(100)
+    setLoadError(null)
+    setPageRenderRange({ start: 1, end: Math.min(3, pdf.numPages || 3) })
     pdfDocRef.current = pdf
     // Try to read the PDF's internal outline (TOC). Many scanned / generated PDFs
     // don't have one — in that case we just silently skip.
@@ -2448,8 +2614,10 @@ export default function PdfViewer() {
   }, [scrollToPage])
 
   const onDocumentLoadError = useCallback((err: Error) => {
+    const entryIdAtError = currentEntry?.id
+    if (!entryIdAtError || useLibraryStore.getState().currentEntry?.id !== entryIdAtError) return
     setLoadError('PDF 解析失败: ' + err.message)
-  }, [])
+  }, [currentEntry?.id])
 
   // Compute total pages — for PDF use numPages; for OCR count "=== 第 N 页 ===" markers
   // (OcrContent splits on that pattern; section count = page count).
@@ -2557,13 +2725,57 @@ export default function PdfViewer() {
   // 2026-04-28 · 局部 OCR · 弹 modal 让用户选范围,默认整本
   const [ocrRangeOpen, setOcrRangeOpen] = useState(false)
 
+  const reuseExistingOcrText = useCallback(async (opts?: { switchToOcr?: boolean; silent?: boolean }) => {
+    const entry = useLibraryStore.getState().currentEntry
+    if (!entry) return false
+    const ext = entry.absPath.split('.').pop()?.toLowerCase() || ''
+    if (ext !== 'pdf') return false
+
+    try {
+      const result = await window.electronAPI.readOcrText(entry.absPath)
+      if (useLibraryStore.getState().currentEntry?.id !== entry.id) return false
+      if (result.exists && result.text) {
+        const normalized = normalizeMixedChineseToSimplified(result.text)
+        setOcrFullText(normalized)
+        setOcrFilePath(result.path)
+        useUiStore.getState().setCurrentDocText(normalized)
+
+        const latestEntry = useLibraryStore.getState().library?.entries.find(e => e.id === entry.id)
+        if (latestEntry && (latestEntry.ocrStatus !== 'complete' || latestEntry.ocrFilePath !== result.path)) {
+          updateEntry(entry.id, {
+            ocrStatus: 'complete',
+            ocrFilePath: result.path,
+            ocrStatusUpdatedAt: new Date().toISOString(),
+            ocrError: undefined,
+          }).catch(() => {})
+        }
+
+        if (opts?.switchToOcr) setViewMode('ocr')
+        return true
+      }
+    } catch (err) {
+      console.warn('[ocr] reuse existing OCR failed:', err)
+    }
+
+    if (!opts?.silent) alert('没有找到可复用的 OCR 文本，请先进行 OCR。')
+    return false
+  }, [updateEntry])
+
   // ===== OCR: 弹 modal 选范围,然后调 GLM-OCR =====
-  const handleOcr = useCallback(() => {
+  const handleOcr = useCallback(async () => {
     if (!currentPdfMeta || !currentEntry) return
-    if (glmApiKeyStatus !== 'set') { alert('请先在设置中填入 GLM API Key'); return }
     if (!isPdf) { alert('OCR 仅支持 PDF 文件'); return }
+    if (!ocrFullText && await reuseExistingOcrText({ switchToOcr: true, silent: true })) return
     setOcrRangeOpen(true)
-  }, [currentEntry, currentPdfMeta, glmApiKeyStatus, isPdf])
+  }, [currentEntry, currentPdfMeta, isPdf, ocrFullText, reuseExistingOcrText])
+
+  const handleSwitchToOcrView = useCallback(async () => {
+    if (ocrFullText) {
+      setViewMode('ocr')
+      return
+    }
+    await reuseExistingOcrText({ switchToOcr: true })
+  }, [ocrFullText, reuseExistingOcrText])
 
   // 真正发起 OCR,modal 确认后才调
   const runOcrWithRange = useCallback(async (choice: OcrRangeChoice) => {
@@ -2572,7 +2784,14 @@ export default function PdfViewer() {
 
     const hasRange = typeof choice.startPage === 'number' && typeof choice.endPage === 'number'
     const rangeLabel = hasRange ? `第 ${choice.startPage}-${choice.endPage} 页` : '整本'
-    setOcrProgress({ status: `正在 OCR ${rangeLabel}...` })
+    const selectedEngine = choice.engine || ocrEngine
+    if (selectedEngine === 'glm' && glmApiKeyStatus !== 'set') {
+      alert('GLM OCR 需要先在设置中填入 GLM API KEY，或切换为本地 RapidOCR。')
+      return
+    }
+    setOcrEngine(selectedEngine)
+    const engineLabel = selectedEngine === 'rapidocr' ? '本地 RapidOCR' : 'GLM OCR'
+    setOcrProgress({ status: `正在使用 ${engineLabel} OCR ${rangeLabel}...` })
 
     await updateEntry(currentEntry.id, {
       ocrStatus: 'running',
@@ -2581,10 +2800,15 @@ export default function PdfViewer() {
     }).catch(() => {})
 
     try {
-      const result = await window.electronAPI.glmOcrPdf(currentEntry.absPath, {
-        entryId: currentEntry.id,
-        ...(hasRange ? { startPage: choice.startPage, endPage: choice.endPage } : {}),
-      })
+      const result = selectedEngine === 'rapidocr'
+        ? await window.electronAPI.rapidOcrPdf(currentEntry.absPath, {
+          entryId: currentEntry.id,
+          ...(hasRange ? { startPage: choice.startPage, endPage: choice.endPage } : {}),
+        })
+        : await window.electronAPI.glmOcrPdf(currentEntry.absPath, {
+          entryId: currentEntry.id,
+          ...(hasRange ? { startPage: choice.startPage, endPage: choice.endPage } : {}),
+        })
 
       if (result.success && result.text) {
         // 2026-04-28 · 增量 OCR merge
@@ -2594,7 +2818,8 @@ export default function PdfViewer() {
         // (actualStartPage + i) 页(absolute, 1-indexed),所以我们用 pageNumber 作 key,
         // 把新结果 merge 进 currentPdfMeta.pages。整本 OCR 走同一条路径——它的
         // actualStartPage = 1,实际上覆盖所有旧 pages,效果等同于"全替换"。
-        const incomingPageTexts = result.pageTexts || []
+        const incomingPageTexts = (result.pageTexts || []).map(t => normalizeMixedChineseToSimplified(t || ''))
+        const resultText = normalizeMixedChineseToSimplified(result.text)
         const newStartPage = (result as any).actualStartPage
           || (hasRange ? choice.startPage! : 1)
 
@@ -2631,8 +2856,9 @@ export default function PdfViewer() {
           textToSave = sortedPages[0].ocrText
         } else {
           // 兜底:incomingPageTexts 为空(layout_details 缺失之类),只能用整段 text
-          textToSave = result.text
+          textToSave = resultText
         }
+        textToSave = normalizeMixedChineseToSimplified(textToSave)
 
         // Save OCR text to local file
         const savedPath = await window.electronAPI.saveOcrText(currentEntry.absPath, textToSave)
@@ -2681,27 +2907,84 @@ export default function PdfViewer() {
       setOcrProgress({ status: `错误: ${err.message}` })
       setTimeout(() => setOcrProgress(null), 5000)
     }
-  }, [currentEntry, currentPdfMeta, glmApiKeyStatus, updatePdfMeta, updateEntry])
+  }, [currentEntry, currentPdfMeta, glmApiKeyStatus, ocrEngine, setOcrEngine, updatePdfMeta, updateEntry])
 
   // Floating toolbar state
   const [toolbar, setToolbar] = useState<{ x: number; y: number; text: string; pageNumber: number } | null>(null)
   const toolbarRef = useRef(toolbar)
   toolbarRef.current = toolbar  // always keep ref in sync
-  const [toolbarMode, setToolbarMode] = useState<'main' | 'underline-color' | 'append-list'>('main')
+  const [toolbarMode, setToolbarMode] = useState<'main' | 'mark' | 'append-list'>('main')
+  const [editingMarkId, setEditingMarkId] = useState<string | null>(null)
+  const [selectedMarkColor, setSelectedMarkColorState] = useState(() => {
+    try {
+      const saved = localStorage.getItem(MARK_COLOR_STORAGE_KEY) || 'yellow'
+      return PRESET_MARK_COLORS.some(c => c.name === saved) ? saved : 'yellow'
+    } catch {
+      return 'yellow'
+    }
+  })
+  const setSelectedMarkColor = useCallback((color: string) => {
+    const safeColor = PRESET_MARK_COLORS.some(c => c.name === color) ? color : 'yellow'
+    setSelectedMarkColorState(safeColor)
+    try { localStorage.setItem(MARK_COLOR_STORAGE_KEY, safeColor) } catch {}
+  }, [currentEntry?.id])
+  const [selectedMarkType, setSelectedMarkTypeState] = useState<TextMarkType>(() => {
+    try {
+      const saved = localStorage.getItem(MARK_TYPE_STORAGE_KEY) as TextMarkType | null
+      return saved === 'underline' || saved === 'bold' ? saved : 'bold'
+    } catch {
+      return 'bold'
+    }
+  })
+  const setSelectedMarkType = useCallback((type: TextMarkType) => {
+    setSelectedMarkTypeState(type)
+    try { localStorage.setItem(MARK_TYPE_STORAGE_KEY, type) } catch {}
+  }, [])
 
-  const PRESET_COLORS = [
-    { name: 'yellow', hex: '#FFD43B' },
-    { name: 'red', hex: '#FF6B6B' },
-    { name: 'green', hex: '#51CF66' },
-    { name: 'blue', hex: '#339AF0' },
-    { name: 'purple', hex: '#CC5DE8' },
-    { name: 'orange', hex: '#FF922B' },
-  ]
+  const findRenderedMarkAtPoint = useCallback((x: number, y: number) => {
+    const els = Array.from(document.querySelectorAll('.ocr-mark[data-mark-id]')) as HTMLElement[]
+    for (let i = els.length - 1; i >= 0; i--) {
+      const el = els[i]
+      const rect = el.getBoundingClientRect()
+      if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) continue
+      const markId = el.dataset.markId
+      if (!markId) continue
+      const mark = currentPdfMeta?.marks?.find(m => m.id === markId)
+      if (mark) return mark
+    }
+    return null
+  }, [currentPdfMeta?.marks])
+
+  const openMarkEditor = useCallback((mark: import('../../types/library').TextMark, x: number, y: number) => {
+    const type = mark.type as TextMarkType
+    const color = mark.color || 'yellow'
+    setSelectedMarkType(type)
+    setSelectedMarkColor(color)
+    setEditingMarkId(mark.id)
+    setToolbar({
+      x,
+      y: y - 8,
+      text: mark.selectedText,
+      pageNumber: mark.pageNumber || useUiStore.getState().currentVisiblePage || 1,
+    })
+    setToolbarMode('mark')
+    window.getSelection()?.removeAllRanges()
+  }, [setSelectedMarkColor, setSelectedMarkType])
+
+  const handleExistingMarkEdit = useCallback((markId: string, x: number, y: number) => {
+    const mark = currentPdfMeta?.marks?.find(m => m.id === markId)
+    if (mark) openMarkEditor(mark, x, y)
+  }, [currentPdfMeta?.marks, openMarkEditor])
 
   // Text selection → show floating toolbar
   const handleMouseUp = useCallback((e: React.MouseEvent | any) => {
     const selection = window.getSelection()
     if (!selection || selection.isCollapsed) {
+      const clickedMark = findRenderedMarkAtPoint(e.clientX || 0, e.clientY || 0)
+      if (clickedMark) {
+        openMarkEditor(clickedMark, e.clientX || 0, e.clientY || 0)
+        return
+      }
       // Clicked without selecting — clear textSelection if no annotation was created for it
       const { textSelection: ts, activeAnnotationId: aid } = useUiStore.getState()
       if (ts && !aid) {
@@ -2731,7 +3014,8 @@ export default function PdfViewer() {
     // 2026-04-28 CLEAN · 沉浸式分支已删,固定走"非沉浸式"路径(toolbar 在选区上方)
     setToolbar({ x: rect.left + rect.width / 2, y: rect.top - 8, text, pageNumber: pageNumber || 1 })
     setToolbarMode('main')
-  }, [])
+    setEditingMarkId(null)
+  }, [currentPdfMeta?.annotations, findRenderedMarkAtPoint, openMarkEditor, setTextSelection])
 
   // Dismiss toolbar on click outside (but not when clicking immersive annotation box)
   useEffect(() => {
@@ -2740,6 +3024,7 @@ export default function PdfViewer() {
       const el = e.target as HTMLElement
       if (el.closest('.floating-toolbar') || el.closest('.immersive-annotation-box')) return
       setToolbar(null)
+      setEditingMarkId(null)
       // When toolbar is dismissed without opening the annotation panel,
       // also clear the active selection so the persistent highlight goes away.
       if (useUiStore.getState().annotationPanelCollapsed) {
@@ -2763,6 +3048,7 @@ export default function PdfViewer() {
     setTextSelection({ pageNumber: tb.pageNumber, text: tb.text, startOffset: 0, endOffset: tb.text.length })
     useUiStore.getState().setAnnotationColor(color)
     setToolbar(null)
+    setEditingMarkId(null)
   }, [setTextSelection, setActiveAnnotation])
 
   // 2026-04-28 CLEAN · handleImmersiveTextSelect 已删(沉浸式 ImmersiveOcrReader 不再调用)
@@ -2775,6 +3061,7 @@ export default function PdfViewer() {
     }
     setActiveAnnotation(annotationId)
     setToolbar(null)
+    setEditingMarkId(null)
   }, [setActiveAnnotation, toolbar, setTextSelection])
 
   // Append current selected text as a link to another entry's annotation
@@ -2810,48 +3097,77 @@ export default function PdfViewer() {
     ann.updatedAt = new Date().toISOString()
     await window.electronAPI.savePdfMeta(targetEntryId, meta)
     setToolbar(null)
+    setEditingMarkId(null)
   }, [toolbar, currentEntry])
 
-  // Toolbar action: add underline mark
-  const handleToolbarUnderline = useCallback((color: string) => {
+  const createOrUpdateToolbarMark = useCallback((type: TextMarkType, color = selectedMarkColor) => {
     const tb = toolbarRef.current
-    if (!tb || !currentEntry) { console.warn('[handleToolbarUnderline] no toolbar or entry'); return }
-    const mark: import('../../types/library').TextMark = {
-      id: crypto.randomUUID(),
-      type: 'underline',
-      color,
-      pageNumber: tb.pageNumber,
-      selectedText: tb.text,
-      createdAt: new Date().toISOString(),
-    }
-    updatePdfMeta(meta => ({
-      ...meta,
-      marks: [...(meta.marks || []), mark],
-    }))
+    if (!tb || !currentEntry) { console.warn('[createOrUpdateToolbarMark] no toolbar or entry'); return }
+    const existingSameAnchor = currentPdfMeta?.marks?.find(m => isSameMarkAnchor(m, tb))
+    const targetId = editingMarkId || existingSameAnchor?.id || crypto.randomUUID()
+    setSelectedMarkColor(color)
+    setSelectedMarkType(type)
+    updatePdfMeta(meta => {
+      const marks = meta.marks || []
+      const existing = marks.find(m => m.id === targetId)
+      const nextMark: import('../../types/library').TextMark = {
+        id: targetId,
+        type,
+        color,
+        pageNumber: tb.pageNumber,
+        selectedText: tb.text,
+        createdAt: existing?.createdAt || new Date().toISOString(),
+      }
+      return {
+        ...meta,
+        marks: [
+          ...marks.filter(m => m.id !== targetId && !isSameMarkAnchor(m, tb)),
+          nextMark,
+        ],
+      }
+    })
+    setEditingMarkId(targetId)
+    setToolbarMode('mark')
     window.getSelection()?.removeAllRanges()
-    // 2026-04-28 CLEAN · 沉浸式分支已删,固定 setToolbar(null)
-    setToolbar(null)
-  }, [currentEntry, updatePdfMeta])
+  }, [currentEntry, currentPdfMeta?.marks, editingMarkId, selectedMarkColor, setSelectedMarkColor, setSelectedMarkType, updatePdfMeta])
 
-  // Toolbar action: add bold mark
-  const handleToolbarBold = useCallback(() => {
-    const tb = toolbarRef.current
-    if (!tb || !currentEntry) { console.warn('[handleToolbarBold] no toolbar or entry'); return }
-    const mark: import('../../types/library').TextMark = {
-      id: crypto.randomUUID(),
-      type: 'bold',
-      pageNumber: tb.pageNumber,
-      selectedText: tb.text,
-      createdAt: new Date().toISOString(),
+  const updateEditingMark = useCallback((patch: Partial<Pick<import('../../types/library').TextMark, 'type' | 'color'>>) => {
+    if (!editingMarkId) {
+      createOrUpdateToolbarMark((patch.type as TextMarkType) || selectedMarkType, patch.color || selectedMarkColor)
+      return
     }
+    if (patch.type) setSelectedMarkType(patch.type as TextMarkType)
+    if (patch.color) setSelectedMarkColor(patch.color)
     updatePdfMeta(meta => ({
       ...meta,
-      marks: [...(meta.marks || []), mark],
+      marks: (meta.marks || []).map(m => m.id === editingMarkId ? { ...m, ...patch } : m),
     }))
-    window.getSelection()?.removeAllRanges()
-    // 2026-04-28 CLEAN · 沉浸式分支已删,固定 setToolbar(null)
+  }, [createOrUpdateToolbarMark, editingMarkId, selectedMarkColor, selectedMarkType, setSelectedMarkColor, setSelectedMarkType, updatePdfMeta])
+
+  const handleToolbarMark = useCallback(() => {
+    createOrUpdateToolbarMark(selectedMarkType, selectedMarkColor)
+  }, [createOrUpdateToolbarMark, selectedMarkColor, selectedMarkType])
+
+  const cancelEditingMark = useCallback(() => {
+    if (!editingMarkId) return
+    handleRemoveMark(editingMarkId)
+    setEditingMarkId(null)
     setToolbar(null)
-  }, [currentEntry, updatePdfMeta])
+    window.getSelection()?.removeAllRanges()
+  }, [editingMarkId, handleRemoveMark])
+
+  const handleMarkTypeSelect = useCallback((type: TextMarkType) => {
+    if (editingMarkId && selectedMarkType === type) {
+      cancelEditingMark()
+      return
+    }
+    updateEditingMark({ type, color: selectedMarkColor })
+  }, [cancelEditingMark, editingMarkId, selectedMarkColor, selectedMarkType, updateEditingMark])
+
+  const handleMarkColorSelect = useCallback((color: string) => {
+    setSelectedMarkColor(color)
+    updateEditingMark({ color })
+  }, [setSelectedMarkColor, updateEditingMark])
 
   // ===== RENDER =====
 
@@ -2860,41 +3176,65 @@ export default function PdfViewer() {
     const libraryEmpty = !library || library.entries.length === 0
     return (
       <div className="pdf-area">
-        <div className="empty-state" style={{ maxWidth: 720, margin: '0 auto', textAlign: 'left', padding: '32px 32px 48px' }}>
+        <div className="empty-state" style={{ maxWidth: 720, margin: '0 auto', textAlign: 'left', padding: '36px 32px 48px' }}>
           {libraryEmpty ? (
             <>
               {/* Hero: what shijuan actually is (not "yet another PDF reader") */}
-              <div style={{ textAlign: 'center', marginBottom: 28 }}>
-                <div style={{ fontSize: 24, fontWeight: 600, color: 'var(--text)', marginBottom: 8 }}>
+              <div style={{ textAlign: 'center', marginBottom: 11 }}>
+                <div style={{ fontSize: 36, lineHeight: 1, fontWeight: 750, color: 'var(--text)', marginBottom: 12, letterSpacing: '0.4px' }}>
                   拾卷
                 </div>
-                <div style={{ fontSize: 14, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
-                  不是又一个 PDF 阅读器 ——<br />
+                <div style={{ fontSize: 17, color: 'var(--text-secondary)', lineHeight: 1.65, letterSpacing: '0.1px' }}>
                   一个<strong style={{ color: 'var(--accent)' }}>陪你读书的同伴</strong>，看见你自己看不见的阅读模式
                 </div>
               </div>
 
               {/* Primary action + quick ways in */}
-              <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 28, flexWrap: 'wrap' }}>
-                <button
-                  className="btn btn-primary"
-                  style={{ padding: '9px 22px', fontSize: 13 }}
-                  onClick={() => useLibraryStore.getState().importFiles()}
-                >
-                  导入文件
-                </button>
-                <button
-                  className="btn"
-                  style={{ padding: '9px 22px', fontSize: 13 }}
-                  onClick={() => useLibraryStore.getState().importFolder()}
-                >
-                  导入文件夹
-                </button>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 11, marginBottom: 24 }}>
+                <div style={{ display: 'flex', gap: 11, justifyContent: 'center', flexWrap: 'wrap' }}>
+                  <button
+                    className="btn btn-primary"
+                    style={{
+                      padding: '0 28px',
+                      fontSize: 14,
+                      minWidth: 148,
+                      height: 42,
+                      justifyContent: 'center',
+                      borderRadius: 10,
+                      fontWeight: 700,
+                      letterSpacing: 0,
+                      boxShadow: '0 12px 26px rgba(184, 132, 78, 0.20), inset 0 1px 0 rgba(255,255,255,0.24)',
+                    }}
+                    onClick={() => useLibraryStore.getState().importFiles()}
+                  >
+                    导入文件
+                  </button>
+                  <button
+                    className="btn"
+                    style={{
+                      padding: '0 28px',
+                      fontSize: 14,
+                      minWidth: 148,
+                      height: 42,
+                      justifyContent: 'center',
+                      borderRadius: 10,
+                      fontWeight: 700,
+                      letterSpacing: 0,
+                      background: 'color-mix(in srgb, var(--bg) 84%, var(--bg-warm) 16%)',
+                      borderColor: 'color-mix(in srgb, var(--border) 72%, var(--accent) 28%)',
+                      boxShadow: '0 10px 22px rgba(61, 53, 41, 0.07), inset 0 1px 0 rgba(255,255,255,0.58)',
+                    }}
+                    onClick={() => useLibraryStore.getState().importFolder()}
+                  >
+                    导入文件夹
+                  </button>
+                </div>
                 <div style={{
-                  fontSize: 11, color: 'var(--text-muted)', alignSelf: 'center',
-                  paddingLeft: 6,
+                  fontSize: 14,
+                  color: 'var(--text-muted)',
+                  lineHeight: 1.5,
                 }}>
-                  或直接<strong>拖拽文件</strong>到窗口
+                  或直接<strong style={{ color: 'var(--text-secondary)' }}>拖拽文件</strong>进入窗口
                 </div>
               </div>
 
@@ -2938,18 +3278,18 @@ export default function PdfViewer() {
                   }}>2</div>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
-                      每日观察 · 每天自动生成
+                      学徒对话 · 围绕当前阅读追问
                     </div>
                     <div style={{
                       fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7,
                       fontStyle: 'italic', paddingLeft: 10, borderLeft: '2px solid var(--border)',
                     }}>
-                      <em>你下午连续两次在《福柯》第 12 页停下——第一次写「权力即资本」，第二次划掉改成「资本是权力的表层」。中间间隔了 40 分钟。</em>
+                      <em>选中一段文字后问学徒：这段论证在回应谁？它会结合当前页、标记、注释和已读内容继续解释。</em>
                     </div>
                   </div>
                 </div>
 
-                {/* Voice 3: apprentice weekly */}
+                {/* Voice 3: summon + graph */}
                 <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
                   <div style={{
                     fontSize: 18, width: 28, height: 28, flexShrink: 0,
@@ -2959,13 +3299,13 @@ export default function PdfViewer() {
                   }}>3</div>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
-                      学徒周报 · 每周一份观察报告
+                      召唤与图谱 · 把阅读路径显出来
                     </div>
                     <div style={{
                       fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7,
                       fontStyle: 'italic', paddingLeft: 10, borderLeft: '2px solid var(--border)',
                     }}>
-                      <em>这周你三次回到了《规训与惩罚》，但都没写下什么——你在等什么吗？《X》里你六月写过「权力是关系」，上周又回到那条注释但没再写。</em>
+                      <em>召唤孔子、老子、墨子或柏拉图一起追问；再把文献、笔记和问题节点引入图谱，用箭头线整理理解推进。</em>
                     </div>
                   </div>
                 </div>
@@ -2976,10 +3316,10 @@ export default function PdfViewer() {
                 fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.9,
                 textAlign: 'center', padding: '0 8px',
               }}>
-                上手三步：<strong>导入一本书</strong> → <strong>选中文字写想法</strong> → <strong>周一看学徒</strong><br />
+                上手三步：<strong>导入一本书</strong> → <strong>标记 / 注释关键段落</strong> → <strong>和学徒或召唤人物继续追问</strong><br />
                 <span style={{ opacity: 0.75 }}>
                   支持 PDF · EPUB · DOCX · HTML · TXT · Markdown<br />
-                  所有数据在本地 <code style={{ background: 'var(--bg)', padding: '0 5px', borderRadius: 3, fontSize: 10 }}>~/.lit-manager/</code>，不上传云端 · 纯阅读和注释不需要 AI Key
+                  所有数据在本地 <code style={{ background: 'var(--bg)', padding: '0 5px', borderRadius: 3, fontSize: 10 }}>~/.lit-manager/</code>，不上传云端 · 纯阅读和注释不需要 API KEY
                 </span>
               </div>
             </>
@@ -3144,8 +3484,8 @@ export default function PdfViewer() {
             <button
               className={viewMode === 'ocr' ? 'btn btn-sm btn-primary' : 'btn btn-sm'}
               style={{ borderRadius: 0, border: 'none', borderLeft: '1px solid var(--border)', whiteSpace: 'nowrap', flexShrink: 0 }}
-              onClick={() => { if (ocrFullText) setViewMode('ocr'); else alert('请先进行 OCR') }}
-              disabled={!ocrFullText}
+              onClick={handleSwitchToOcrView}
+              title={ocrFullText ? '查看已识别文本' : '尝试读取同目录的 .ocr.txt'}
             >
               OCR 文本
             </button>
@@ -3263,11 +3603,42 @@ export default function PdfViewer() {
         {isPdf && (
           <button
             className="btn btn-sm btn-primary"
-            style={{ marginLeft: 8 }}
+            style={{
+              marginLeft: 8,
+              width: 62,
+              minWidth: 62,
+              maxWidth: 62,
+              height: 42,
+              minHeight: 42,
+              padding: '0 10px',
+              boxSizing: 'border-box',
+              display: 'inline-flex',
+              flex: '0 0 62px',
+              flexShrink: 0,
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 2,
+              lineHeight: 1.12,
+              textAlign: 'center',
+              whiteSpace: 'nowrap',
+              wordBreak: 'keep-all',
+              overflowWrap: 'normal',
+            }}
             onClick={handleOcr}
             disabled={!!ocrProgress}
           >
-            {ocrFullText ? '重新 OCR' : 'OCR 识别'}
+            {ocrFullText ? (
+              <>
+                <span style={{ whiteSpace: 'nowrap' }}>重新</span>
+                <span style={{ whiteSpace: 'nowrap' }}>OCR</span>
+              </>
+            ) : (
+              <>
+                <span style={{ whiteSpace: 'nowrap' }}>OCR</span>
+                <span style={{ whiteSpace: 'nowrap' }}>识别</span>
+              </>
+            )}
           </button>
         )}
 
@@ -3489,10 +3860,11 @@ export default function PdfViewer() {
                 const inRange = pageNum >= pageRenderRange.start - 2 && pageNum <= pageRenderRange.end + 2
                 return (
                   <LazyPdfPage
-                    key={pageNum}
+                    key={`${currentEntry?.id || 'pdf'}-${pageNum}`}
                     pageNum={pageNum}
                     scale={debouncedScale}
                     inRange={inRange}
+                    docKey={currentEntry?.id || pdfFileUrl || 'pdf'}
                     onVisible={(n) => {
                       setPageRenderRange(prev => ({
                         start: Math.min(prev.start, n),
@@ -3510,9 +3882,12 @@ export default function PdfViewer() {
 
       {/* ===== HTML View (iframe with postMessage for text selection) ===== */}
       {viewMode === 'pdf' && isHtml && (
-        <div className="pdf-scroll-area" style={{ padding: 0 }}>
+        <div className="pdf-scroll-area" style={{ padding: 0, background: getReaderSurfaceColor(ocrBgHue, ocrBgSat, ocrBgLight) }}>
           <HtmlViewer key={currentEntry?.id} absPath={absPath} onTextSelect={setTextSelection}
-            annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
+            annotations={memoizedAnnotations}
+            marks={memoizedMarks}
+            onRemoveMark={handleRemoveMark}
+            onMarkEdit={handleExistingMarkEdit}
             fontSize={ocrFontSize}
             fontWeight={ocrFontWeight}
             colorDepth={ocrColorDepth}
@@ -3526,13 +3901,20 @@ export default function PdfViewer() {
               setToolbar({ x, y, text, pageNumber: useUiStore.getState().currentVisiblePage })
               setToolbarMode('main')
             }}
+            onToolbarDismiss={() => {
+              setToolbar(null)
+              setEditingMarkId(null)
+              if (useUiStore.getState().annotationPanelCollapsed) {
+                setTextSelection(null)
+              }
+            }}
           />
         </div>
       )}
 
       {/* ===== EPUB View ===== */}
       {viewMode === 'pdf' && fileExt === 'epub' && (
-        <div className="pdf-scroll-area" style={{ padding: 0 }}>
+        <div className="pdf-scroll-area" style={{ padding: 0, background: getReaderSurfaceColor(ocrBgHue, ocrBgSat, ocrBgLight) }}>
           <EpubViewer
             key={currentEntry?.id}
             absPath={absPath}
@@ -3541,6 +3923,7 @@ export default function PdfViewer() {
             onAnnotationClick={(id) => setActiveAnnotation(id)}
             marks={memoizedMarks}
             onRemoveMark={handleRemoveMark}
+            onMarkEdit={handleExistingMarkEdit}
             fontSize={ocrFontSize}
             fontWeight={ocrFontWeight}
             colorDepth={ocrColorDepth}
@@ -3561,7 +3944,7 @@ export default function PdfViewer() {
       {viewMode === 'pdf' && ['docx', 'doc'].includes(fileExt) && (
         <div className="pdf-scroll-area" style={{
           alignItems: 'stretch', padding: 0,
-          background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
+          background: getReaderSurfaceColor(ocrBgHue, ocrBgSat, ocrBgLight),
           fontSize: ocrFontSize, fontWeight: ocrFontWeight,
           color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
         }} onMouseUp={handleMouseUp}>
@@ -3581,11 +3964,11 @@ export default function PdfViewer() {
       {viewMode === 'pdf' && isText && (
         <div className="pdf-scroll-area" style={{
           alignItems: 'stretch', padding: 0,
-          background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
+          background: getReaderSurfaceColor(ocrBgHue, ocrBgSat, ocrBgLight),
         }} onMouseUp={handleMouseUp}>
           <div style={{
-            maxWidth: 'min(100%, calc(var(--reader-max-width) + 120px))', margin: '0 auto',
-            padding: '40px clamp(32px, 4vw, 80px)', minHeight: '100%',
+            maxWidth: 'min(100%, calc(var(--reader-max-width) + 72px))', margin: '0 auto',
+            padding: '34px clamp(20px, 3vw, 44px) 72px', minHeight: '100%',
           }} data-page-number="1">
             <TextFileContent
               key={currentEntry?.id}
@@ -3615,15 +3998,15 @@ export default function PdfViewer() {
           ref={scrollRef}
           className="pdf-scroll-area"
           style={{
-            background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
+            background: getReaderSurfaceColor(ocrBgHue, ocrBgSat, ocrBgLight),
             alignItems: 'stretch', padding: 0,
           }}
           onMouseUp={handleMouseUp}
         >
           {/* 2026-04-28 CLEAN · 沉浸式 dual-page OCR 分支已删,固定走单列 */}
           <div style={{
-            maxWidth: 'min(100%, calc(var(--reader-max-width) + 120px))', margin: '0 auto',
-            padding: '40px clamp(32px, 4vw, 80px) 80px',
+            maxWidth: 'min(100%, calc(var(--reader-max-width) + 72px))', margin: '0 auto',
+            padding: '34px clamp(20px, 3vw, 44px) 76px',
             background: 'transparent', minHeight: '100%',
             fontSize: ocrFontSize, fontWeight: ocrFontWeight,
             color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
@@ -3657,7 +4040,11 @@ export default function PdfViewer() {
 
       {/* ===== Floating Toolbar ===== */}
       {toolbar && (
-        <div className="floating-toolbar" style={{ left: toolbar.x, top: toolbar.y, transform: 'translateX(-50%) translateY(-100%)' }}>
+        <div
+          className="floating-toolbar"
+          style={{ left: toolbar.x, top: toolbar.y, transform: 'translateX(-50%) translateY(-100%)' }}
+          onMouseDown={e => e.preventDefault()}
+        >
           {toolbarMode === 'main' && (
             <>
               <button onClick={() => handleToolbarAnnotate('yellow')} title="注释（默认黄色标记）">
@@ -3670,28 +4057,52 @@ export default function PdfViewer() {
                 <span>追加</span>
               </button>
               <span className="ft-divider" />
-              <button onClick={() => setToolbarMode('underline-color')} title="划线">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 3v7a6 6 0 0 0 12 0V3"/><line x1="4" y1="21" x2="20" y2="21"/></svg>
-                <span>划线</span>
-              </button>
-              <span className="ft-divider" />
-              <button onClick={handleToolbarBold} title="高亮">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-                <span>高亮</span>
+              <button onClick={handleToolbarMark} title="按上次设置标记，然后调整划线 / 高光 / 颜色">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 11l-6 6v3h3l6-6"/><path d="M14 5l5 5"/><path d="M16 3l5 5-9 9-5-5z"/></svg>
+                <span>标记</span>
               </button>
             </>
           )}
 
-          {/* Color picker for underline */}
-          {toolbarMode === 'underline-color' && (
-            <div className="ft-colors">
-              <button onClick={() => setToolbarMode('main')} style={{ padding: '4px 6px' }}>
+          {/* Mark panel: the mark has already been created; controls mutate that mark. */}
+          {toolbarMode === 'mark' && (
+            <div className="ft-mark-panel">
+              <button onClick={() => setToolbarMode('main')} style={{ padding: '4px 6px' }} title="返回">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"/></svg>
               </button>
-              {PRESET_COLORS.map(c => (
-                <div key={c.name} className="ft-color" style={{ background: c.hex }}
-                  onClick={() => handleToolbarUnderline(c.name)} title={c.name} />
-              ))}
+              <button
+                className={`ft-mark-action${selectedMarkType === 'underline' ? ' active' : ''}`}
+                onClick={() => handleMarkTypeSelect('underline')}
+                title="改为划线"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 3v7a6 6 0 0 0 12 0V3"/><line x1="4" y1="21" x2="20" y2="21"/></svg>
+                <span>划线</span>
+              </button>
+              <button
+                className={`ft-mark-action${selectedMarkType === 'bold' ? ' active' : ''}`}
+                onClick={() => handleMarkTypeSelect('bold')}
+                title="改为高光"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 20h16"/><path d="M7 16l7.5-7.5 3 3L10 19H7z"/><path d="M13 5l3 3"/></svg>
+                <span>高光</span>
+              </button>
+              <span className="ft-divider" />
+              <div className="ft-colors" aria-label="标记颜色">
+                {PRESET_MARK_COLORS.map(c => {
+                  const active = selectedMarkColor === c.name
+                  return (
+                    <button
+                      key={c.name}
+                      type="button"
+                      className={`ft-color${active ? ' active' : ''}`}
+                      style={{ background: c.hex }}
+                      onClick={() => handleMarkColorSelect(c.name)}
+                      title={`${c.label}色${active ? '（当前）' : ''}`}
+                      aria-label={`${c.label}色标记`}
+                    />
+                  )
+                })}
+              </div>
             </div>
           )}
 
@@ -3744,6 +4155,9 @@ export default function PdfViewer() {
         open={ocrRangeOpen}
         totalPages={numPages || 0}
         currentPage={useUiStore.getState().currentVisiblePage || 1}
+        ocrEngine={ocrEngine}
+        glmApiKeyStatus={glmApiKeyStatus}
+        onEngineChange={setOcrEngine}
         onConfirm={runOcrWithRange}
         onCancel={() => setOcrRangeOpen(false)}
       />
@@ -3776,10 +4190,20 @@ function TranslateButtonWithBadge({ entryId, onClick }: { entryId: string; onCli
   })()
 
   return (
-    <div style={{ position: 'relative', display: 'inline-block', marginLeft: 8 }}>
+    <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', marginLeft: 8, flex: '0 0 62px' }}>
       <button
         className="btn btn-sm"
-        style={{ fontSize: 11 }}
+        style={{
+          width: 62,
+          minWidth: 62,
+          height: 42,
+          minHeight: 42,
+          padding: '0 10px',
+          justifyContent: 'center',
+          fontSize: 12,
+          lineHeight: 1,
+          boxSizing: 'border-box',
+        }}
         title={badge?.title || '翻译全文 / 按页'}
         onClick={onClick}
       >

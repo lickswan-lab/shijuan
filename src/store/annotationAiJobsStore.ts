@@ -174,6 +174,9 @@ export const useAnnotationAiJobsStore = create<JobsStore>((set, get) => ({
         new Promise<{ success: false; error: string }>(resolve => { resolveTimeout = resolve }),
       ])
       if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
+      if ((result as any)?.success && (result as any)?.text && !fullText) {
+        fullText = (result as any).text
+      }
 
       // One last flush so content is final.
       flushToEntry()

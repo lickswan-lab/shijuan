@@ -25,9 +25,10 @@ const TOOL_DESCRIPTIONS = `
    参数：{"entryId": "文献ID"}
    返回：注释列表（选中文本、笔记、AI对话历史）
 
-4. **get_document_text** — 获取文献全文
+4. **get_document_text** — 获取文献中用户已触达的文本证据
    参数：{"entryId": "文献ID"}
-   返回：文献的OCR/原始文本内容
+   返回：用户标记、注释、笔记引用过的文本片段。不要把未触达全文当作用户已经读过。
+   仅当用户明确要求“全文/整篇”时，才可传 {"scope":"full","confirmedByUser":true}
 
 5. **list_memos** — 列出所有思考笔记
    无参数
@@ -47,13 +48,17 @@ const TOOL_DESCRIPTIONS = `
 
 9. **get_reading_activity** — 获取最近阅读活动
    参数：{"days": 7}
-   返回：最近N天的阅读事件摘要
+   返回：最近N天的阅读状态摘要，包括活跃文献、证据密度、最近标注/标记/笔记、写作活动
 
-10. **build_knowledge_map** — 构建知识图谱
+9b. **get_reading_state** — 获取研究状态模型
+    参数：{"days": 14}
+    返回：阅读投入、触达证据、深读/浅读文献、写作活跃度。用于回答“我最近在读什么/状态如何/薄弱点在哪里”
+
+10. **build_knowledge_map** — 构建问题路径图谱
     无参数
-    返回：全库注释的跨文献概念网络数据
-    用途：用户问"帮我梳理文献关系"、"我读的这些文献有什么关联"时使用
-    你需要基于返回的数据，分析概念之间的支持/反驳/演进关系，输出结构化的知识图谱
+    返回：全库“用户已触达证据”的跨文献概念网络数据
+    用途：用户问"我在某个问题上是怎么想深的"、"帮我梳理这个问题的阅读路径"、"这些材料如何推进我的判断"时使用
+    你需要基于返回的数据，分析用户围绕某个问题的理解推进：起点、关键证据、冲突、转折、暂时结论和下一步缺口。不要把它做成静态文献关系网，也不要声称分析了用户未标记、未注释、未引用的段落。
 
 11. **generate_exam** — 生成考试预测
     无参数
@@ -74,12 +79,22 @@ const TOOL_DESCRIPTIONS = `
     你需要分析用户理解的演变阶段，输出思想变迁时间线和反思总结
 `.trim()
 
+const EVIDENCE_BOUNDARY_INSTRUCTION = `
+## 证据边界
+
+拾卷的底层原则是“用户触达优先”：
+- 跨文献洞察只能基于用户已打开、标记、注释、提问、引用到笔记里的材料。
+- 标记、高光、划线、注释、笔记引用都算作“触达证据”；未被触达的全文不应被主动纳入判断。
+- 当证据不足时，明确说“目前证据不足”，并建议用户标记或补充材料，而不是用模型常识补完。
+- 如果用户明确要求全文总结，可以读取全文；否则优先使用 get_reading_state / build_knowledge_map / get_document_text 的 user_touched 结果。
+`.trim()
+
 const MEMORY_UPDATE_INSTRUCTION = `
 ## 记忆更新
 
 当你在对话中发现以下信息时，请用 <memory_update> 标签输出需要记住的内容：
 - 用户的研究方向、兴趣主题
-- 跨文献的重要关联
+- 用户在某个问题上的理解推进、转向和关键证据
 - 用户的阅读习惯和偏好
 - 重要的研究进展或发现
 
@@ -92,6 +107,11 @@ export interface AgentContext {
   memory: string
   currentEntryTitle?: string
   currentEntryId?: string
+  currentEntryReading?: {
+    totalMinutes: number
+    sessionCount: number
+    lastAt?: string
+  }
   selectedText?: string
   recentAnnotations?: Array<{ text: string; note: string }>
 }
@@ -104,7 +124,7 @@ export function buildAgentSystemPrompt(ctx: AgentContext): string {
 
 你是 Hermes，拾卷（ShiJuan）应用内置的研究助手。你帮助用户：
 - 理解和分析文献内容
-- 发现不同文献之间的关联
+- 看见用户围绕某个问题逐步深入的阅读路径
 - 整理研究思路、撰写笔记
 - 回顾阅读历史、总结进展
 
@@ -113,7 +133,7 @@ export function buildAgentSystemPrompt(ctx: AgentContext): string {
 - 主动使用工具获取真实信息，不要凭空编造文献内容
 - 引用文献时标注具体标题
 - 回答要有深度但简洁，避免冗长
-- 在合适的时候主动建议用户可能感兴趣的关联或下一步行动`)
+- 在合适的时候主动建议用户下一步该补哪类证据、回看哪段材料或整理哪条问题路径`)
 
   // Persistent memory
   if (ctx.memory) {
@@ -124,6 +144,9 @@ export function buildAgentSystemPrompt(ctx: AgentContext): string {
   const contextParts: string[] = []
   if (ctx.currentEntryTitle) {
     contextParts.push(`当前打开的文献：「${ctx.currentEntryTitle}」(ID: ${ctx.currentEntryId})`)
+  }
+  if (ctx.currentEntryReading) {
+    contextParts.push(`当前文献阅读状态：累计约 ${ctx.currentEntryReading.totalMinutes} 分钟，${ctx.currentEntryReading.sessionCount} 次阅读${ctx.currentEntryReading.lastAt ? `，最近活动 ${ctx.currentEntryReading.lastAt}` : ''}`)
   }
   if (ctx.selectedText) {
     contextParts.push(`用户当前选中的文本：「${ctx.selectedText}」`)
@@ -140,6 +163,9 @@ export function buildAgentSystemPrompt(ctx: AgentContext): string {
 
   // Tools
   parts.push(TOOL_DESCRIPTIONS)
+
+  // Evidence boundary
+  parts.push(EVIDENCE_BOUNDARY_INSTRUCTION)
 
   // Memory update
   parts.push(MEMORY_UPDATE_INSTRUCTION)

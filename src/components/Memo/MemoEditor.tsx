@@ -15,6 +15,7 @@ import { useConfirmDialog } from '../common/ConfirmDialog'
 import { fetchAiConfig, subscribeAiConfig, type ConfiguredProvider } from '../../utils/aiConfigCache'
 import { fetchPersonaList, subscribePersonaList, type PersonaListEntry } from '../../utils/personaListCache'
 import { humanizeAiError } from '../../utils/humanizeAiError'
+import { normalizeMixedChineseToSimplified } from '../../utils/chineseText'
 
 // ===== Clean OCR text for cite panel =====
 function cleanOcrTextForCite(raw: string): string {
@@ -24,7 +25,7 @@ function cleanOcrTextForCite(raw: string): string {
   }
   const toSuper = (s: string) => s.split('').map(c => superDigits[c] || c).join('')
 
-  return raw
+  return normalizeMixedChineseToSimplified(raw)
     .replace(/\$\s*\\\\?textcircled\{(\d+)\}\s*\$/g, (_m, n) => circled[parseInt(n)-1] || `(${n})`)
     .replace(/\$\s*\^?\s*\{?\s*\((\d+)\)\s*\}?\s*\$/g, (_m, n) => `⁽${toSuper(n)}⁾`)
     .replace(/\$\s*\^\s*\{(\d+)\}\s*\$/g, (_m, n) => toSuper(n))
@@ -160,7 +161,7 @@ function CitePanel({ memoId, onClose }: { memoId: string; onClose: () => void })
     if (ext === 'pdf') {
       // PDF: try OCR text
       window.electronAPI.readOcrText(entry.absPath).then(r => {
-        setOcrText(r.exists && r.text ? r.text : null)
+        setOcrText(r.exists && r.text ? normalizeMixedChineseToSimplified(r.text) : null)
       }).catch(() => setOcrText(null))
     } else if (['html', 'htm', 'txt', 'md'].includes(ext)) {
       // Text-based files: read directly
@@ -174,21 +175,21 @@ function CitePanel({ memoId, onClose }: { memoId: string; onClose: () => void })
             .replace(/<[^>]+>/g, ' ')
             .replace(/\s+/g, ' ').trim()
         }
-        setOcrText(text || null)
+        setOcrText(normalizeMixedChineseToSimplified(text) || null)
       }).catch(() => setOcrText(null))
     } else if (['docx', 'doc'].includes(ext)) {
       // DOCX: convert with mammoth
       import('mammoth').then(mammoth => {
         window.electronAPI.readFileBuffer(entry.absPath).then(buf => {
           mammoth.extractRawText({ arrayBuffer: buf.buffer }).then(result => {
-            setOcrText(result.value || null)
+            setOcrText(normalizeMixedChineseToSimplified(result.value) || null)
           }).catch(() => setOcrText(null))
         }).catch(() => setOcrText(null))
       }).catch(() => setOcrText(null))
     } else {
       // Other: try OCR text as fallback
       window.electronAPI.readOcrText(entry.absPath).then(r => {
-        setOcrText(r.exists && r.text ? r.text : null)
+        setOcrText(r.exists && r.text ? normalizeMixedChineseToSimplified(r.text) : null)
       }).catch(() => setOcrText(null))
     }
   }, [selectedEntryId])

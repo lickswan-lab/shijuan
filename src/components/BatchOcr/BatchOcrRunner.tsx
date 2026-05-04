@@ -1,11 +1,13 @@
 import { useEffect, useRef } from 'react'
 import { useUiStore } from '../../store/uiStore'
 import { useLibraryStore } from '../../store/libraryStore'
+import { normalizeMixedChineseToSimplified } from '../../utils/chineseText'
 
 /**
  * BatchOcrRunner (headless) — drives the sequential OCR queue.
  *
- * Reads `ocrQueue.status === 'running'` and the current item, invokes GLM OCR,
+ * Reads `ocrQueue.status === 'running'` and the current item, invokes the
+ * selected OCR engine (GLM cloud or RapidOCR local),
  * saves .ocr.txt, updates the entry's ocrStatus, then calls advanceOcrQueue().
  * Between items it yields to React (via setTimeout 0) so the progress UI re-renders.
  *
@@ -15,6 +17,7 @@ import { useLibraryStore } from '../../store/libraryStore'
  */
 export default function BatchOcrRunner() {
   const ocrQueue = useUiStore(s => s.ocrQueue)
+  const ocrEngine = useUiStore(s => s.ocrEngine)
   const advanceOcrQueue = useUiStore(s => s.advanceOcrQueue)
   const setOcrChunkProgress = useUiStore(s => s.setOcrChunkProgress)
   const updateEntry = useLibraryStore(s => s.updateEntry)
@@ -63,7 +66,7 @@ export default function BatchOcrRunner() {
     ;(async () => {
       try {
         const api = window.electronAPI
-        if (!api?.glmOcrPdf) throw new Error('OCR API unavailable')
+        if (!api?.glmOcrPdf && !api?.rapidOcrPdf) throw new Error('OCR API unavailable')
         // Flip to 'running' so the FileTree badge shows a spinner for this entry.
         await updateEntry(item.entryId, {
           ocrStatus: 'running',
@@ -71,11 +74,13 @@ export default function BatchOcrRunner() {
           ocrError: undefined,
         })
         // Pass entryId so the backend's chunk-progress events can be correlated here
-        const result = await api.glmOcrPdf(item.absPath, { entryId: item.entryId })
+        const result = ocrEngine === 'rapidocr'
+          ? await api.rapidOcrPdf!(item.absPath, { entryId: item.entryId })
+          : await api.glmOcrPdf!(item.absPath, { entryId: item.entryId })
         if (stopped) return
 
         if (result.success && result.text) {
-          const savedPath = await api.saveOcrText(item.absPath, result.text)
+          const savedPath = await api.saveOcrText(item.absPath, normalizeMixedChineseToSimplified(result.text))
           await updateEntry(item.entryId, {
             ocrStatus: 'complete',
             ocrFilePath: savedPath,
@@ -112,7 +117,7 @@ export default function BatchOcrRunner() {
     })()
 
     return () => { stopped = true }
-  }, [ocrQueue.status, ocrQueue.currentIndex, ocrQueue.cancelled, ocrQueue.items, advanceOcrQueue, updateEntry])
+  }, [ocrQueue.status, ocrQueue.currentIndex, ocrQueue.cancelled, ocrQueue.items, ocrEngine, advanceOcrQueue, updateEntry])
 
   return null
 }

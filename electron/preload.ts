@@ -105,6 +105,10 @@ const electronAPI = {
   // Batch 43 · opts.startPage/endPage 让用户只 OCR PDF 部分页（1-indexed inclusive）
   glmOcrPdf: (pdfAbsPath: string, opts?: { entryId?: string; startPage?: number; endPage?: number }): Promise<{ success: boolean; text?: string; pageTexts?: string[]; pageCount?: number; chunks?: number; actualStartPage?: number; actualEndPage?: number; error?: string }> =>
     ipcRenderer.invoke('glm-ocr-pdf', pdfAbsPath, opts),
+  rapidOcrProbe: (): Promise<{ available: boolean; python?: string; version?: string; api?: string; onnxruntime?: string; error?: string; installCommand: string }> =>
+    ipcRenderer.invoke('rapid-ocr-probe'),
+  rapidOcrPdf: (pdfAbsPath: string, opts?: { entryId?: string; startPage?: number; endPage?: number }): Promise<{ success: boolean; text?: string; pageTexts?: string[]; pageCount?: number; chunks?: number; actualStartPage?: number; actualEndPage?: number; engine?: string; error?: string }> =>
+    ipcRenderer.invoke('rapid-ocr-pdf', pdfAbsPath, opts),
   onOcrProgress: (callback: (payload: { entryId?: string; chunkIndex: number; totalChunks: number; phase: 'start' | 'done' | 'error' }) => void) => {
     const handler = (_event: any, payload: any) => callback(payload)
     ipcRenderer.on('glm-ocr-progress', handler)
@@ -465,7 +469,7 @@ const electronAPI = {
   // Renderer debounces saves by 2s to avoid per-token writes during streaming.
   summonSessionList: (personaId: string): Promise<{
     success: boolean
-    sessions?: Array<{ sessionId: string; startedAt: string; messageCount: number; firstPreview: string }>
+    sessions?: Array<{ sessionId: string; title?: string; startedAt: string; messageCount: number; firstPreview: string }>
     error?: string
   }> => ipcRenderer.invoke('summon-session-list', personaId),
   summonSessionLoad: (personaId: string, sessionId: string): Promise<{
@@ -473,6 +477,7 @@ const electronAPI = {
     session?: {
       sessionId: string
       personaId: string
+      title?: string
       startedAt: string
       updatedAt: string
       messages: Array<{ role: 'user' | 'assistant'; content: string; [key: string]: any }>
@@ -482,6 +487,7 @@ const electronAPI = {
   summonSessionSave: (session: {
     sessionId: string
     personaId: string
+    title?: string
     startedAt: string
     updatedAt?: string
     messages: Array<{ role: 'user' | 'assistant'; content: string; [key: string]: any }>

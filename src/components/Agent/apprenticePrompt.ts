@@ -169,7 +169,7 @@ export function buildApprenticePrompt(ctx: ApprenticeContext): { system: string;
           const typeLabel = ({
             note: '笔记', question: '质疑', stance: '立场',
             ai_interpretation: '解读', ai_qa: '问答', ai_feedback: '反馈',
-            link: '关联',
+            link: '路径',
           } as Record<string, string>)[e.type] || e.type
           return `    · [${typeLabel}·${role}] ${e.content}`
         }).join('\n')

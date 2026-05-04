@@ -21,6 +21,8 @@ export async function openEntryById(entryId: string, options?: OpenEntryOptions)
   if (!entry) return false
 
   try {
+    useUiStore.getState().setMainView('reader')
+
     if (options?.searchHighlight) {
       useUiStore.getState().setSearchHighlight({
         query: options.searchHighlight.query,

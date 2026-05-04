@@ -47,6 +47,7 @@ interface ConfiguredProvider {
 // IPC agent-load-insight / agent-save-insight kept for back-compat with
 // existing insights.json files on users' disks.
 type PanelTab = 'chat' | 'personas' | 'apprentice'
+type DeleteConfirmState = { ids: string[]; title: string; message?: string }
 
 // Format "X 天前" / "上周" / "N 周前"
 function formatTimeAgo(iso: string): string {
@@ -306,7 +307,11 @@ const MessageBubble = memo(function MessageBubble(props: {
             ? { background: 'var(--accent)', color: '#fff', borderBottomRightRadius: 2 }
             : { background: 'var(--bg-warm)', color: 'var(--text)', border: '1px solid var(--border-light)', borderTopLeftRadius: 2 }),
         }}>
-          {msg.role === 'assistant' ? <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{msg.content}</ReactMarkdown> : <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>}
+          {msg.role === 'assistant' ? (
+            <div className="agent-markdown">
+              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{msg.content}</ReactMarkdown>
+            </div>
+          ) : <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>}
         </div>
       </div>
     </div>
@@ -354,6 +359,10 @@ export default function AgentPanel() {
   // 替代原来的顶部横向 pill tabs。
   const [historyPopoverOpen, setHistoryPopoverOpen] = useState(false)
   const [showHistoryFullPage, setShowHistoryFullPage] = useState(false)
+  const [historySelectionMode, setHistorySelectionMode] = useState(false)
+  const [selectedHistoryIds, setSelectedHistoryIds] = useState<Set<string>>(() => new Set())
+  const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
   const historyPopoverRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     if (!historyPopoverOpen) return
@@ -580,6 +589,14 @@ export default function AgentPanel() {
     return () => window.removeEventListener('keydown', onKey)
   }, [showHistoryFullPage])
 
+  useEffect(() => {
+    if (showHistoryFullPage) return
+    setHistorySelectionMode(false)
+    setSelectedHistoryIds(new Set())
+    setRenamingConversationId(null)
+    setRenameDraft('')
+  }, [showHistoryFullPage])
+
   // 2026-04-25 PERF · loadMemory dead code 已删（未引用，已并入下面 mount effect）
 
   // Persona list — used by the summon dropdown in chat tab so the user can
@@ -707,7 +724,18 @@ export default function AgentPanel() {
 
   const buildContext = useCallback((): AgentContext => {
     const ctx: AgentContext = { memory }
-    if (currentEntry) { ctx.currentEntryTitle = currentEntry.title; ctx.currentEntryId = currentEntry.id }
+    if (currentEntry) {
+      ctx.currentEntryTitle = currentEntry.title
+      ctx.currentEntryId = currentEntry.id
+      const stats = currentEntry.readingStats
+      if (stats) {
+        ctx.currentEntryReading = {
+          totalMinutes: Math.round((stats.totalMs || 0) / 60000),
+          sessionCount: stats.sessionCount || 0,
+          lastAt: stats.lastAt,
+        }
+      }
+    }
     if (textSelection?.text) ctx.selectedText = textSelection.text
     if (currentPdfMeta?.annotations) {
       ctx.recentAnnotations = currentPdfMeta.annotations.slice(-5).map(a => ({
@@ -721,28 +749,74 @@ export default function AgentPanel() {
   // Delete a conversation: opens an in-app confirm modal (replaces native
   // window.confirm which looked foreign against the warm 拾卷 palette).
   // executeDeleteConversation does the actual disk + in-memory removal.
-  const [confirmingDelete, setConfirmingDelete] = useState<{ id: string; title: string } | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = useState<DeleteConfirmState | null>(null)
 
   const handleDeleteConversation = useCallback((convId: string) => {
     const c = conversations.find(x => x.id === convId)
-    setConfirmingDelete({ id: convId, title: c?.title || '未命名对话' })
+    setConfirmingDelete({ ids: [convId], title: c?.title || '未命名对话' })
   }, [conversations])
 
+  const toggleHistorySelection = useCallback((convId: string) => {
+    setSelectedHistoryIds(prev => {
+      const next = new Set(prev)
+      if (next.has(convId)) next.delete(convId)
+      else next.add(convId)
+      return next
+    })
+  }, [])
+
+  const handleDeleteSelectedConversations = useCallback(() => {
+    const ids = Array.from(selectedHistoryIds)
+    if (ids.length === 0) return
+    setConfirmingDelete({
+      ids,
+      title: `${ids.length} 条历史对话`,
+      message: `确定删除选中的 ${ids.length} 条历史对话？`,
+    })
+  }, [selectedHistoryIds])
+
   const executeDeleteConversation = useCallback(async () => {
-    const convId = confirmingDelete?.id
-    if (!convId) return
+    const ids = confirmingDelete?.ids || []
+    if (ids.length === 0) return
     setConfirmingDelete(null)
+    const idSet = new Set(ids)
     try {
-      await window.electronAPI.agentDeleteConversation?.(convId)
+      await Promise.all(ids.map(id => window.electronAPI.agentDeleteConversation?.(id)))
     } catch { /* ignore — UI will re-sync from disk next load */ }
-    const remaining = conversations.filter(c => c.id !== convId)
+    const remaining = conversations.filter(c => !idSet.has(c.id))
     setConversations(remaining)
-    if (activeConv?.id === convId) {
+    setSelectedHistoryIds(new Set())
+    setHistorySelectionMode(false)
+    if (activeConv && idSet.has(activeConv.id)) {
       // Batch 43 · 删当前对话前 abort 流式 + 清残留状态（避免上个对话 streamingPersona 残留到 fallback 对话）
       handleStopStream()
       setActiveConv(remaining[0] || null)
     }
   }, [confirmingDelete, conversations, activeConv, handleStopStream])
+
+  const startRenameConversation = useCallback((conv: AgentConversation) => {
+    setRenamingConversationId(conv.id)
+    setRenameDraft(conv.title || '未命名对话')
+  }, [])
+
+  const cancelRenameConversation = useCallback(() => {
+    setRenamingConversationId(null)
+    setRenameDraft('')
+  }, [])
+
+  const commitRenameConversation = useCallback(async (convId: string) => {
+    const target = conversations.find(c => c.id === convId)
+    if (!target) return
+    const title = renameDraft.trim() || '未命名对话'
+    const updated: AgentConversation = { ...target, title, updatedAt: new Date().toISOString() }
+    setConversations(prev => prev.map(c => c.id === convId ? updated : c))
+    if (activeConv?.id === convId) setActiveConv(updated)
+    setRenamingConversationId(null)
+    setRenameDraft('')
+    try {
+      await window.electronAPI.agentSaveConversation?.(updated)
+    } catch { /* ignore — next message save will retry */ }
+  }, [conversations, renameDraft, activeConv])
 
   // ESC closes the confirm modal
   useEffect(() => {
@@ -767,7 +841,11 @@ export default function AgentPanel() {
     }
     setActiveConv(conv)
     setConversations(prev => [conv, ...prev])
+    setShowHistoryFullPage(false)
+    setHistorySelectionMode(false)
+    setSelectedHistoryIds(new Set())
     setTab('chat')
+    void window.electronAPI.agentSaveConversation?.(conv).catch(() => {})
   }, [handleStopStream])
 
   const handleSend = useCallback(async () => {
@@ -1048,18 +1126,38 @@ export default function AgentPanel() {
       }
 
       let maxIter = 5, finalResponse = ''
+      let keepDraftDuringNextTurn = false
       while (maxIter-- > 0) {
         const streamId = uuid()
         currentStreamIdRef.current = streamId
         let fullText = ''
-        clearStreamingText()
+        if (!keepDraftDuringNextTurn) clearStreamingText()
+        keepDraftDuringNextTurn = false
         const cleanup = window.electronAPI.onAiStreamChunk((sid, chunk) => { if (sid === streamId) { fullText += chunk; flushStreamingText(fullText) } })
         // Batch 43 · 透传 effort + webSearch
-        try { await window.electronAPI.aiChatStream(streamId, agentModel, llmMessages, { effort: aiReasoningEffort, webSearch: aiWebSearch }) } finally { cleanup(); currentStreamIdRef.current = null }
-        clearStreamingText()
+        let streamResult: { success: boolean; text?: string; error?: string; aborted?: boolean } | null = null
+        try {
+          streamResult = await window.electronAPI.aiChatStream(streamId, agentModel, llmMessages, { effort: aiReasoningEffort, webSearch: aiWebSearch })
+          if (streamResult.aborted) {
+            finalResponse = fullText ? `${fullText}\n\n（已中断）` : '（已中断）'
+            break
+          }
+          if (!streamResult.success) throw new Error(streamResult.error || 'AI 调用失败')
+          if (!fullText && streamResult.text) {
+            fullText = streamResult.text
+            flushStreamingText(fullText)
+          }
+        } finally { cleanup(); currentStreamIdRef.current = null }
         if (!fullText) { finalResponse = ''; break }
 
         if (hasToolCalls(fullText)) {
+          const visibleDraft = cleanResponse(fullText)
+          if (visibleDraft) {
+            flushStreamingText(visibleDraft)
+            keepDraftDuringNextTurn = true
+          } else {
+            clearStreamingText()
+          }
           for (const call of parseToolCalls(fullText)) {
             setToolStatus(`${call.toolName}...`)
             const result = await executeTool(call.toolName, call.argsJson, storeHelpers)
@@ -1069,7 +1167,7 @@ export default function AgentPanel() {
             )
             llmMessages.push({ role: 'assistant', content: fullText }, { role: 'user', content: `<tool_result name="${call.toolName}">${result}</tool_result>` })
           }
-          setToolStatus('')
+          setToolStatus('整理中...')
           continue
         }
         finalResponse = fullText
@@ -1251,24 +1349,6 @@ export default function AgentPanel() {
         </button>
       </div>
 
-      {/* 2026-04-28 · 期望管理 banner — 让用户清楚 persona 是 AI 模拟,
-          不是被召唤的人本人。点击 ⓘ 可看更详细的来源 / 局限说明。 */}
-      <div style={{
-        padding: '5px 12px',
-        background: 'var(--bg-warm)',
-        borderBottom: '1px solid var(--border-light)',
-        fontSize: 10.5,
-        color: 'var(--text-muted)',
-        letterSpacing: '0.2px',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 4,
-        flexShrink: 0,
-      }} title="召唤的人物是基于其著作和资料蒸馏的思维模型,非本人。建议把它当思考伙伴而非权威发言人。">
-        <span style={{ opacity: 0.7 }}>ⓘ</span>
-        <span>召唤人物为基于著作蒸馏的思维模型,非本人</span>
-      </div>
-
       {/* Tab bar — 2026-04-24 合并方案 A：移除"观察"tab（功能迁到对话输入栏的 ✍ 按钮）。
           保留"对话 / 召唤"两个 tab。"观察" view body 仍能通过 `tab === 'apprentice'`
           渲染，由对话工具栏的 ✍ 和 📖 按钮触发 setTab('apprentice') 进入。 */}
@@ -1292,19 +1372,19 @@ export default function AgentPanel() {
       {/* ===== Tab: Chat ·全页历史对话视图（从下拉"查看更多"进） ===== */}
       {tab === 'chat' && showHistoryFullPage && (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--bg)' }}>
-          {/* Header */}
           <div style={{
-            padding: '10px 14px', borderBottom: '1px solid var(--border-light)',
+            padding: '10px 12px', borderBottom: '1px solid var(--border-light)',
             display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
+            background: 'var(--bg)',
           }}>
             <button
               onClick={() => setShowHistoryFullPage(false)}
               style={{
-                padding: '5px 7px', fontSize: 11,
+                width: 28, height: 28, padding: 0, fontSize: 11,
                 background: 'none', border: 'none', cursor: 'pointer',
                 color: 'var(--text-muted)',
-                display: 'inline-flex', alignItems: 'center',
-                borderRadius: 4,
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                borderRadius: 7,
                 transition: 'color 180ms cubic-bezier(0.4, 0, 0.2, 1), background 180ms cubic-bezier(0.4, 0, 0.2, 1)',
               }}
               onMouseEnter={e => { e.currentTarget.style.color = 'var(--accent)'; e.currentTarget.style.background = 'var(--bg-hover)' }}
@@ -1313,84 +1393,233 @@ export default function AgentPanel() {
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"/></svg>
             </button>
-            <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--text)', fontFamily: 'var(--font-serif)', letterSpacing: '1.2px' }}>
-              历史对话
-            </span>
-            <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 'auto' }}>
-              共 {conversations.length} 条
-            </span>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', letterSpacing: '0.4px' }}>历史对话</div>
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 1 }}>
+                {conversations.length} 条记录{historySelectionMode && selectedHistoryIds.size > 0 ? ` · 已选 ${selectedHistoryIds.size}` : ''}
+              </div>
+            </div>
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+              {historySelectionMode && selectedHistoryIds.size > 0 && (
+                <button
+                  onClick={handleDeleteSelectedConversations}
+                  style={{
+                    padding: '5px 9px', fontSize: 11,
+                    border: '1px solid rgba(196,90,58,0.34)', borderRadius: 7,
+                    background: 'rgba(196,90,58,0.08)', color: 'var(--danger)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  删除选中
+                </button>
+              )}
+              <button
+                onClick={handleNewConversation}
+                title="新增对话"
+                style={{
+                  padding: '5px 10px', fontSize: 11,
+                  border: '1px solid var(--accent)', borderRadius: 7,
+                  background: 'var(--accent)', color: '#fff',
+                  cursor: 'pointer', fontWeight: 600,
+                  boxShadow: '0 4px 12px rgba(184,132,78,0.16)',
+                }}
+              >
+                新增
+              </button>
+              <button
+                onClick={() => {
+                  setHistorySelectionMode(v => !v)
+                  setSelectedHistoryIds(new Set())
+                  setRenamingConversationId(null)
+                }}
+                style={{
+                  padding: '5px 10px', fontSize: 11,
+                  border: `1px solid ${historySelectionMode ? 'var(--accent)' : 'var(--border)'}`,
+                  borderRadius: 7,
+                  background: historySelectionMode ? 'var(--accent-soft)' : 'transparent',
+                  color: historySelectionMode ? 'var(--accent-hover)' : 'var(--text-muted)',
+                  cursor: 'pointer',
+                }}
+              >
+                {historySelectionMode ? '完成' : '多选'}
+              </button>
+            </div>
           </div>
-          {/* List — 2026-04-24 用户反馈：稍小一点 + 轻微边框
-              每行改成"卡片式"：padding 压缩 10/16 → 7/11，字号 13/11/10 → 12/10.5/9.5，
-              加一层 1px border-light 边框 + 4px radius + 行距 4px，整体更紧凑、有书页感。 */}
-          <div style={{ flex: 1, overflow: 'auto', padding: '8px 10px' }}>
+          <div style={{ flex: 1, overflow: 'auto', padding: '10px 10px 14px' }}>
             {conversations.length === 0 ? (
-              <div style={{ padding: '48px 16px', textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
-                还没有对话记录
+              <div style={{ padding: '48px 16px', textAlign: 'center', fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.8 }}>
+                还没有历史对话<br />
+                <button
+                  onClick={handleNewConversation}
+                  style={{
+                    marginTop: 12, padding: '6px 14px', fontSize: 12,
+                    border: '1px solid var(--accent)', borderRadius: 8,
+                    background: 'var(--accent)', color: '#fff', cursor: 'pointer',
+                  }}
+                >
+                  新增对话
+                </button>
               </div>
             ) : conversations.map(c => {
               const isActive = c.id === activeConv?.id
+              const isSelected = selectedHistoryIds.has(c.id)
+              const isRenaming = renamingConversationId === c.id
               const preview = c.messages.find(m => m.role === 'user')?.content.slice(0, 60) || '（空对话）'
+              const summonedNames = getSummoned(c).map(s => s.name).join(' · ')
               return (
                 <div
                   key={c.id}
                   onClick={() => {
+                    if (isRenaming) return
+                    if (historySelectionMode) {
+                      toggleHistorySelection(c.id)
+                      return
+                    }
                     // Batch 43 · 切到别的历史对话前 abort 流式 + 清残留
                     handleStopStream()
                     setActiveConv(c)
                     setShowHistoryFullPage(false)
                   }}
                   onMouseEnter={e => {
-                    if (!isActive) {
+                    if (!isActive && !isSelected) {
                       e.currentTarget.style.background = 'var(--bg-warm, #FBF8F1)'
                       e.currentTarget.style.borderColor = 'var(--border)'
                     }
                   }}
                   onMouseLeave={e => {
-                    if (!isActive) {
+                    if (!isActive && !isSelected) {
                       e.currentTarget.style.background = 'transparent'
                       e.currentTarget.style.borderColor = 'var(--border-light)'
                     }
                   }}
                   style={{
-                    padding: '7px 11px', cursor: 'pointer',
-                    marginBottom: 4,
-                    border: `1px solid ${isActive ? 'var(--accent)' : 'var(--border-light)'}`,
-                    borderLeft: isActive ? '3px solid var(--accent)' : '1px solid var(--border-light)',
-                    borderRadius: 4,
-                    background: isActive ? 'var(--accent-soft)' : 'transparent',
+                    padding: '9px 10px', cursor: isRenaming ? 'default' : 'pointer',
+                    marginBottom: 7,
+                    border: `1px solid ${isActive || isSelected ? 'var(--accent)' : 'var(--border-light)'}`,
+                    borderRadius: 9,
+                    background: isSelected ? 'color-mix(in srgb, var(--accent-soft) 76%, var(--bg) 24%)' : (isActive ? 'var(--accent-soft)' : 'transparent'),
                     transition: 'background 180ms cubic-bezier(0.4, 0, 0.2, 1), border-color 180ms cubic-bezier(0.4, 0, 0.2, 1)',
-                    display: 'flex', alignItems: 'center', gap: 8,
+                    display: 'flex', alignItems: 'center', gap: 10,
                   }}
                 >
+                  {historySelectionMode && (
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); toggleHistorySelection(c.id) }}
+                      title={isSelected ? '取消选择' : '选择'}
+                      style={{
+                        width: 18, height: 18, padding: 0, flexShrink: 0,
+                        borderRadius: 6,
+                        border: `1.5px solid ${isSelected ? 'var(--accent)' : 'var(--border)'}`,
+                        background: isSelected ? 'var(--accent)' : 'var(--bg)',
+                        color: '#fff',
+                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {isSelected && (
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="4 12 10 18 20 6"/>
+                        </svg>
+                      )}
+                    </button>
+                  )}
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{
-                      fontSize: 12, color: isActive ? 'var(--accent-hover)' : 'var(--text)',
-                      fontWeight: isActive ? 500 : 400,
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      marginBottom: 2,
-                    }}>{c.title}</div>
+                    {isRenaming ? (
+                      <input
+                        autoFocus
+                        value={renameDraft}
+                        onChange={e => setRenameDraft(e.target.value)}
+                        onClick={e => e.stopPropagation()}
+                        onFocus={e => e.currentTarget.select()}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') { e.preventDefault(); void commitRenameConversation(c.id) }
+                          if (e.key === 'Escape') { e.preventDefault(); cancelRenameConversation() }
+                        }}
+                        style={{
+                          width: '100%',
+                          boxSizing: 'border-box',
+                          padding: '5px 8px',
+                          border: '1px solid var(--accent)',
+                          borderRadius: 7,
+                          background: 'var(--bg)',
+                          color: 'var(--text)',
+                          outline: 'none',
+                          fontSize: 12.5,
+                          fontWeight: 600,
+                        }}
+                      />
+                    ) : (
+                      <div style={{
+                        fontSize: 12.5, color: isActive ? 'var(--accent-hover)' : 'var(--text)',
+                        fontWeight: isActive ? 700 : 600,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        marginBottom: 2,
+                      }}>{c.title}</div>
+                    )}
                     <div style={{
                       fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.4,
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                     }}>{preview}</div>
                     <div style={{ fontSize: 9.5, color: 'var(--text-faint, #A89B8C)', marginTop: 2 }}>
                       {c.messages.length} 条 · {formatTimeAgo(c.updatedAt)}
-                      {c.summonedPersonaName && <span style={{ marginLeft: 8, color: 'var(--accent)' }}>🧙 {c.summonedPersonaName}</span>}
+                      {summonedNames && <span style={{ marginLeft: 8, color: 'var(--accent)' }}>{summonedNames}</span>}
                     </div>
                   </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleDeleteConversation(c.id) }}
-                    title="删除"
-                    style={{
-                      padding: '4px 8px', fontSize: 13, lineHeight: 1,
-                      background: 'none', border: 'none', color: 'var(--text-muted)',
-                      cursor: 'pointer', opacity: 0.4, borderRadius: 3,
-                      transition: 'opacity 180ms, color 180ms, background 180ms',
-                    }}
-                    onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.color = 'var(--danger)'; e.currentTarget.style.background = 'rgba(201,112,112,0.08)' }}
-                    onMouseLeave={e => { e.currentTarget.style.opacity = '0.4'; e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.background = 'none' }}
-                  >×</button>
+                  {!historySelectionMode && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+                      {isRenaming ? (
+                        <>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); void commitRenameConversation(c.id) }}
+                            style={{
+                              padding: '4px 8px', fontSize: 11,
+                              background: 'var(--accent)', border: '1px solid var(--accent)',
+                              color: '#fff', cursor: 'pointer', borderRadius: 6,
+                            }}
+                          >
+                            保存
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); cancelRenameConversation() }}
+                            style={{
+                              padding: '4px 8px', fontSize: 11,
+                              background: 'transparent', border: '1px solid var(--border)',
+                              color: 'var(--text-muted)', cursor: 'pointer', borderRadius: 6,
+                            }}
+                          >
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); startRenameConversation(c) }}
+                            title="重命名"
+                            style={{
+                              padding: '4px 7px', fontSize: 11,
+                              background: 'transparent', border: '1px solid var(--border-light)',
+                              color: 'var(--text-muted)', cursor: 'pointer', borderRadius: 6,
+                            }}
+                          >
+                            重命名
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleDeleteConversation(c.id) }}
+                            title="删除"
+                            style={{
+                              width: 25, height: 25, padding: 0, fontSize: 14, lineHeight: 1,
+                              background: 'transparent', border: '1px solid transparent', color: 'var(--text-muted)',
+                              cursor: 'pointer', opacity: 0.55, borderRadius: 6,
+                              transition: 'opacity 180ms, color 180ms, background 180ms, border-color 180ms',
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.color = 'var(--danger)'; e.currentTarget.style.background = 'rgba(201,112,112,0.08)'; e.currentTarget.style.borderColor = 'rgba(201,112,112,0.22)' }}
+                            onMouseLeave={e => { e.currentTarget.style.opacity = '0.55'; e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'transparent' }}
+                          >×</button>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               )
             })}
@@ -1510,25 +1739,23 @@ export default function AgentPanel() {
                       </div>
                     )
                   })}
-                  {conversations.length > 5 && (
-                    <div style={{ borderTop: '1px solid var(--border-light)', marginTop: 4 }}>
-                      <button
-                        onClick={() => { setHistoryPopoverOpen(false); setShowHistoryFullPage(true) }}
-                        style={{
-                          width: '100%', padding: '8px 14px', fontSize: 11,
-                          background: 'none', border: 'none', cursor: 'pointer',
-                          color: 'var(--accent)', textAlign: 'left',
-                          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                          transition: 'background 180ms cubic-bezier(0.4, 0, 0.2, 1)',
-                        }}
-                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm, #FBF8F1)')}
-                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                      >
-                        <span>查看更多历史对话（{conversations.length}）</span>
-                        <span style={{ fontSize: 10 }}>→</span>
-                      </button>
-                    </div>
-                  )}
+                  <div style={{ borderTop: '1px solid var(--border-light)', marginTop: 4 }}>
+                    <button
+                      onClick={() => { setHistoryPopoverOpen(false); setShowHistoryFullPage(true) }}
+                      style={{
+                        width: '100%', padding: '8px 14px', fontSize: 11,
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        color: 'var(--accent)', textAlign: 'left',
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        transition: 'background 180ms cubic-bezier(0.4, 0, 0.2, 1)',
+                      }}
+                      onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-warm, #FBF8F1)')}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                    >
+                      <span>管理历史对话（{conversations.length}）</span>
+                      <span style={{ fontSize: 10 }}>→</span>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -1594,7 +1821,14 @@ export default function AgentPanel() {
                     </div>
                     {toolStatus && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}><span className="loading-spinner" style={{ width: 10, height: 10 }} />{toolStatus}</div>}
                     <div style={{ padding: '8px 12px', borderRadius: 10, background: 'var(--bg-warm)', border: '1px solid var(--border-light)', borderTopLeftRadius: 2, fontSize: 13, lineHeight: 1.7 }}>
-                      {streamingText ? <><ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{cleanResponse(streamingText)}</ReactMarkdown><span className="streaming-cursor" /></> : <span style={{ color: 'var(--text-muted)' }}>{toolStatus ? '处理中...' : '思考中...'}</span>}
+                      {streamingText ? (
+                        <>
+                          <div className="agent-markdown">
+                            <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{cleanResponse(streamingText)}</ReactMarkdown>
+                          </div>
+                          <span className="streaming-cursor" />
+                        </>
+                      ) : <span style={{ color: 'var(--text-muted)' }}>{toolStatus ? '处理中...' : '思考中...'}</span>}
                     </div>
                   </div>
                 </div>
@@ -1691,61 +1925,186 @@ export default function AgentPanel() {
             }
             return (
             <div style={{
-              margin: '0 12px', marginBottom: 4,
-              padding: '8px 10px',
-              background: 'var(--bg-warm)', border: '1px solid var(--border)', borderRadius: 6,
-              maxHeight: 320, overflowY: 'auto',
+              margin: '0 12px', marginBottom: 6,
+              padding: 10,
+              background: 'color-mix(in srgb, var(--bg-warm) 88%, var(--bg) 12%)',
+              border: '1px solid var(--border)',
+              borderRadius: 10,
+              maxHeight: 340,
+              overflowY: 'auto',
+              boxShadow: '0 8px 24px rgba(62, 48, 28, 0.06)',
             }}>
-              <div style={{
-                display: 'flex', alignItems: 'center', gap: 6,
-                marginBottom: 6,
-              }}>
-                {/* 2026-04-24 左上角回退符 · 替代底部的"关闭"按钮 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                 <button
                   onClick={() => setShowSummonMenu(false)}
                   title="收起"
                   style={{
-                    padding: '2px 5px', fontSize: 11,
-                    background: 'none', border: 'none',
+                    width: 24, height: 24, padding: 0,
+                    background: 'transparent', border: '1px solid transparent',
                     color: 'var(--text-muted)', cursor: 'pointer',
-                    display: 'inline-flex', alignItems: 'center',
-                    borderRadius: 3, flexShrink: 0,
-                    transition: 'color 180ms cubic-bezier(0.4, 0, 0.2, 1), background 180ms cubic-bezier(0.4, 0, 0.2, 1)',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    borderRadius: 6, flexShrink: 0,
+                    transition: 'color 180ms cubic-bezier(0.4, 0, 0.2, 1), background 180ms cubic-bezier(0.4, 0, 0.2, 1), border-color 180ms cubic-bezier(0.4, 0, 0.2, 1)',
                   }}
-                  onMouseEnter={e => { e.currentTarget.style.color = 'var(--accent)'; e.currentTarget.style.background = 'var(--bg-hover)' }}
-                  onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.background = 'transparent' }}
+                  onMouseEnter={e => { e.currentTarget.style.color = 'var(--accent)'; e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.borderColor = 'var(--border-light)' }}
+                  onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'transparent' }}
                 >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><polyline points="15 18 9 12 15 6"/></svg>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
                 </button>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', flex: 1 }}>
-                  {summoned.length > 0 ? (
-                    <>
-                      当前召唤（{summoned.length}/{MAX_SUMMONED}）：
-                      <span style={{ color: 'var(--accent-hover)', fontWeight: 600 }}>
-                        {summoned.map(s => s.name).join(' · ')}
-                      </span>
-                    </>
-                  ) : (
-                    <span style={{ fontSize: 10 }}>可召唤最多 {MAX_SUMMONED} 位名家 · 多人时可开辩论模式</span>
-                  )}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>召唤席</span>
+                    <span style={{
+                      fontSize: 10,
+                      color: summoned.length >= MAX_SUMMONED ? 'var(--accent-hover)' : 'var(--text-muted)',
+                      background: summoned.length > 0 ? 'var(--accent-soft)' : 'var(--bg)',
+                      border: '1px solid var(--border-light)',
+                      borderRadius: 999,
+                      padding: '1px 7px',
+                      flexShrink: 0,
+                    }}>
+                      {summoned.length}/{MAX_SUMMONED}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {summoned.length > 0 ? '选中的人物会参与下一次回答' : `最多召唤 ${MAX_SUMMONED} 位人物参与回答`}
+                  </div>
                 </div>
-                {/* 全部取消 · 仅当前会话有召唤人物时显示 */}
                 {summoned.length > 0 && (
                   <button
                     onClick={clearAll}
                     style={{
-                      padding: '2px 8px', fontSize: 10,
-                      border: '1px solid var(--accent)', borderRadius: 3,
-                      background: 'transparent', color: 'var(--accent)',
+                      padding: '4px 9px', fontSize: 10.5,
+                      border: '1px solid var(--border)', borderRadius: 7,
+                      background: 'var(--bg)', color: 'var(--text-muted)',
                       cursor: 'pointer', flexShrink: 0,
                     }}
                   >
-                    全部取消
+                    清空
                   </button>
                 )}
               </div>
 
-              {/* 辩论模式开关 + 轮数调节 · 2+ 人时显示 */}
+              {summoned.length > 0 && (
+                <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 8 }}>
+                  {summoned.map(s => (
+                    <span key={s.id} style={{
+                      display: 'inline-flex', alignItems: 'center',
+                      maxWidth: 132,
+                      padding: '3px 8px',
+                      borderRadius: 999,
+                      background: 'var(--accent-soft)',
+                      color: 'var(--accent-hover)',
+                      fontSize: 11,
+                      fontWeight: 600,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}>
+                      {s.name}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {personaList.length === 0 ? (
+                <div style={{
+                  fontSize: 11, color: 'var(--text-muted)', padding: '10px 8px',
+                  border: '1px dashed var(--border-light)', borderRadius: 8, textAlign: 'center',
+                }}>
+                  还没有蒸馏好的 skill，先去「召唤」页蒸馏一位人物。
+                </div>
+              ) : (
+                <div style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  padding: '2px 0 4px',
+                }}>
+                  {personaList.map(p => {
+                    const isSelected = summonedIds.has(p.id)
+                    const disabled = !isSelected && atCap
+                    const displayName = p.canonicalName || p.name
+                    return (
+                      <div key={p.id}
+                           onClick={() => { if (!disabled) void toggleSummon(p) }}
+                           title={p.identity || displayName}
+                           style={{
+                             minHeight: 32,
+                             padding: '6px 8px',
+                             borderRadius: 8,
+                             cursor: disabled ? 'not-allowed' : 'pointer',
+                             background: isSelected ? 'color-mix(in srgb, var(--accent-soft) 82%, var(--bg) 18%)' : 'transparent',
+                             border: `1px solid ${isSelected ? 'color-mix(in srgb, var(--accent) 48%, var(--border) 52%)' : 'transparent'}`,
+                             fontSize: 11,
+                             opacity: disabled ? 0.38 : 1,
+                             display: 'flex', alignItems: 'center', gap: 8,
+                             transition: 'border-color 180ms cubic-bezier(0.4, 0, 0.2, 1), background 180ms cubic-bezier(0.4, 0, 0.2, 1), transform 180ms cubic-bezier(0.4, 0, 0.2, 1)',
+                           }}
+                           onMouseEnter={e => {
+                             if (!disabled) {
+                               e.currentTarget.style.background = isSelected ? 'var(--accent-soft)' : 'var(--bg-hover)'
+                               e.currentTarget.style.borderColor = isSelected ? 'var(--accent)' : 'var(--border-light)'
+                             }
+                           }}
+                           onMouseLeave={e => {
+                             e.currentTarget.style.background = isSelected ? 'color-mix(in srgb, var(--accent-soft) 82%, var(--bg) 18%)' : 'transparent'
+                             e.currentTarget.style.borderColor = isSelected ? 'color-mix(in srgb, var(--accent) 48%, var(--border) 52%)' : 'transparent'
+                           }}>
+                        <div style={{
+                          width: 16, height: 16, borderRadius: 5, flexShrink: 0,
+                          border: `1.5px solid ${isSelected ? 'var(--accent)' : 'var(--border)'}`,
+                          background: isSelected ? 'var(--accent)' : 'var(--bg)',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          boxShadow: isSelected ? '0 2px 6px rgba(184, 132, 78, 0.2)' : 'none',
+                        }}>
+                          {isSelected && (
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="4 12 10 18 20 6"/>
+                            </svg>
+                          )}
+                        </div>
+                        <div style={{
+                          flex: 1, minWidth: 0,
+                          fontWeight: isSelected ? 700 : 600,
+                          color: isSelected ? 'var(--accent-hover)' : 'var(--text)',
+                          display: 'flex', alignItems: 'center', gap: 6,
+                          overflow: 'hidden',
+                        }}>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {displayName}
+                          </span>
+                        </div>
+                        {typeof p.currentFitnessTotal === 'number' && (
+                          <span style={{
+                            fontSize: 9.5,
+                            minWidth: 30,
+                            textAlign: 'center',
+                            padding: '2px 6px',
+                            borderRadius: 999,
+                            background: p.currentFitnessTotal >= 40 ? 'rgba(139,177,116,0.16)' : 'rgba(207,167,106,0.16)',
+                            color: p.currentFitnessTotal >= 40 ? 'var(--success)' : 'var(--accent-hover)',
+                            flexShrink: 0,
+                            fontWeight: 700,
+                          }}>
+                            {p.currentFitnessTotal}%
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {atCap && (
+                <div style={{
+                  fontSize: 10.5, color: 'var(--text-muted)', textAlign: 'center',
+                  margin: '5px 0 2px',
+                }}>
+                  席位已满，取消一位后可继续添加
+                </div>
+              )}
+
               {summoned.length >= 2 && (() => {
                 const debateOn = !!activeConv?.debateMode
                 const rounds = activeConv?.debateRounds || DEBATE_ROUNDS_DEFAULT
@@ -1753,73 +2112,48 @@ export default function AgentPanel() {
                 const canInc = debateOn && rounds < DEBATE_ROUNDS_MAX
                 return (
                   <div style={{
-                    padding: '6px 10px', marginBottom: 6,
-                    background: debateOn ? 'var(--accent-soft)' : 'transparent',
-                    border: `1px solid ${debateOn ? 'var(--accent)' : 'var(--border-light)'}`,
-                    borderRadius: 4,
+                    marginTop: 8,
+                    padding: '8px 10px',
+                    background: debateOn ? 'var(--accent-soft)' : 'var(--bg)',
+                    border: `1px solid ${debateOn ? 'color-mix(in srgb, var(--accent) 52%, var(--border) 48%)' : 'var(--border-light)'}`,
+                    borderRadius: 8,
                   }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <div style={{ fontSize: 10.5, color: 'var(--text-secondary)' }}>
-                        <strong style={{ color: debateOn ? 'var(--accent-hover)' : 'var(--text)' }}>
-                          {debateOn ? '⚔ 辩论模式 · 开' : '☐ 辩论模式'}
-                        </strong>
-                        <div style={{ fontSize: 9.5, color: 'var(--text-muted)', marginTop: 2 }}>
-                          {debateOn
-                            ? `你问一次 → ${rounds} 轮交锋（每位说 ${rounds} 次）`
-                            : '关 · 每次各自独立回答一次（圆桌）'}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 11.5, fontWeight: 700, color: debateOn ? 'var(--accent-hover)' : 'var(--text)' }}>
+                          辩论模式
+                        </div>
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {debateOn ? `每次提问后交锋 ${rounds} 轮` : '关闭时，各人物各自回答一次'}
                         </div>
                       </div>
-                      <button
-                        onClick={toggleDebate}
-                        style={{
-                          padding: '3px 10px', fontSize: 10, flexShrink: 0,
-                          border: `1px solid ${debateOn ? 'var(--accent)' : 'var(--border)'}`,
-                          borderRadius: 3,
-                          background: debateOn ? 'var(--accent)' : 'transparent',
-                          color: debateOn ? '#fff' : 'var(--text-muted)',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        {debateOn ? '关闭' : '开启'}
-                      </button>
-                    </div>
-                    {/* 轮数调节 · 仅辩论开启时显示 */}
-                    {debateOn && (
-                      <div style={{
-                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                        marginTop: 6, paddingTop: 6,
-                        borderTop: '1px dashed var(--border-light)',
-                      }}>
-                        <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>交锋轮数</span>
-                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                      {debateOn && (
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
                           <button
                             onClick={() => adjustRounds(-1)}
                             disabled={!canDec}
                             title={canDec ? '减少一轮' : `最少 ${DEBATE_ROUNDS_MIN} 轮`}
                             style={{
-                              width: 20, height: 20, fontSize: 12, lineHeight: 1,
+                              width: 22, height: 22, fontSize: 13, lineHeight: 1,
                               border: `1px solid ${canDec ? 'var(--accent)' : 'var(--border-light)'}`,
-                              borderRadius: 3,
-                              background: canDec ? 'transparent' : 'var(--bg-warm)',
+                              borderRadius: 6,
+                              background: canDec ? 'var(--bg)' : 'var(--bg-warm)',
                               color: canDec ? 'var(--accent)' : 'var(--text-faint)',
                               cursor: canDec ? 'pointer' : 'not-allowed',
                               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                               padding: 0,
                             }}
                           >−</button>
-                          <span style={{
-                            minWidth: 22, textAlign: 'center',
-                            fontSize: 12, fontWeight: 600, color: 'var(--accent-hover)',
-                          }}>{rounds}</span>
+                          <span style={{ minWidth: 18, textAlign: 'center', fontSize: 12, fontWeight: 700, color: 'var(--accent-hover)' }}>{rounds}</span>
                           <button
                             onClick={() => adjustRounds(1)}
                             disabled={!canInc}
                             title={canInc ? '增加一轮' : `最多 ${DEBATE_ROUNDS_MAX} 轮`}
                             style={{
-                              width: 20, height: 20, fontSize: 12, lineHeight: 1,
+                              width: 22, height: 22, fontSize: 13, lineHeight: 1,
                               border: `1px solid ${canInc ? 'var(--accent)' : 'var(--border-light)'}`,
-                              borderRadius: 3,
-                              background: canInc ? 'transparent' : 'var(--bg-warm)',
+                              borderRadius: 6,
+                              background: canInc ? 'var(--bg)' : 'var(--bg-warm)',
                               color: canInc ? 'var(--accent)' : 'var(--text-faint)',
                               cursor: canInc ? 'pointer' : 'not-allowed',
                               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -1827,84 +2161,44 @@ export default function AgentPanel() {
                             }}
                           >+</button>
                         </div>
-                      </div>
-                    )}
+                      )}
+                      <button
+                        onClick={toggleDebate}
+                        style={{
+                          width: 42, height: 24, padding: 2, flexShrink: 0,
+                          border: `1px solid ${debateOn ? 'var(--accent)' : 'var(--border)'}`,
+                          borderRadius: 999,
+                          background: debateOn ? 'var(--accent)' : 'var(--bg-warm)',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: debateOn ? 'flex-end' : 'flex-start',
+                          transition: 'background 160ms cubic-bezier(0.4, 0, 0.2, 1), justify-content 160ms cubic-bezier(0.4, 0, 0.2, 1)',
+                        }}
+                        title={debateOn ? '关闭辩论模式' : '开启辩论模式'}
+                      >
+                        <span style={{
+                          width: 18, height: 18,
+                          borderRadius: '50%',
+                          background: debateOn ? '#fff' : 'var(--text-faint)',
+                          boxShadow: '0 1px 4px rgba(0,0,0,0.16)',
+                        }} />
+                      </button>
+                    </div>
                   </div>
                 )
               })()}
 
-              {personaList.length === 0 && (
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', fontStyle: 'italic', padding: '6px 0' }}>
-                  还没有蒸馏好的 skill——先去「召唤」tab 蒸馏一位名家。
-                </div>
-              )}
-              {/* 2026-04-25 · 行紧凑化 —— 之前 identity 介绍占第二行让 popover 太长。
-                  改成单行（identity 移到 title hover），padding 收紧。 */}
-              {personaList.map(p => {
-                const isSelected = summonedIds.has(p.id)
-                const disabled = !isSelected && atCap
-                const displayName = p.canonicalName || p.name
-                return (
-                  <div key={p.id}
-                       onClick={() => { if (!disabled) void toggleSummon(p) }}
-                       title={p.identity || displayName}
-                       style={{
-                         padding: '4px 8px', marginBottom: 2, borderRadius: 4,
-                         cursor: disabled ? 'not-allowed' : 'pointer',
-                         background: isSelected ? 'var(--accent-soft)' : 'var(--bg)',
-                         border: `1px solid ${isSelected ? 'var(--accent)' : 'var(--border-light)'}`,
-                         borderLeft: isSelected ? '3px solid var(--accent)' : '1px solid var(--border-light)',
-                         fontSize: 11,
-                         opacity: disabled ? 0.4 : 1,
-                         display: 'flex', alignItems: 'center', gap: 8,
-                         transition: 'border-color 180ms cubic-bezier(0.4, 0, 0.2, 1), background 180ms cubic-bezier(0.4, 0, 0.2, 1)',
-                       }}
-                       onMouseEnter={e => { if (!isSelected && !disabled) e.currentTarget.style.borderColor = 'var(--accent)' }}
-                       onMouseLeave={e => { if (!isSelected) e.currentTarget.style.borderColor = 'var(--border-light)' }}>
-                    {/* checkbox-style 选中指示 */}
-                    <div style={{
-                      width: 13, height: 13, borderRadius: 3, flexShrink: 0,
-                      border: `1.5px solid ${isSelected ? 'var(--accent)' : 'var(--border)'}`,
-                      background: isSelected ? 'var(--accent)' : 'transparent',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    }}>
-                      {isSelected && (
-                        <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round">
-                          <polyline points="4 12 10 18 20 6"/>
-                        </svg>
-                      )}
-                    </div>
-                    <div style={{
-                      flex: 1, minWidth: 0,
-                      fontWeight: isSelected ? 600 : 500,
-                      color: isSelected ? 'var(--accent-hover)' : 'var(--text)',
-                      display: 'flex', alignItems: 'center', gap: 6,
-                      overflow: 'hidden',
-                    }}>
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {displayName}
-                      </span>
-                      {typeof p.currentFitnessTotal === 'number' && (
-                        <span style={{
-                          fontSize: 9, padding: '1px 5px', borderRadius: 8,
-                          background: p.currentFitnessTotal >= 40 ? 'var(--success)' : 'var(--warning)',
-                          color: '#fff', flexShrink: 0,
-                        }}>
-                          {p.currentFitnessTotal}%
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-              {atCap && (
-                <div style={{ fontSize: 10, color: 'var(--text-faint)', textAlign: 'center', marginTop: 6, fontStyle: 'italic' }}>
-                  已达上限（{MAX_SUMMONED} 位）· 先取消一位再加
-                </div>
-              )}
               {summoned.length > 0 && (
-                <div style={{ fontSize: 9.5, color: 'var(--text-faint)', textAlign: 'center', marginTop: 6, letterSpacing: '0.3px' }}>
-                  💡 消息里用 @{summoned[0].name} 指定单人回答 · 否则所有召唤者轮流
+                <div style={{
+                  fontSize: 10,
+                  color: 'var(--text-muted)',
+                  textAlign: 'center',
+                  marginTop: 8,
+                  paddingTop: 7,
+                  borderTop: '1px solid var(--border-light)',
+                }}>
+                  输入 @{summoned[0].name} 可指定单人回答；不指定时按召唤席轮流回应
                 </div>
               )}
             </div>
@@ -1992,7 +2286,32 @@ export default function AgentPanel() {
           + DuckDuckGo) → AI disambig from combined candidates → AI generates
           initial archive → user can refine / feed material / rename.
           Each revision carries a rigorous 5-dimension fitness score. */}
-      {tab === 'personas' && <PersonasTab />}
+      {tab === 'personas' && (
+        <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
+          <PersonasTab />
+          <div
+            title="召唤的人物是基于其著作和资料蒸馏的思维模型,非本人。建议把它当思考伙伴而非权威发言人。"
+            style={{
+              position: 'absolute',
+              right: 10,
+              bottom: 10,
+              zIndex: 20,
+              padding: '4px 8px',
+              borderRadius: 999,
+              border: '1px solid var(--border-light)',
+              background: 'color-mix(in srgb, var(--bg) 88%, transparent 12%)',
+              color: 'var(--text-faint)',
+              fontSize: 10,
+              lineHeight: 1,
+              boxShadow: '0 6px 16px rgba(58,47,31,0.06)',
+              backdropFilter: 'blur(4px)',
+              pointerEvents: 'auto',
+            }}
+          >
+            基于著作蒸馏 · 非本人
+          </div>
+        </div>
+      )}
 
       {/* Skills tab removed in batch 28 — see note at top of file. */}
 
@@ -2034,11 +2353,17 @@ export default function AgentPanel() {
               fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-secondary)',
               marginBottom: 18,
             }}>
-              确定删除「<span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>
-                {confirmingDelete.title.length > 24
-                  ? confirmingDelete.title.slice(0, 24) + '…'
-                  : confirmingDelete.title}
-              </span>」？<br />
+              {confirmingDelete.message ? (
+                <span>{confirmingDelete.message}</span>
+              ) : (
+                <>
+                  确定删除「<span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>
+                    {confirmingDelete.title.length > 24
+                      ? confirmingDelete.title.slice(0, 24) + '…'
+                      : confirmingDelete.title}
+                  </span>」？
+                </>
+              )}<br />
               <span style={{ fontSize: 11, opacity: 0.7 }}>此操作无法撤销。</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>

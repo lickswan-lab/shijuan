@@ -182,6 +182,7 @@ const EntryItem = memo(function EntryItem({ entry, multiSelect, selected, onTogg
         className={`tree-item ${isActive ? 'active' : ''} ${selected ? 'selected' : ''}`}
         onClick={() => {
           if (multiSelect) { onToggleSelect?.(entry.id); return }
+          useUiStore.getState().setMainView('reader')
           setActiveMemo(null); openEntry(entry)
         }}
         draggable={!multiSelect}
@@ -745,15 +746,17 @@ function LibraryPanel() {
     })
   }, [])
 
-  const handleBatchRemove = () => {
-    selectedIds.forEach(id => removeEntry(id))
+  const handleBatchRemove = async () => {
+    const ids = Array.from(selectedIds)
+    for (const id of ids) await removeEntry(id)
     setSelectedIds(new Set())
     setMultiSelect(false)
   }
 
-  const handleBatchDelete = () => {
+  const handleBatchDelete = async () => {
     if (!confirmBatchDelete) { setConfirmBatchDelete(true); return }
-    selectedIds.forEach(id => deleteEntry(id))
+    const ids = Array.from(selectedIds)
+    for (const id of ids) await deleteEntry(id)
     setSelectedIds(new Set())
     setMultiSelect(false)
     setConfirmBatchDelete(false)
@@ -789,8 +792,9 @@ function LibraryPanel() {
       return
     }
 
-    // Confirm with the user — batch OCR costs API tokens
-    const ok = confirm(`将对 ${items.length} 个 PDF 执行批量 OCR（顺序执行，可随时取消）\n\n继续吗？`)
+    const engine = useUiStore.getState().ocrEngine
+    const engineLabel = engine === 'rapidocr' ? '本地 RapidOCR' : 'GLM OCR'
+    const ok = confirm(`将使用 ${engineLabel} 对 ${items.length} 个 PDF 执行批量 OCR（顺序执行，可随时取消）\n\n继续吗？`)
     if (!ok) return
 
     startOcrQueue(items)
@@ -846,7 +850,7 @@ function LibraryPanel() {
   return (
     <>
       {/* Search · 2026-04-25 PERF · 用通用 IME-aware ImeInput */}
-      <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-light)' }}>
+      <div style={{ padding: '8px 10px 4px', borderBottom: '1px solid var(--border-light)' }}>
         <ImeInput
           value={searchQuery}
           onChange={setSearchQuery}
@@ -908,7 +912,7 @@ function LibraryPanel() {
       )}
 
       {/* Action buttons */}
-      <div style={{ padding: '6px 10px', display: 'flex', gap: 4, borderBottom: '1px solid var(--border-light)' }}>
+      <div style={{ padding: '3px 10px 6px', display: 'flex', gap: 4, borderBottom: '1px solid var(--border-light)' }}>
         {multiSelect ? (
           <>
             <button className="btn btn-sm" style={{ fontSize: 10 }} onClick={() => { setMultiSelect(false); setSelectedIds(new Set()); setConfirmBatchDelete(false) }}>
@@ -926,16 +930,16 @@ function LibraryPanel() {
         ) : (
           <>
             <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => importFiles()} title="导入文件">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
             </button>
             <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => importFolder()} title="导入文件夹">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="17" x2="12" y2="11"/><polyline points="9 14 12 11 15 14"/></svg>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="17" x2="12" y2="11"/><polyline points="9 14 12 11 15 14"/></svg>
             </button>
             <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={handleNewFolder} title="新建分组">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
             </button>
             <button className="btn btn-sm btn-icon" style={{ flex: 1, justifyContent: 'center', padding: '6px 0' }} onClick={() => setMultiSelect(true)} title="多选">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="5" width="14" height="14" rx="2"/><polyline points="9 12 11 14 17 8"/></svg>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}><rect x="5" y="5" width="14" height="14" rx="2.5"/><path d="m8.5 12.3 2.4 2.4 4.8-5.4"/></svg>
             </button>
           </>
         )}

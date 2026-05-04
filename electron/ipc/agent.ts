@@ -61,30 +61,108 @@ async function loadMeta(entryId: string): Promise<any> {
   }
 }
 
-// Collect ALL annotations across the entire library (for cross-doc analysis)
+function clipText(value: any, max = 300): string {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
+// Collect user-touched evidence across the library. This is intentionally NOT
+// full-text RAG: cross-document insight should grow out of what the user has
+// read, marked, annotated, or cited, instead of silently mining unread pages.
+async function collectAllEvidence(library: any): Promise<Array<{
+  type: 'annotation' | 'mark' | 'memo-block' | 'memo'
+  entryId?: string
+  entryTitle?: string
+  memoId?: string
+  memoTitle?: string
+  selectedText: string
+  notes: string[]
+  pageNumber?: number
+  createdAt: string
+  updatedAt?: string
+  weight: number
+}>> {
+  const results: any[] = []
+
+  for (const entry of (library.entries || [])) {
+    const meta = await loadMeta(entry.id)
+    for (const ann of meta?.annotations || []) {
+      const notes = (ann.historyChain || [])
+        .filter((h: any) => h.author === 'user')
+        .map((h: any) => clipText(h.content, 300))
+        .filter(Boolean)
+      results.push({
+        type: 'annotation',
+        entryId: entry.id,
+        entryTitle: entry.title,
+        selectedText: clipText(ann.anchor?.selectedText, 240),
+        notes,
+        pageNumber: ann.anchor?.pageNumber || 0,
+        createdAt: ann.createdAt || '',
+        updatedAt: ann.updatedAt,
+        weight: 3 + Math.min(notes.length, 3),
+      })
+    }
+    for (const mark of meta?.marks || []) {
+      results.push({
+        type: 'mark',
+        entryId: entry.id,
+        entryTitle: entry.title,
+        selectedText: clipText(mark.selectedText, 240),
+        notes: [`${mark.type === 'bold' ? '高光' : '划线'}标记${mark.color ? ` · ${mark.color}` : ''}`],
+        pageNumber: mark.pageNumber || 0,
+        createdAt: mark.createdAt || '',
+        weight: 2,
+      })
+    }
+  }
+
+  for (const memo of (library.memos || [])) {
+    const memoContent = clipText(memo.content, 500)
+    if (memoContent) {
+      results.push({
+        type: 'memo',
+        memoId: memo.id,
+        memoTitle: memo.title,
+        selectedText: memoContent,
+        notes: [],
+        createdAt: memo.createdAt || '',
+        updatedAt: memo.updatedAt,
+        weight: 2 + Math.min(Math.floor(memoContent.length / 120), 4),
+      })
+    }
+    for (const block of memo.blocks || []) {
+      results.push({
+        type: 'memo-block',
+        entryId: block.entryId,
+        entryTitle: block.entryTitle,
+        memoId: memo.id,
+        memoTitle: memo.title,
+        selectedText: clipText(block.selectedText, 220),
+        notes: [clipText(block.blockContent, 300)].filter(Boolean),
+        createdAt: memo.updatedAt || memo.createdAt || '',
+        weight: 4,
+      })
+    }
+  }
+
+  return results
+}
+
+// Back-compat helper for older tools that still think in "annotations".
 async function collectAllAnnotations(library: any): Promise<Array<{
   entryId: string; entryTitle: string; selectedText: string; notes: string[];
   pageNumber: number; createdAt: string;
 }>> {
-  const results: any[] = []
-  for (const entry of (library.entries || [])) {
-    const meta = await loadMeta(entry.id)
-    if (!meta?.annotations) continue
-    for (const ann of meta.annotations) {
-      const notes = (ann.historyChain || [])
-        .filter((h: any) => h.author === 'user')
-        .map((h: any) => h.content?.slice(0, 300) || '')
-      results.push({
-        entryId: entry.id,
-        entryTitle: entry.title,
-        selectedText: ann.anchor?.selectedText?.slice(0, 200) || '',
-        notes,
-        pageNumber: ann.anchor?.pageNumber || 0,
-        createdAt: ann.createdAt || '',
-      })
-    }
-  }
-  return results
+  return (await collectAllEvidence(library))
+    .filter((item: any) => item.entryId)
+    .map((item: any) => ({
+      entryId: item.entryId,
+      entryTitle: item.entryTitle,
+      selectedText: item.selectedText,
+      notes: item.notes,
+      pageNumber: item.pageNumber || 0,
+      createdAt: item.createdAt,
+    }))
 }
 
 async function readOcrText(absPath: string): Promise<string | null> {
@@ -93,6 +171,96 @@ async function readOcrText(absPath: string): Promise<string | null> {
     return await fs.readFile(ocrPath, 'utf-8')
   } catch {
     return null
+  }
+}
+
+function toTime(value: any): number {
+  const time = value ? new Date(value).getTime() : 0
+  return Number.isFinite(time) ? time : 0
+}
+
+async function buildReadingState(library: any, days = 14): Promise<any> {
+  const safeDays = Math.max(1, Math.min(Number(days) || 14, 90))
+  const cutoff = Date.now() - safeDays * 86400000
+  const evidence = await collectAllEvidence(library)
+  const recentEvidence = evidence.filter(item => Math.max(toTime(item.createdAt), toTime(item.updatedAt)) >= cutoff)
+  const evidenceByEntry = new Map<string, { count: number; weight: number; latest: number }>()
+  for (const item of evidence) {
+    if (!item.entryId) continue
+    const prev = evidenceByEntry.get(item.entryId) || { count: 0, weight: 0, latest: 0 }
+    prev.count += 1
+    prev.weight += item.weight || 1
+    prev.latest = Math.max(prev.latest, toTime(item.updatedAt), toTime(item.createdAt))
+    evidenceByEntry.set(item.entryId, prev)
+  }
+
+  const entries = (library.entries || []).map((entry: any) => {
+    const stats = entry.readingStats || {}
+    const ev = evidenceByEntry.get(entry.id) || { count: 0, weight: 0, latest: 0 }
+    const lastAt = Math.max(toTime(stats.lastAt), toTime(entry.lastOpenedAt), ev.latest)
+    return {
+      id: entry.id,
+      title: entry.title,
+      authors: entry.authors || [],
+      tags: entry.tags || [],
+      lastAt: lastAt ? new Date(lastAt).toISOString() : null,
+      totalMinutes: Math.round((stats.totalMs || 0) / 60000),
+      sessionCount: stats.sessionCount || 0,
+      evidenceCount: ev.count,
+      evidenceWeight: ev.weight,
+      touchedRecently: lastAt >= cutoff,
+      depth: ev.weight >= 10 ? 'deep' : ev.weight >= 4 ? 'active' : ev.count > 0 ? 'light' : 'opened',
+    }
+  })
+
+  const activeEntries = entries
+    .filter((entry: any) => entry.touchedRecently)
+    .sort((a: any, b: any) => (toTime(b.lastAt) - toTime(a.lastAt)) || (b.evidenceWeight - a.evidenceWeight))
+    .slice(0, 20)
+
+  const topEvidenceEntries = entries
+    .filter((entry: any) => entry.evidenceCount > 0)
+    .sort((a: any, b: any) => b.evidenceWeight - a.evidenceWeight)
+    .slice(0, 12)
+
+  const openedWithoutEvidence = entries
+    .filter((entry: any) => entry.totalMinutes > 0 && entry.evidenceCount === 0)
+    .sort((a: any, b: any) => b.totalMinutes - a.totalMinutes)
+    .slice(0, 8)
+
+  const memos = (library.memos || [])
+    .filter((memo: any) => Math.max(toTime(memo.updatedAt), toTime(memo.createdAt)) >= cutoff)
+    .sort((a: any, b: any) => toTime(b.updatedAt) - toTime(a.updatedAt))
+    .slice(0, 12)
+    .map((memo: any) => ({
+      id: memo.id,
+      title: memo.title,
+      updatedAt: memo.updatedAt,
+      blockCount: (memo.blocks || []).length,
+      preview: clipText(memo.content, 180),
+    }))
+
+  return {
+    windowDays: safeDays,
+    activeEntryCount: activeEntries.length,
+    touchedEvidenceCount: evidence.length,
+    recentEvidenceCount: recentEvidence.length,
+    activeEntries,
+    topEvidenceEntries,
+    openedWithoutEvidence,
+    recentEvidence: recentEvidence
+      .sort((a, b) => Math.max(toTime(b.updatedAt), toTime(b.createdAt)) - Math.max(toTime(a.updatedAt), toTime(a.createdAt)))
+      .slice(0, 20)
+      .map(item => ({
+        type: item.type,
+        entryTitle: item.entryTitle,
+        memoTitle: item.memoTitle,
+        text: clipText(item.selectedText, 120),
+        note: clipText(item.notes?.[0], 120),
+        createdAt: item.createdAt,
+      })),
+    memos,
+    principle: 'This state is derived from user-touched evidence: opens, reading stats, annotations, marks, memo blocks, and memo edits.',
   }
 }
 
@@ -147,10 +315,43 @@ async function executeTool(toolName: string, argsJson: string): Promise<string> 
     case 'get_document_text': {
       const entry = (library.entries || []).find((e: any) => e.id === args.entryId)
       if (!entry) return JSON.stringify({ error: '文献未找到' })
-      const text = await readOcrText(entry.absPath)
-      if (!text) return JSON.stringify({ error: '该文献无 OCR 文本' })
-      // Truncate to ~8000 chars to avoid blowing up context
-      return JSON.stringify({ title: entry.title, text: text.slice(0, 8000), truncated: text.length > 8000 })
+      const evidence = (await collectAllEvidence(library))
+        .filter(item => item.entryId === entry.id)
+        .sort((a, b) => (b.weight - a.weight) || (toTime(b.createdAt) - toTime(a.createdAt)))
+
+      if (args.scope === 'full' && args.confirmedByUser === true) {
+        const text = await readOcrText(entry.absPath)
+        if (!text) return JSON.stringify({ error: '该文献无 OCR 文本' })
+        return JSON.stringify({
+          title: entry.title,
+          scope: 'full_ocr_explicit',
+          warning: 'Full OCR was returned only because the user explicitly asked for full-text work.',
+          text: text.slice(0, 8000),
+          truncated: text.length > 8000,
+        })
+      }
+
+      if (evidence.length === 0) {
+        return JSON.stringify({
+          title: entry.title,
+          scope: 'user_touched',
+          evidence: [],
+          note: '该文献尚无用户标记/注释/笔记引用；按拾卷证据边界，不主动读取未触达全文。',
+        })
+      }
+
+      return JSON.stringify({
+        title: entry.title,
+        scope: 'user_touched',
+        evidenceCount: evidence.length,
+        evidence: evidence.slice(0, 30).map(item => ({
+          type: item.type,
+          page: item.pageNumber,
+          text: item.selectedText,
+          notes: item.notes,
+          createdAt: item.createdAt,
+        })),
+      })
     }
 
     case 'list_memos': {
@@ -172,61 +373,66 @@ async function executeTool(toolName: string, argsJson: string): Promise<string> 
     }
 
     case 'get_reading_activity': {
-      // 2026-04-28 · readingLog 功能已删,这个 Hermes tool 返回空。
-      //   未来如果做"按概念检索我的笔记"那种约束版,可以从这里重新挂上。
-      return JSON.stringify({
-        count: 0,
-        logs: [],
-        note: 'reading log feature is deprecated',
-      })
+      return JSON.stringify(await buildReadingState(library, args.days || 14))
+    }
+
+    case 'get_reading_state': {
+      return JSON.stringify(await buildReadingState(library, args.days || 14))
     }
 
     case 'build_knowledge_map': {
-      const allAnns = await collectAllAnnotations(library)
-      if (allAnns.length === 0) return JSON.stringify({ error: '文献库中暂无注释' })
-      // Group by entry, include notes
+      const evidence = await collectAllEvidence(library)
+      if (evidence.length === 0) return JSON.stringify({ error: '文献库中暂无用户触达证据' })
+      // Group by entry/memo, include notes.
       const byEntry: Record<string, any[]> = {}
-      for (const a of allAnns) {
-        if (!byEntry[a.entryTitle]) byEntry[a.entryTitle] = []
-        byEntry[a.entryTitle].push({ text: a.selectedText, notes: a.notes, page: a.pageNumber })
+      for (const item of evidence) {
+        const title = item.entryTitle || `笔记：${item.memoTitle || '未命名笔记'}`
+        if (!byEntry[title]) byEntry[title] = []
+        byEntry[title].push({ type: item.type, text: item.selectedText, notes: item.notes, page: item.pageNumber, weight: item.weight })
       }
       // Truncate to fit context
       const summary = Object.entries(byEntry).slice(0, 15).map(([title, anns]) =>
         `### ${title}\n${(anns as any[]).slice(0, 8).map(a =>
-          `- p${a.page}「${a.text.slice(0, 80)}」${a.notes.length > 0 ? ' → ' + a.notes[0].slice(0, 100) : ''}`
+          `- ${a.type}${a.page ? ` p${a.page}` : ''}「${clipText(a.text, 90)}」${a.notes.length > 0 ? ' → ' + clipText(a.notes[0], 110) : ''}`
         ).join('\n')}`
       ).join('\n\n')
-      return JSON.stringify({ totalEntries: Object.keys(byEntry).length, totalAnnotations: allAnns.length, annotationSummary: summary })
+      return JSON.stringify({
+        totalNodes: Object.keys(byEntry).length,
+        totalEvidence: evidence.length,
+        evidenceSummary: summary,
+        principle: 'Only user-touched evidence is included: annotations, marks, memo blocks, and memo text.',
+      })
     }
 
     case 'generate_exam': {
-      const allAnns = await collectAllAnnotations(library)
-      if (allAnns.length === 0) return JSON.stringify({ error: '文献库中暂无注释，无法生成考题' })
-      // Group by entry with note counts to show depth
+      const allAnns = await collectAllEvidence(library)
+      if (allAnns.length === 0) return JSON.stringify({ error: '文献库中暂无用户触达证据，无法生成考题' })
+      // Group by entry with evidence counts to show depth
       const entryStats = new Map<string, { count: number; notes: string[] }>()
       for (const a of allAnns) {
-        const stat = entryStats.get(a.entryTitle) || { count: 0, notes: [] }
+        const title = a.entryTitle || `笔记：${a.memoTitle || '未命名笔记'}`
+        const stat = entryStats.get(title) || { count: 0, notes: [] }
         stat.count++
         if (a.notes.length > 0) stat.notes.push(...a.notes.slice(0, 2))
-        entryStats.set(a.entryTitle, stat)
+        entryStats.set(title, stat)
       }
       const overview = [...entryStats.entries()].sort((a, b) => b[1].count - a[1].count).slice(0, 15).map(([title, stat]) =>
         `- 「${title}」: ${stat.count} 条注释，笔记摘录：${stat.notes.slice(0, 3).map(n => n.slice(0, 60)).join('；') || '无'}`
       ).join('\n')
-      return JSON.stringify({ totalAnnotations: allAnns.length, entriesAnalyzed: entryStats.size, readingOverview: overview })
+      return JSON.stringify({ totalEvidence: allAnns.length, entriesAnalyzed: entryStats.size, readingOverview: overview })
     }
 
     case 'build_paper_outline': {
       const topic = args.topic || ''
       if (!topic) return JSON.stringify({ error: '请提供论文主题' })
-      const allAnns = await collectAllAnnotations(library)
+      const allAnns = await collectAllEvidence(library)
       // Filter annotations related to the topic
       const relevant = allAnns.filter(a =>
-        a.selectedText.includes(topic) || a.notes.some(n => n.includes(topic)) || a.entryTitle.includes(topic)
+        a.selectedText.includes(topic) || a.notes.some(n => n.includes(topic)) || (a.entryTitle || '').includes(topic) || (a.memoTitle || '').includes(topic)
       )
-      if (relevant.length === 0) return JSON.stringify({ error: `未找到与「${topic}」相关的注释，尝试更宽泛的关键词` })
+      if (relevant.length === 0) return JSON.stringify({ error: `未找到与「${topic}」相关的用户触达证据，尝试更宽泛的关键词` })
       const materials = relevant.slice(0, 20).map(a =>
-        `- 来自「${a.entryTitle}」p${a.pageNumber}：「${a.selectedText.slice(0, 100)}」${a.notes.length > 0 ? '\n  我的笔记：' + a.notes[0].slice(0, 150) : ''}`
+        `- 来自「${a.entryTitle || a.memoTitle}」${a.pageNumber ? `p${a.pageNumber}` : ''}：「${clipText(a.selectedText, 110)}」${a.notes.length > 0 ? '\n  我的笔记：' + clipText(a.notes[0], 160) : ''}`
       ).join('\n')
       return JSON.stringify({ topic, relevantCount: relevant.length, materials })
     }
@@ -234,19 +440,20 @@ async function executeTool(toolName: string, argsJson: string): Promise<string> 
     case 'trace_concept_evolution': {
       const concept = args.concept || ''
       if (!concept) return JSON.stringify({ error: '请提供要追踪的概念' })
-      const allAnns = await collectAllAnnotations(library)
+      const allAnns = await collectAllEvidence(library)
       // Find annotations mentioning the concept, sorted by time
       const matches = allAnns
         .filter(a => a.selectedText.includes(concept) || a.notes.some(n => n.includes(concept)))
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-      if (matches.length === 0) return JSON.stringify({ error: `未找到与「${concept}」相关的注释` })
+      if (matches.length === 0) return JSON.stringify({ error: `未找到与「${concept}」相关的用户触达证据` })
       const timeline = matches.slice(0, 20).map(a => ({
         date: a.createdAt.slice(0, 10),
         time: a.createdAt.slice(11, 16),
-        entry: a.entryTitle,
+        entry: a.entryTitle || a.memoTitle,
         page: a.pageNumber,
-        text: a.selectedText.slice(0, 100),
-        myNote: a.notes[0]?.slice(0, 150) || '',
+        evidenceType: a.type,
+        text: clipText(a.selectedText, 110),
+        myNote: clipText(a.notes[0], 160),
       }))
       return JSON.stringify({ concept, matchCount: matches.length, timeline })
     }

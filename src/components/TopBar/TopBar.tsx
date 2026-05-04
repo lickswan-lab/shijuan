@@ -5,6 +5,15 @@ import { generateBibTeX, generateRIS } from '../../utils/citations'
 import { invalidateAiConfigCache } from '../../utils/aiConfigCache'
 
 const ONLINE_SEARCH_LOCKED = true
+const AI_CONTEXT_PRESETS: Array<{ label: string; value: number }> = [
+  { label: '1000字', value: 1000 },
+  { label: '2000字', value: 2000 },
+  { label: '5000字', value: 5000 },
+  { label: '10000字', value: 10000 },
+  { label: '全文', value: -1 },
+]
+const AI_CONTEXT_PRESET_VALUES = AI_CONTEXT_PRESETS.map(opt => opt.value)
+const DEFAULT_CUSTOM_AI_CONTEXT_WINDOW = 3000
 
 // ===== Auto Update Panel =====
 function UpdatePanel() {
@@ -69,13 +78,11 @@ function UpdatePanel() {
   }, [])
 
   return (
-    <div style={{
-      padding: '12px 14px', marginBottom: 8, borderRadius: 8,
-      border: '1px solid var(--border)', background: 'var(--bg-warm)',
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-        <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>软件更新</div>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+    <div className="settings-section">
+      <div className="settings-section-inner">
+      <div className="settings-section-heading">
+        <div className="settings-section-title">软件更新</div>
+        <span className="settings-section-meta">
           当前版本 {info?.currentVersion || '...'}
         </span>
       </div>
@@ -144,6 +151,7 @@ function UpdatePanel() {
           <button className="btn btn-sm" style={{ fontSize: 11 }} onClick={handleCheck}>重试</button>
         </div>
       )}
+      </div>
     </div>
   )
 }
@@ -202,16 +210,15 @@ function DiagnosticPanel() {
   }, [info])
 
   return (
-    <div style={{
-      padding: '12px 14px', marginBottom: 8, borderRadius: 8,
-      border: '1px solid var(--border)', background: 'var(--bg-warm)',
-    }}>
+    <div className="settings-section">
+      <div className="settings-section-inner">
       <div
-        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+        className="settings-section-heading"
+        style={{ cursor: 'pointer' }}
         onClick={handleToggle}
       >
-        <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>诊断信息</div>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+        <div className="settings-section-title">诊断信息</div>
+        <span className="settings-section-meta">
           {expanded ? '▾ 收起' : '▸ 展开（反馈问题时点开复制）'}
         </span>
       </div>
@@ -277,6 +284,7 @@ function DiagnosticPanel() {
           )}
         </div>
       )}
+      </div>
     </div>
   )
 }
@@ -381,7 +389,7 @@ function DataExportPanel() {
       const result = await window.electronAPI.exportFullBackup()
       if (result.success && result.stats) {
         const s = result.stats
-        setStatus(`✓ 已备份 ${s.entryCount} 文献 / ${s.memoCount} 笔记 / ${s.metaCount} 注释文件 / ${s.apprenticeCount} 周报`)
+        setStatus(`✓ 已备份 ${s.entryCount} 文献 / ${s.memoCount} 笔记 / ${s.metaCount} 注释文件 / ${s.apprenticeCount} 学徒记录`)
       } else if (result.error) {
         setStatus(`备份失败：${result.error}`)
       }
@@ -391,18 +399,16 @@ function DataExportPanel() {
   }, [])
 
   return (
-    <div style={{
-      padding: '12px 14px', marginBottom: 8, borderRadius: 8,
-      border: '1px solid var(--border)', background: 'var(--bg-warm)',
-    }}>
-      <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)', marginBottom: 4 }}>
-        数据导出
+    <div className="settings-section">
+      <div className="settings-section-inner">
+      <div className="settings-section-title" style={{ marginBottom: 4 }}>
+        数据迁移与备份
       </div>
-      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10, lineHeight: 1.5 }}>
+      <div className="settings-section-desc" style={{ marginBottom: 10 }}>
         文献库 {entryCount} 条 · 笔记 {memoCount} 条。<br />
         从 Zotero 迁移：<strong>Zotero 右键文献库 → Export Library → BibTeX（勾选 Export Files）</strong> → 这里点导入
       </div>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+      <div className="settings-button-row" style={{ marginBottom: 8 }}>
         <button
           className="btn btn-sm btn-primary"
           style={{ fontSize: 11 }}
@@ -413,7 +419,7 @@ function DataExportPanel() {
           导入 BibTeX (.bib)
         </button>
       </div>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: status ? 10 : 0 }}>
+      <div className="settings-button-row" style={{ marginBottom: status ? 10 : 0 }}>
         <button
           className="btn btn-sm"
           style={{ fontSize: 11 }}
@@ -443,14 +449,11 @@ function DataExportPanel() {
         </button>
       </div>
       {status && (
-        <div style={{
-          fontSize: 11,
-          color: status.startsWith('✓') ? 'var(--success)' : 'var(--danger)',
-          wordBreak: 'break-all',
-        }}>
+        <div className="settings-status" style={{ color: status.startsWith('✓') ? 'var(--success)' : 'var(--danger)' }}>
           {status}
         </div>
       )}
+      </div>
     </div>
   )
 }
@@ -479,6 +482,8 @@ export default function TopBar() {
   const hermesHasInsight = useUiStore(s => s.hermesHasInsight)
   const darkMode = useUiStore(s => s.darkMode)
   const toggleDarkMode = useUiStore(s => s.toggleDarkMode)
+  const mainView = useUiStore(s => s.mainView)
+  const setMainView = useUiStore(s => s.setMainView)
   // 2026-04-28 · AI 上下文范围按钮:之前用 useUiStore.getState() 读快照不订阅
   //   store 变更,导致用户点击按钮后高亮不切换(必须刷新页面)。改订阅式读取
   //   让 React 响应 state 变化重新渲染。
@@ -505,6 +510,41 @@ export default function TopBar() {
   // window-chrome dialog. Auto-dismisses after 2.5s; consecutive clicks reset
   // the timer so spam-clicks don't pile up multiple toasts.
   const [lockedHint, setLockedHint] = useState<string | null>(null)
+  const isCustomContextWindow = aiContextWindow > 0 && !AI_CONTEXT_PRESET_VALUES.includes(aiContextWindow)
+  const [customContextDraft, setCustomContextDraft] = useState(() => (
+    isCustomContextWindow ? String(aiContextWindow) : ''
+  ))
+  const [customContextOpen, setCustomContextOpen] = useState(isCustomContextWindow)
+
+  useEffect(() => {
+    if (isCustomContextWindow) {
+      setCustomContextDraft(String(aiContextWindow))
+      setCustomContextOpen(true)
+    }
+  }, [aiContextWindow, isCustomContextWindow])
+
+  const commitCustomContextWindow = useCallback((raw = customContextDraft) => {
+    const trimmed = raw.trim()
+    if (!trimmed) {
+      setCustomContextDraft(isCustomContextWindow ? String(aiContextWindow) : '')
+      return
+    }
+    const parsed = Number(trimmed)
+    if (!Number.isFinite(parsed)) return
+    const next = Math.min(200000, Math.max(100, Math.round(parsed)))
+    setCustomContextDraft(String(next))
+    setAiContextWindow(next)
+  }, [aiContextWindow, customContextDraft, isCustomContextWindow, setAiContextWindow])
+
+  const openCustomContextWindow = useCallback(() => {
+    const draft = isCustomContextWindow
+      ? String(aiContextWindow)
+      : (customContextDraft || String(DEFAULT_CUSTOM_AI_CONTEXT_WINDOW))
+    setCustomContextDraft(draft)
+    setCustomContextOpen(true)
+    commitCustomContextWindow(draft)
+  }, [aiContextWindow, commitCustomContextWindow, customContextDraft, isCustomContextWindow])
+
   useEffect(() => {
     if (!lockedHint) return
     const t = setTimeout(() => setLockedHint(null), 2500)
@@ -597,6 +637,28 @@ export default function TopBar() {
           )}
         </button>
 
+        {/* Reading graph */}
+        <button
+          className="btn btn-sm btn-icon"
+          onClick={() => setMainView(mainView === 'graph' ? 'reader' : 'graph')}
+          title="阅读图谱"
+          style={{
+            padding: '6px 9px',
+            marginRight: 4,
+            color: mainView === 'graph' ? 'var(--accent-hover)' : 'var(--text-muted)',
+            background: mainView === 'graph' ? 'var(--accent-soft)' : 'transparent',
+          }}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="6" cy="6" r="3" />
+            <circle cx="18" cy="6" r="3" />
+            <circle cx="12" cy="18" r="3" />
+            <path d="M8.6 7.6 10.8 15" />
+            <path d="M15.4 7.6 13.2 15" />
+            <path d="M9 6h6" />
+          </svg>
+        </button>
+
         {/* Hermes Agent button */}
         <button
           className="btn btn-sm btn-icon"
@@ -687,11 +749,23 @@ export default function TopBar() {
 
       {showSettings && (
         <div className="modal-overlay" onClick={() => setShowSettings(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 520, maxHeight: '80vh', overflow: 'auto' }}>
-            <h3>设置</h3>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14, lineHeight: 1.7 }}>
-              配置各 AI 供应商的 API Key。OCR 功能需要智谱 GLM，问答对话支持所有已配置的模型。
-            </div>
+          <div className="modal settings-modal" onClick={e => e.stopPropagation()}>
+            <div className="settings-modal-body">
+              <div className="settings-header">
+                <div>
+                  <div className="settings-eyebrow">偏好与数据</div>
+                  <h3 className="settings-title">设置</h3>
+                  <p className="settings-subtitle">
+                    管理 AI 模型、上下文范围、数据迁移、更新和诊断信息。OCR 目前需要智谱 GLM；问答可使用任一已配置模型。
+                  </p>
+                </div>
+                <div className="settings-health-card">
+                  <span>AI 已配置</span>
+                  <strong>{configuredCount}<em>/{providers.length || '...'}</em></strong>
+                </div>
+              </div>
+
+              <div className="settings-content">
 
             {/* Collapsible AI providers section — header is always visible and
                 summarizes "X 已配置 / Y 个供应商"; click to expand the full
@@ -702,48 +776,23 @@ export default function TopBar() {
                 content height even though it varies with provider count, so
                 the panel doesn't get a clipped tail or arrive late. Easing is
                 a slight overshoot-free cubic-bezier that feels paper-soft. */}
-            <div style={{
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              marginBottom: 14,
-              background: providersExpanded ? 'transparent' : 'var(--bg-warm)',
-              overflow: 'hidden',
-              transition: 'background 0.28s ease',
-            }}>
+            <div className={`settings-section settings-provider-group ${providersExpanded ? 'is-expanded' : ''}`}>
               <button
+                className="settings-provider-toggle"
                 onClick={() => setProvidersExpanded(v => !v)}
-                style={{
-                  width: '100%', padding: '10px 14px',
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  background: 'transparent', border: 'none', cursor: 'pointer',
-                  fontFamily: 'inherit', textAlign: 'left',
-                  transition: 'background 0.18s ease',
-                }}
-                onMouseEnter={e => { if (!providersExpanded) e.currentTarget.style.background = 'var(--border-light)' }}
-                onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
                 title={providersExpanded ? '收起 AI 供应商列表' : '展开 AI 供应商列表'}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
+                <div className="settings-provider-toggle-main">
+                  <span className="settings-section-title">
                     AI 供应商 · API Key
                   </span>
-                  <span style={{
-                    fontSize: 10.5, padding: '1.5px 8px', borderRadius: 10,
-                    background: providers.some(p => p.hasKey) ? 'var(--accent-soft, rgba(193,140,87,0.15))' : 'var(--bg-warm)',
-                    color: providers.some(p => p.hasKey) ? 'var(--accent)' : 'var(--text-muted)',
-                    border: providers.some(p => p.hasKey) ? '1px solid var(--accent)' : '1px solid var(--border)',
-                    fontWeight: 500, whiteSpace: 'nowrap',
-                    transition: 'background 0.28s ease, color 0.28s ease, border-color 0.28s ease',
-                  }}>
-                    {providers.filter(p => p.hasKey).length} / {providers.length} 已配置
+                  <span className={`settings-provider-chip ${providers.some(p => p.hasKey) ? 'is-ready' : ''}`}>
+                    {providers.filter(p => p.hasKey).length} / {providers.length || '...'} 已配置
                   </span>
                   {/* Configured-list summary — fades smoothly when transitioning,
                       kept rendered the whole time so we can opacity-tween it. */}
                   {providers.filter(p => p.hasKey).length > 0 && (
-                    <span style={{
-                      fontSize: 11, color: 'var(--text-muted)',
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      minWidth: 0,
+                    <span className="settings-provider-summary" style={{
                       opacity: providersExpanded ? 0 : 1,
                       transform: providersExpanded ? 'translateX(-4px)' : 'translateX(0)',
                       maxWidth: providersExpanded ? 0 : 360,
@@ -756,11 +805,10 @@ export default function TopBar() {
                 </div>
                 {/* Chevron — rotates smoothly with paper-soft easing */}
                 <svg
+                  className="settings-chevron"
                   width="14" height="14" viewBox="0 0 24 24" fill="none"
                   stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
                   style={{
-                    color: 'var(--text-muted)', flexShrink: 0,
-                    transition: 'transform 0.32s cubic-bezier(.4, 0, .2, 1)',
                     transform: providersExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
                   }}
                 >
@@ -771,14 +819,12 @@ export default function TopBar() {
               {/* Animated container: grid-rows trick for height, plus opacity +
                   Y-fade on the inner content. Always rendered (no conditional)
                   so the height tween has both endpoints to interpolate. */}
-              <div style={{
-                display: 'grid',
-                gridTemplateRows: providersExpanded ? '1fr' : '0fr',
-                transition: 'grid-template-rows 0.34s cubic-bezier(.4, 0, .2, 1)',
-              }}>
-                <div style={{ minHeight: 0, overflow: 'hidden' }}>
-                  <div style={{
-                    padding: '0 14px 14px',
+              <div
+                className="settings-provider-body"
+                style={{ gridTemplateRows: providersExpanded ? '1fr' : '0fr' }}
+              >
+                <div className="settings-provider-body-clip">
+                  <div className="settings-provider-body-inner" style={{
                     opacity: providersExpanded ? 1 : 0,
                     transform: providersExpanded ? 'translateY(0)' : 'translateY(-6px)',
                     transition: providersExpanded
@@ -786,12 +832,8 @@ export default function TopBar() {
                       : 'opacity 0.18s ease, transform 0.22s ease',
                     pointerEvents: providersExpanded ? 'auto' : 'none',
                   }}>
-                  <div style={{
-                    fontSize: 11, color: 'var(--text-secondary)',
-                    background: 'var(--bg-warm)', border: '1px solid var(--border-light)',
-                    borderRadius: 6, padding: '8px 12px', marginBottom: 12, lineHeight: 1.7,
-                  }}>
-                    <strong style={{ color: 'var(--text)' }}>💡 第一次使用？</strong>
+                  <div className="settings-callout">
+                    <strong>第一次使用？</strong>
                     任选一家配置即可。推荐 <strong>智谱 GLM</strong>（GLM-4-Flash 免费，注册即送额度）或
                     <strong>DeepSeek</strong>（按量付费便宜，大陆直连）。各卡片下方有"获取 Key"链接直接跳转。
                     不想配 Key？看最下方的 <strong>Ollama</strong>（本地跑）或 <strong>Claude Code CLI</strong>（复用本机登录）。
@@ -800,36 +842,29 @@ export default function TopBar() {
                   {providers.map(provider => (
               <div
                 key={provider.id}
-                style={{
-                  padding: '12px 14px', marginBottom: 8, borderRadius: 8,
-                  border: `1px solid ${provider.hasKey ? 'var(--success)' : 'var(--border)'}`,
-                  background: provider.hasKey ? 'rgba(76,175,80,0.04)' : 'var(--bg-warm)',
-                }}
+                className={`settings-provider-card ${provider.hasKey ? 'is-configured' : ''}`}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>
+                <div className="settings-provider-card-head">
+                  <div className="settings-provider-name">
                     {provider.name}
                     {provider.id === 'glm' && (
                       <>
-                        <span style={{
-                          fontSize: 10, color: '#fff', background: 'var(--accent)',
-                          marginLeft: 6, padding: '1px 6px', borderRadius: 8, fontWeight: 600,
-                        }}>推荐起步</span>
-                        <span style={{ fontSize: 10, color: 'var(--accent)', marginLeft: 6 }}>OCR 必需</span>
+                        <span className="settings-badge settings-badge-primary">推荐起步</span>
+                        <span className="settings-badge settings-badge-muted">OCR 必需</span>
                       </>
                     )}
-                    {provider.noKey && <span style={{ fontSize: 10, color: 'var(--success)', marginLeft: 6 }}>零 Key · 本地运行</span>}
+                    {provider.noKey && <span className="settings-badge settings-badge-success">零 Key · 本地运行</span>}
                   </div>
                   {provider.noKey ? (
                     provider.hasKey ? (
-                      <span style={{ fontSize: 11, color: 'var(--success)' }}>✓ 已连接（{provider.models.length} 个模型）</span>
+                      <span className="settings-provider-state is-ready">✓ 已连接（{provider.models.length} 个模型）</span>
                     ) : (
-                      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>未检测到</span>
+                      <span className="settings-provider-state">未检测到</span>
                     )
                   ) : (
                     provider.hasKey ? (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <span style={{ fontSize: 11, color: 'var(--success)' }}>✓ 已配置</span>
+                        <span className="settings-provider-state is-ready">✓ 已配置</span>
                         <button
                           className="btn btn-sm"
                           style={{ fontSize: 10, padding: '2px 8px', color: 'var(--text-muted)' }}
@@ -839,7 +874,7 @@ export default function TopBar() {
                         </button>
                       </div>
                     ) : (
-                      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>未配置</span>
+                      <span className="settings-provider-state">未配置</span>
                     )
                   )}
                 </div>
@@ -897,17 +932,14 @@ export default function TopBar() {
                       模型：{provider.models.map(m => m.name).join('、')}
                     </div>
 
-                    <div style={{ display: 'flex', gap: 6 }}>
+                    <div style={{ display: 'flex', gap: 8 }}>
                       <input
+                        className="settings-key-input"
                         type="password"
                         placeholder={provider.hasKey ? '输入新 Key 可更新' : '输入 API Key'}
                         value={keyInputs[provider.id] || ''}
                         onChange={e => setKeyInputs(prev => ({ ...prev, [provider.id]: e.target.value }))}
                         onKeyDown={e => { if (e.key === 'Enter') handleSaveKey(provider.id) }}
-                        style={{
-                          flex: 1, padding: '5px 10px', border: '1px solid var(--border)',
-                          borderRadius: 4, fontSize: 12, outline: 'none', background: 'var(--bg)',
-                        }}
                       />
                       <button
                         className="btn btn-sm btn-primary"
@@ -953,41 +985,58 @@ export default function TopBar() {
             {/* Dual-page mode setting — hidden for now, feature in development */}
 
             {/* AI Context Window Setting */}
-            <div style={{
-              padding: '12px 14px', marginBottom: 8, borderRadius: 8,
-              border: '1px solid var(--border)', background: 'var(--bg-warm)',
-            }}>
-              <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)', marginBottom: 8 }}>
+            <div className="settings-section">
+              <div className="settings-section-inner">
+              <div className="settings-section-title">
                 AI 上下文范围
               </div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+              <div className="settings-section-desc">
                 AI 回答时参考选中文字前后多少字的文献内容。范围越大理解越完整，但消耗更多 token。
               </div>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {[
-                  { label: '1000字', value: 1000 },
-                  { label: '2000字', value: 2000 },
-                  { label: '5000字', value: 5000 },
-                  { label: '10000字', value: 10000 },
-                  { label: '全文', value: -1 },
-                ].map(opt => {
+              <div className="settings-segmented">
+                {AI_CONTEXT_PRESETS.map(opt => {
                   const active = aiContextWindow === opt.value
                   return (
                     <button
                       key={opt.value}
-                      onClick={() => setAiContextWindow(opt.value)}
-                      style={{
-                        padding: '5px 12px', fontSize: 12, borderRadius: 6, cursor: 'pointer',
-                        border: active ? '1.5px solid var(--accent)' : '1px solid var(--border)',
-                        background: active ? 'var(--accent-soft)' : 'var(--bg)',
-                        color: active ? 'var(--accent-hover)' : 'var(--text-secondary)',
-                        fontWeight: active ? 600 : 400,
+                      className={`settings-choice ${active ? 'is-active' : ''}`}
+                      onClick={() => {
+                        setCustomContextOpen(false)
+                        setAiContextWindow(opt.value)
                       }}
                     >
                       {opt.label}
                     </button>
                   )
                 })}
+                <button
+                  className={`settings-choice ${isCustomContextWindow ? 'is-active' : ''}`}
+                  onClick={openCustomContextWindow}
+                >
+                  自定义
+                </button>
+                {(customContextOpen || isCustomContextWindow) && (
+                  <label className="settings-custom-context" title="自定义 AI 参考的前后文字数量">
+                    <input
+                      type="number"
+                      min={100}
+                      max={200000}
+                      step={100}
+                      value={customContextDraft}
+                      placeholder="3000"
+                      onChange={(e) => setCustomContextDraft(e.currentTarget.value.replace(/[^\d]/g, '').slice(0, 6))}
+                      onBlur={() => commitCustomContextWindow()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          commitCustomContextWindow()
+                          e.currentTarget.blur()
+                        }
+                      }}
+                    />
+                    <span>字</span>
+                  </label>
+                )}
+              </div>
               </div>
             </div>
 
@@ -1000,14 +1049,14 @@ export default function TopBar() {
             {/* Diagnostics (collapsible) */}
             <DiagnosticPanel />
 
-            <div style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              marginTop: 14, gap: 10, flexWrap: 'wrap',
-            }}>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              </div>
+            </div>
+
+            <div className="settings-footer">
+              <div className="settings-footer-links">
                 <button
-                  className="btn btn-sm"
-                  style={{ fontSize: 11, color: 'var(--text-muted)', padding: '5px 12px' }}
+                  className="btn btn-sm settings-quiet-button"
+                  style={{ fontSize: 11, padding: '5px 12px' }}
                   onClick={() => {
                     setShowSettings(false)
                     // Slight delay so the close-animation doesn't fight the modal mount.
@@ -1018,18 +1067,18 @@ export default function TopBar() {
                   查看欢迎引导
                 </button>
                 <button
-                  className="btn btn-sm"
-                  style={{ fontSize: 11, color: 'var(--text-muted)', padding: '5px 12px' }}
+                  className="btn btn-sm settings-quiet-button"
+                  style={{ fontSize: 11, padding: '5px 12px' }}
                   onClick={() => {
                     setShowSettings(false)
                     setTimeout(() => useUiStore.getState().setForceFeatureTour(true), 60)
                   }}
-                  title="再看一遍 5 步功能教程（导入 / OCR / 划线 / 删除 / 学徒周报）"
+                  title="再看一遍 6 步功能指引（导入 / OCR / 划线 / 注释 / 学徒对话 / 召唤）"
                 >
-                  查看功能教程
+                  查看功能指引
                 </button>
               </div>
-              <button className="btn" onClick={() => setShowSettings(false)}>关闭</button>
+              <button className="btn btn-primary settings-close-button" onClick={() => setShowSettings(false)}>关闭</button>
             </div>
           </div>
         </div>

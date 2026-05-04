@@ -47,6 +47,12 @@ export const PROVIDER_RATE_LIMITS: Record<string, ProviderRateLimit> = {
     initialBackoffMs: 500,
     displayName: '智谱 GLM',
   },
+  hunyuan: {
+    rpm: 30,
+    maxConcurrency: 2,
+    initialBackoffMs: 500,
+    displayName: '腾讯混元',
+  },
   kimi: {
     rpm: 60,  // ≈ 1 RPS，kimi 免费起步是 3 RPS 但账号共享，保守点
     maxConcurrency: 2,

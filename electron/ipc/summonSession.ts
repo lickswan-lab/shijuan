@@ -39,6 +39,7 @@ interface SummonMsgLike {
 export interface SummonSession {
   sessionId: string
   personaId: string
+  title?: string
   startedAt: string     // ISO
   updatedAt: string     // ISO
   messages: SummonMsgLike[]
@@ -46,6 +47,7 @@ export interface SummonSession {
 
 export interface SummonSessionSummary {
   sessionId: string
+  title?: string
   startedAt: string
   messageCount: number
   firstPreview: string  // first user message, truncated ~80 chars
@@ -82,6 +84,7 @@ export function registerSummonSessionIpc(): void {
           const firstUser = s.messages.find(m => m.role === 'user')
           sessions.push({
             sessionId: s.sessionId,
+            title: s.title ? clip(s.title, 48) : undefined,
             startedAt: s.startedAt,
             messageCount: s.messages.length,
             firstPreview: firstUser ? clip(String(firstUser.content)) : '(空白会话)',
@@ -148,9 +151,14 @@ export function registerSummonSessionIpc(): void {
         }
       }
       await ensurePersonaDir(session.personaId)
+      const existing = await safeLoadJsonOrBackup<SummonSession | null>(
+        sessionFile(session.personaId, session.sessionId),
+        null,
+      ).catch(() => null)
       const normalized: SummonSession = {
         sessionId: session.sessionId,
         personaId: session.personaId,
+        title: session.title ?? existing?.title,
         startedAt: session.startedAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         messages: session.messages,

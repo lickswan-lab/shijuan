@@ -1,3 +1,5 @@
+import { normalizeMixedChineseToSimplified } from '../../utils/chineseText'
+
 // Clean OCR text for display: handle LaTeX, superscripts, circled numbers
 export function cleanOcrText(raw: string): string {
   const circled = ['①','②','③','④','⑤','⑥','⑦','⑧','⑨','⑩']
@@ -6,7 +8,7 @@ export function cleanOcrText(raw: string): string {
   }
   const toSuper = (s: string) => s.split('').map(c => superDigits[c] || c).join('')
 
-  return raw
+  return normalizeMixedChineseToSimplified(raw)
     .replace(/\$\s*\\\\?textcircled\{(\d+)\}\s*\$/g, (_m, n) => circled[parseInt(n)-1] || `(${n})`)
     .replace(/\$\s*\^?\s*\{?\s*\((\d+)\)\s*\}?\s*\$/g, (_m, n) => `⁽${toSuper(n)}⁾`)
     .replace(/\$\s*\^\s*\{(\d+)\}\s*\$/g, (_m, n) => toSuper(n))

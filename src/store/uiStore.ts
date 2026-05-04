@@ -9,6 +9,8 @@ interface TextSelection {
 }
 
 // ===== Batch OCR queue (v1.2.7) =====
+export type OcrEngine = 'glm' | 'rapidocr'
+
 export interface OcrQueueItem {
   entryId: string
   title: string
@@ -43,6 +45,7 @@ interface UiState {
 
   // Memo
   activeMemoId: string | null
+  mainView: 'reader' | 'graph'
   sidebarTab: 'library' | 'memos'  // 2026-04-28 · 'reading-log' tab 已删
 
   // 2026-04-28 · Reading log 功能已删,activeReadingLogDate state 移除
@@ -64,6 +67,10 @@ interface UiState {
   // Batch 43 · 联网搜索开关（让 persona 辩论前能先查 2026 时事）
   // 持久化到 localStorage，所有 AI 调用 site 共用
   aiWebSearch: boolean
+
+  // OCR engine selected in the document OCR modal. Persisted so batch OCR can
+  // follow the user's latest choice without adding another global settings row.
+  ocrEngine: OcrEngine
 
   // Annotation color (for next annotation to be created)
   annotationColor: string
@@ -118,6 +125,7 @@ interface UiState {
   setGlmApiKeyStatus: (status: 'set' | 'not-set' | 'checking') => void
   setActiveMemo: (id: string | null) => void
   setSidebarTab: (tab: 'library' | 'memos') => void
+  setMainView: (view: 'reader' | 'graph') => void
   // 2026-04-28 · setActiveReadingLogDate 已删
   setCurrentDocText: (text: string | null) => void
   setAiContextWindow: (size: number) => void
@@ -126,6 +134,7 @@ interface UiState {
   setSelectedAiModel: (model: string) => void
   setAiReasoningEffort: (effort: 'low' | 'medium' | 'high') => void
   setAiWebSearch: (on: boolean) => void
+  setOcrEngine: (engine: OcrEngine) => void
   setAnnotationColor: (color: string) => void
   setRightPanel: (panel: 'annotation' | 'agent') => void
   setHermesHasInsight: (has: boolean) => void
@@ -155,6 +164,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   glmApiKeyStatus: 'checking',
   activeMemoId: null,
   sidebarTab: 'library',
+  mainView: 'reader',
   // 2026-04-28 · activeReadingLogDate 已删
   currentDocText: null,
   activeLectureId: null,
@@ -165,7 +175,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     try {
       const v = localStorage.getItem('sj-aiContextWindow')
       const n = v ? Number(v) : 2000
-      return Number.isFinite(n) && n > 0 ? n : 2000
+      return Number.isFinite(n) && (n === -1 || n > 0) ? n : 2000
     } catch { return 2000 }
   })(),
   selectedAiModel: 'glm:glm-4-flash',
@@ -180,6 +190,12 @@ export const useUiStore = create<UiState>((set, get) => ({
   // Batch 43 · 联网开关持久化（默认关 —— 大多数对话不需要时事，开了浪费 quota）
   aiWebSearch: (() => {
     try { return localStorage.getItem('sj-aiWebSearch') === 'true' } catch { return false }
+  })(),
+  ocrEngine: (() => {
+    try {
+      const v = localStorage.getItem('sj-ocrEngine')
+      return v === 'rapidocr' ? 'rapidocr' : 'glm'
+    } catch { return 'glm' }
   })(),
   annotationColor: 'yellow',
   rightPanel: 'annotation',
@@ -210,8 +226,9 @@ export const useUiStore = create<UiState>((set, get) => ({
   setSearchQuery: (query) => set({ searchQuery: query }),
   setShowSettings: (show) => set({ showSettings: show }),
   setGlmApiKeyStatus: (status) => set({ glmApiKeyStatus: status }),
-  setActiveMemo: (id) => set({ activeMemoId: id, ...(id ? { sidebarTab: 'memos' as const } : {}) }),
+  setActiveMemo: (id) => set({ activeMemoId: id, mainView: 'reader', ...(id ? { sidebarTab: 'memos' as const } : {}) }),
   setSidebarTab: (tab) => set({ sidebarTab: tab }),
+  setMainView: (view) => set({ mainView: view }),
   // 2026-04-28 · setActiveReadingLogDate 已删
   setCurrentDocText: (text) => set({ currentDocText: text }),
   setAiContextWindow: (size) => { set({ aiContextWindow: size }); try { localStorage.setItem('sj-aiContextWindow', String(size)) } catch {} },
@@ -225,6 +242,10 @@ export const useUiStore = create<UiState>((set, get) => ({
   setAiWebSearch: (on) => {
     try { localStorage.setItem('sj-aiWebSearch', String(on)) } catch { /* ignore */ }
     set({ aiWebSearch: on })
+  },
+  setOcrEngine: (engine) => {
+    try { localStorage.setItem('sj-ocrEngine', engine) } catch { /* ignore */ }
+    set({ ocrEngine: engine })
   },
   toggleDarkMode: () => set(s => {
     const next = !s.darkMode

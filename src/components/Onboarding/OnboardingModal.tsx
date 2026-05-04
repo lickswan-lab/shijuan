@@ -127,7 +127,7 @@ export default function OnboardingModal(): JSX.Element | null {
         <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.85, marginBottom: 18 }}>
           拾卷是一个安静的本地读书工具——你可以直接导入书、选中文字写注释，<strong>不接 AI 也能用</strong>。
           <br /><br />
-          如果想让它帮你<strong>梳理脉络、让学徒写周报</strong>，需要接入一个 AI 服务。
+          如果想让它帮你<strong>梳理脉络、进行学徒对话、召唤名家一起追问</strong>，需要接入一个 AI 服务。
           <br /><br />
           最简单的开始方式是
           <a
@@ -175,11 +175,11 @@ export default function OnboardingModal(): JSX.Element | null {
               cursor: 'pointer', textDecoration: 'underline',
               textDecorationStyle: 'dotted', textUnderlineOffset: 3,
             }}
-            title="跳过 API 配置，直接看 5 步功能教程"
+            title="跳过 API 配置，直接看 6 步功能指引"
           >
-            5 步功能教程
+            6 步功能指引
           </button>
-          <span style={{ opacity: 0.85 }}>（导入 / OCR / 划线 / 注释 / 学徒周报）；也可以现在就先看看。</span>
+          <span style={{ opacity: 0.85 }}>（导入 / OCR / 划线 / 注释 / 学徒对话 / 召唤）；也可以现在就先看看。</span>
         </div>
 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', alignItems: 'center', flexWrap: 'wrap' }}>
