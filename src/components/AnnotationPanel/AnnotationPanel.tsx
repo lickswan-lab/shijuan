@@ -816,6 +816,9 @@ export default function AnnotationPanel() {
   const tocLabels = useUiStore(s => s.currentDocTocLabels)
   // BUG-FIX R8#8 · NaN 防御 + 最小宽度 80px 兜底,避免 panel 缩到 0 隐身
   const [panelWidth, _setPanelWidth] = useState(() => readNumber('sj-annPanelWidth', 380, 80))
+  // PERF-R8#25 · setPanelWidth 的 localStorage 写入只在非拖动场景使用(初次 mount /
+  //   外部代码改宽度等)。拖动 hot-path 走 _setPanelWidth + onUp 一次性 persist —— 见
+  //   handleResizeStart。原代码 onMove 每帧 setPanelWidth → 每秒 60+ 次同步 IO,卡顿明显。
   const setPanelWidth = (w: number) => { _setPanelWidth(w); try { localStorage.setItem('sj-annPanelWidth', String(w)) } catch {} }
   const resizingRef = useRef(false)
 
@@ -825,6 +828,11 @@ export default function AnnotationPanel() {
     resizingRef.current = true
     const startX = e.clientX
     const startWidth = panelWidth
+    // PERF-R8#25 · 拖动期间记录最终值,mouseup 时一次性写盘
+    let lastWidth = startWidth
+    // PERF-R8#25 · raf 节流:同一帧内多个 mousemove 只 setState 一次,
+    //   避免 React 重渲整个 ~2100 行 AnnotationPanel 组件的累积成本
+    let rafPending = false
 
     const onMove = (ev: MouseEvent) => {
       if (!resizingRef.current) return
@@ -833,7 +841,14 @@ export default function AnnotationPanel() {
       // shrink the right panel hard so the reading column (OCR/TXT/MD/DOCX)
       // can stretch wide; upper bound 800 lets users park reference notes
       // in a roomy column when they have screen real estate.
-      setPanelWidth(Math.max(200, Math.min(800, startWidth + delta)))
+      lastWidth = Math.max(200, Math.min(800, startWidth + delta))
+      if (rafPending) return
+      rafPending = true
+      requestAnimationFrame(() => {
+        rafPending = false
+        // PERF-R8#25 · 拖动 hot-path 不写 localStorage(同步 IO 阻塞),只更 state
+        _setPanelWidth(lastWidth)
+      })
     }
     const onUp = () => {
       resizingRef.current = false
@@ -841,6 +856,8 @@ export default function AnnotationPanel() {
       document.removeEventListener('mouseup', onUp)
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
+      // PERF-R8#25 · 一次性 persist 最终宽度
+      try { localStorage.setItem('sj-annPanelWidth', String(lastWidth)) } catch {}
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)

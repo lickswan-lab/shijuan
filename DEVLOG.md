@@ -4,6 +4,55 @@
 
 ---
 
+## 2026-05-06 · Batch 68 · 夜间值守 Round 8 #25 · PERF · 注释栏拖动同步 IO 阻塞清除
+
+主题：**PERF · AnnotationPanel resize 拖动 onMove 每帧 localStorage.setItem(同步 IO ~2-5ms),60Hz 拖动累计 240ms/秒主线程阻塞,改成 raf 节流 setState + mouseup 一次性 persist**
+
+### 修了什么(R8#25)
+
+`src/components/AnnotationPanel/AnnotationPanel.tsx:818-865` `handleResizeStart`:
+
+旧代码 `onMove`:
+```ts
+setPanelWidth(Math.max(200, Math.min(800, startWidth + delta)))
+//  ↓ setPanelWidth 内部:
+//    _setPanelWidth(w)   // setState 触发 ~2100 行组件 re-render
+//    localStorage.setItem('sj-annPanelWidth', String(w))  // 同步 IO
+```
+
+新代码:
+1. 拖动期间 `onMove` 只调 `_setPanelWidth`(纯 state),且用 `requestAnimationFrame` 节流(同帧多个 mousemove 合并成一次 setState)
+2. 用 closure 内 `lastWidth` 变量记录最终值
+3. `onUp` 时一次性 `localStorage.setItem(lastWidth)`
+
+`setPanelWidth` 函数(含 localStorage 写)保留给非拖动场景使用(初次 mount / 外部代码改宽度)。
+
+### 为什么有用
+
+用户报"注释栏拖动有延迟"。根因:`mousemove` 每秒触发 60+ 次,每次都同步写 localStorage(Chromium 的 localStorage 是 main-thread sync IO,典型 2-5ms/次),拖动 1 秒 = 120-300ms 主线程阻塞,叠加 React 重渲 AnnotationPanel(~2100 行 JSX,即便 React 18 batching 也有几 ms)。视觉上鼠标拖出的 visible width 跟不上手指实际位置 → 体感"延迟"。
+
+修后:拖动期间 0 次 IO,raf 节流让最多 60 次/秒 setState(超过的合并),mouseup 时 1 次 IO。理论上拖动跟手感跟原生 windows 边框 resize 接近。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0(main 223ms / preload 13ms / renderer 4.19s)
+- baseline `tsc -b --noEmit` 错误数维持(本批改动无新增 TS 问题)
+
+### 后续
+
+下轮 Round 8 #26 必须 Bug 或 UX(因为 #25 是 PERF)。
+
+本修复要进入下一次 release(v1.3.5 或合并到 v1.3.4 重 build)用户才能感受到。当前 1.3.4 已发布,如需让用户立刻享受这条优化建议:
+- 选项 A:作为单独 patch 重 build app.asar.gz,push 覆盖 v1.3.4 release(用 `gh release upload --clobber`),应用内更新拉到
+- 选项 B:打 v1.3.5 tag → 走 GitHub Actions 全平台 build → 新 release
+
+同区域可继续观察:
+- `panelWidth` state 改变会让整个 AnnotationPanel 重渲(2100 行),可考虑用 CSS variable + ref 直接改 DOM `style.width` 完全跳过 React 渲染。但当前 raf+setState 已经够流畅,过度优化先不做
+- TopBar 的字号滑块 / 阅读舒适度调节滑块可能有同款 hot-path localStorage 问题,值得 sweep
+
+---
+
 ## 2026-05-05 · 1.3.4 发布 · 内置 6 个最早 skill 首次启动注入 + R8#19-24 累计修复
 
 主题：**1.3.4 把 confucius/laozi/mozi/plato/socrates/aristotle 6 个 skill 打入 asar,首次启动自动 import 到 ~/.lit-manager/agent/personas/,新用户安装即用**
