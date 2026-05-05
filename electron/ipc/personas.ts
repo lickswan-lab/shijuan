@@ -18,6 +18,17 @@ import { getApiKeyFor } from './aiApi'
 const DATA_DIR = path.join(app.getPath('home'), '.lit-manager')
 const PERSONAS_DIR = path.join(DATA_DIR, 'agent', 'personas')
 
+// BUG-FIX R8#21 · personaId 路径清洗(同 R2#γ lecture sessionId / R8#16 weekCode 模式)
+//   personaId 直接进 path.join 拼写到 PERSONAS_DIR/<id>.json 等位置。当前 id 由
+//   uuid() 产出安全,但 IPC 是 renderer 可控接口 + future imported skill 的 id
+//   来源会变化,defense-in-depth 需要挡住路径穿越:
+//     ../../../etc/passwd / ..\\..\\windows\\system32 / id 含 \0 \r \n 等。
+//   所有接收 personaId 的 handler 入口统一校验,不通过早返回 success:false。
+const SAFE_PERSONA_ID = /^[a-zA-Z0-9_-]+$/
+function isUnsafePersonaId(id: unknown): boolean {
+  return typeof id !== 'string' || !SAFE_PERSONA_ID.test(id)
+}
+
 // Phase A · per-persona semantic index. Kept separate from the persona JSON so
 // that re-saving the persona (e.g. editing a dimension) doesn't blow up the
 // embedding blob. Blob size: chunks * dim * 8 bytes ≈ 500 chunks * 1536 dim
@@ -1038,6 +1049,7 @@ export function registerPersonasIpc(): void {
 
   // Load a single persona in full
   ipcMain.handle('persona-load', async (_event, id: string): Promise<{ success: boolean; persona?: Persona; error?: string }> => {
+    if (isUnsafePersonaId(id)) return { success: false, error: 'personaId 含非法字符' }
     try {
       await ensureDir()
       const file = path.join(PERSONAS_DIR, `${id}.json`)
@@ -1051,6 +1063,7 @@ export function registerPersonasIpc(): void {
 
   // Save (create or update) a persona
   ipcMain.handle('persona-save', async (_event, persona: Persona): Promise<{ success: boolean; error?: string }> => {
+    if (!persona || isUnsafePersonaId(persona.id)) return { success: false, error: 'personaId 含非法字符' }
     try {
       await ensureDir()
       const file = path.join(PERSONAS_DIR, `${persona.id}.json`)
@@ -1071,6 +1084,7 @@ export function registerPersonasIpc(): void {
   // 优先显示完整 skill 目录（PERSONAS_DIR/<id>/ 含 SKILL.md + dimensions），
   // 不存在则回落到 <id>.json 单文件。
   ipcMain.handle('persona-reveal', async (_event, id: string): Promise<{ success: boolean; path?: string; error?: string }> => {
+    if (isUnsafePersonaId(id)) return { success: false, error: 'personaId 含非法字符' }
     try {
       const dir = path.join(PERSONAS_DIR, id)
       const file = path.join(PERSONAS_DIR, `${id}.json`)
@@ -1090,6 +1104,7 @@ export function registerPersonasIpc(): void {
   })
 
   ipcMain.handle('persona-delete', async (_event, id: string): Promise<{ success: boolean; error?: string }> => {
+    if (isUnsafePersonaId(id)) return { success: false, error: 'personaId 含非法字符' }
     try {
       const file = path.join(PERSONAS_DIR, `${id}.json`)
       await fs.unlink(file)
@@ -1143,6 +1158,7 @@ export function registerPersonasIpc(): void {
     persona?: Persona
     error?: string
   }> => {
+    if (isUnsafePersonaId(personaId)) return { success: false, error: 'personaId 含非法字符' }
     if (!personaId) return { success: false, error: 'personaId 必填' }
     if (!source || typeof source !== 'object') return { success: false, error: 'source 不合法' }
     if (!source.id) return { success: false, error: 'source 缺少 id' }
@@ -1214,6 +1230,7 @@ export function registerPersonasIpc(): void {
     outDir?: string             // defaults to ~/.claude/skills/
     includeResearch?: boolean   // defaults to true if distillation exists
   }): Promise<{ success: boolean; skillDir?: string; error?: string }> => {
+    if (isUnsafePersonaId(personaId)) return { success: false, error: 'personaId 含非法字符' }
     try {
       await ensureDir()
       const file = path.join(PERSONAS_DIR, `${personaId}.json`)
@@ -1396,6 +1413,7 @@ export function registerPersonasIpc(): void {
     retrievalMode?: 'embedding' | 'bm25' | 'empty'
     error?: string
   }> => {
+    if (isUnsafePersonaId(personaId)) return { success: false, error: 'personaId 含非法字符' }
     try {
       const res = await retrieveChunksInternal(personaId, query, topK)
       return { success: true, ...res }
@@ -1421,6 +1439,7 @@ export function registerPersonasIpc(): void {
     coverage?: RagIndexFile['coverage']
     error?: string
   }> => {
+    if (isUnsafePersonaId(personaId)) return { success: false, error: 'personaId 含非法字符' }
     try {
       await ensureDir()
       if (inFlightBuilds.has(personaId)) {
@@ -1486,6 +1505,7 @@ export function registerPersonasIpc(): void {
     coverage?: RagIndexFile['coverage']
     error?: string
   }> => {
+    if (isUnsafePersonaId(personaId)) return { success: false, built: false, error: 'personaId 含非法字符' }
     try {
       await ensureDir()
       const file = path.join(PERSONAS_DIR, `${personaId}.json`)
@@ -1524,6 +1544,7 @@ export function registerPersonasIpc(): void {
 
   // ===== RAG index delete (Phase A) =====
   ipcMain.handle('persona-rag-clear', async (_event, personaId: string): Promise<{ success: boolean; error?: string }> => {
+    if (isUnsafePersonaId(personaId)) return { success: false, error: 'personaId 含非法字符' }
     try {
       await fs.unlink(ragIndexFilePath(personaId)).catch(() => {})
       return { success: true }
@@ -1569,6 +1590,7 @@ export function registerPersonasIpc(): void {
     injectedCitationIds?: number[]
     error?: string
   }> => {
+    if (isUnsafePersonaId(personaId)) return { success: false, error: 'personaId 含非法字符' }
     try {
       await ensureDir()
       const file = path.join(PERSONAS_DIR, `${personaId}.json`)
@@ -1742,4 +1764,169 @@ ${persona.content || '（资料为空）'}`
       return { success: false, error: err.message }
     }
   })
+}
+
+// ===== 1.3.3 · 内置 skill 首次启动注入 =====
+//
+// 拾卷 1.3.3 把 6 个最早发布的人物 skill (孔子/老子/墨子/柏拉图/苏格拉底/亚里士多德)
+// 打包进 asar 的 skills/ 目录,首次启动时自动 import 到用户的 ~/.lit-manager/agent/personas/。
+// 这样新用户安装后立刻能召唤这 6 位,不需要先去社区下载。
+//
+// 设计取舍:
+// 1. 用 marker 文件 `~/.lit-manager/.bundled-seeded-v1.3.3` 防重复 seed。
+//    版本号挂在文件名里 → 未来想"补发"新一批 builtin 时换 marker 名即可。
+// 2. 已存在的 persona(按 skillSlug / canonicalName 匹配)跳过,**绝不覆盖** ——
+//    避免覆盖用户自己改过的 persona 或社区下载的同名版本。
+// 3. 失败容忍:任何一个 slug 读不到 / parse 失败 / 写盘失败,记 warning 跳过,
+//    不阻塞其它 5 个 slug 的注入。整个 seed 错误也不阻塞 app 启动。
+// 4. fire-and-forget:main.ts 调用时不 await,启动路径不被阻塞。
+//
+// importedFrom 路径:固定指向 bundled skills 目录(asar 内 / resources 内)。
+// 这意味着用户 uninstall lit-manager 后,persona.json 仍在 ~/.lit-manager/ 但
+// 附属包(MENTAL_MODELS.md 等)随 asar 消失 —— 调用时 personas.ts:1611 的 try/catch
+// 会 silently 跳过附属包,fullMarkdown 仍能用。可接受。
+const BUILTIN_SKILL_SLUGS = ['confucius', 'laozi', 'mozi', 'plato', 'socrates', 'aristotle']
+const SEED_MARKER_FILE = path.join(DATA_DIR, '.bundled-seeded-v1.3.3')
+
+function bundledSkillsCandidateDirs(): string[] {
+  return [
+    path.join(app.getAppPath(), 'skills'),
+    path.join(process.resourcesPath || '', 'skills'),
+    path.join(process.cwd(), 'skills'),
+  ].filter(Boolean)
+}
+
+async function findBundledSkillDir(slug: string): Promise<string | null> {
+  for (const base of bundledSkillsCandidateDirs()) {
+    const dir = path.join(base, slug)
+    try {
+      const stat = await fs.stat(path.join(dir, 'SKILL.md'))
+      if (stat.isFile()) return dir
+    } catch { /* not here, try next */ }
+  }
+  return null
+}
+
+async function listExistingPersonaKeys(): Promise<Set<string>> {
+  const out = new Set<string>()
+  try {
+    const files = await fs.readdir(PERSONAS_DIR)
+    for (const f of files) {
+      if (!f.endsWith('.json') || f.endsWith('.rag.json')) continue
+      try {
+        const raw = await fs.readFile(path.join(PERSONAS_DIR, f), 'utf-8')
+        const p = JSON.parse(raw) as Persona
+        if (p.skill?.skillSlug) out.add(p.skill.skillSlug.toLowerCase())
+        if (p.canonicalName) out.add(p.canonicalName.toLowerCase())
+        if (p.name) out.add(p.name.toLowerCase())
+      } catch { /* corrupt persona, skip */ }
+    }
+  } catch { /* PERSONAS_DIR not yet created */ }
+  return out
+}
+
+export async function seedBundledSkills(): Promise<{ seeded: number; skipped: number; failed: number }> {
+  // 早退:marker 已存在 → 之前已 seed 过,本版本不再触发
+  try {
+    await fs.stat(SEED_MARKER_FILE)
+    return { seeded: 0, skipped: BUILTIN_SKILL_SLUGS.length, failed: 0 }
+  } catch { /* marker not present, proceed */ }
+
+  await ensureDir()
+  const existing = await listExistingPersonaKeys()
+  let seeded = 0, skipped = 0, failed = 0
+
+  for (const slug of BUILTIN_SKILL_SLUGS) {
+    if (existing.has(slug)) { skipped++; continue }
+
+    const skillDir = await findBundledSkillDir(slug)
+    if (!skillDir) {
+      console.warn(`[bundled-skill-seed] skill 目录找不到:${slug}`)
+      failed++
+      continue
+    }
+
+    try {
+      const md = await fs.readFile(path.join(skillDir, 'SKILL.md'), 'utf-8')
+      const parsed = parseSkillMarkdown(md)
+      if (!parsed.frontmatter) {
+        console.warn(`[bundled-skill-seed] frontmatter 缺失:${slug}`)
+        failed++
+        continue
+      }
+
+      // 第二次检查 canonicalName / name 重复(用 frontmatter 的 name)
+      const fmName = parsed.frontmatter.name?.toLowerCase()
+      if (fmName && existing.has(fmName)) { skipped++; continue }
+
+      const now = new Date().toISOString()
+      const fm = parsed.frontmatter
+      const skill: PersonaSkillArtifact = {
+        skillSlug: slug,
+        frontmatter: {
+          name: fm.name,
+          description: fm.description || '',
+          cardIntro: fm.cardIntro,
+          triggers: fm.triggers,
+          model: fm.model,
+        },
+        identityCard: '',
+        mentalModels: [],
+        heuristics: [],
+        expressionDna: { vocabulary: [], patterns: [], metaphors: [], rhythm: '' },
+        timeline: '',
+        values: '',
+        intellectualLineage: '',
+        honestBoundaries: [],
+        tensions: [],
+        sourceReferences: [],
+        fullMarkdown: parsed.fullMarkdown,
+        synthesizedAt: now,
+        model: '(bundled-1.3.3)',
+      }
+
+      const persona: Persona = {
+        id: uuid(),
+        name: fm.name,
+        canonicalName: fm.name,
+        identity: fm.description || undefined,
+        cardIntro: fm.cardIntro || undefined,
+        skillMode: 'imported',
+        content: parsed.fullMarkdown,
+        sourcesUsed: [],
+        versions: [{
+          content: parsed.fullMarkdown,
+          generatedAt: now,
+          model: '(bundled-1.3.3)',
+          changeNote: '随拾卷 1.3.3 内置注入',
+          skillSnapshot: skill,
+        }],
+        skill,
+        importedFrom: skillDir,
+        createdAt: now,
+        updatedAt: now,
+      }
+
+      await atomicWriteJson(path.join(PERSONAS_DIR, `${persona.id}.json`), persona)
+      await copyImportedSkillPortrait(skillDir, persona.id).catch((e) => {
+        console.warn(`[bundled-skill-seed] portrait copy 跳过 ${slug}:`, e?.message)
+      })
+      seeded++
+    } catch (err: any) {
+      console.warn(`[bundled-skill-seed] 注入失败 ${slug}:`, err?.message)
+      failed++
+    }
+  }
+
+  // 写 marker — 即使 seeded=0(全部 skipped 或 failed)也写,避免反复重试。
+  // 用户主动删了某个 persona 后我们不再 re-seed,这是预期行为(用户主动选择)。
+  try {
+    await fs.writeFile(SEED_MARKER_FILE, JSON.stringify({
+      seededAt: new Date().toISOString(),
+      seeded, skipped, failed,
+      slugs: BUILTIN_SKILL_SLUGS,
+    }, null, 2))
+  } catch { /* marker 写不进就算了,下次启动会再试一次,idempotent */ }
+
+  return { seeded, skipped, failed }
 }

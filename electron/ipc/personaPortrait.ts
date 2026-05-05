@@ -24,6 +24,11 @@ import type { Persona } from '../../src/types/library'
 const DATA_DIR = path.join(app.getPath('home'), '.lit-manager')
 const PERSONAS_DIR = path.join(DATA_DIR, 'agent', 'personas')
 
+// BUG-FIX R8#21 · personaId 路径清洗(同 personas.ts / summonSession.ts 模式)
+//   personaId 直接进 path.join 拼到 PERSONAS_DIR/<id>。当前 uuid() 安全,但 IPC
+//   是 renderer 可控接口,defense-in-depth 挡路径穿越。
+const SAFE_PERSONA_ID = /^[a-zA-Z0-9_-]+$/
+
 // Bundled skills live in the project root / resources (dev vs packaged).
 // In dev: cwd or app.getAppPath() + 'skills'. In packaged: resources/skills.
 function bundledSkillsDir(): string[] {
@@ -96,6 +101,9 @@ export function registerPersonaPortraitIpc(): void {
     source?: 'user' | 'bundled' | 'none'
     error?: string
   }> => {
+    if (typeof personaId !== 'string' || !SAFE_PERSONA_ID.test(personaId)) {
+      return { success: false, error: 'personaId 含非法字符' }
+    }
     try {
       // 1) Per-persona user override in the data dir
       const userDir = path.join(PERSONAS_DIR, personaId)

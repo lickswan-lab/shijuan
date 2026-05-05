@@ -11,6 +11,7 @@ const ReactMarkdown = Markdown  // alias for compatibility
 //   被触发)。app 重启后清零。
 const rereadingViewedThisSession = new Set<string>()
 import remarkMath from 'remark-math'
+import rehypeRaw from 'rehype-raw'
 import { KATEX_FORGIVING as rehypeKatex } from '../../utils/markdownConfig'
 import { v4 as uuid } from 'uuid'
 import 'react-pdf/dist/esm/Page/TextLayer.css'
@@ -29,6 +30,19 @@ import { fetchAiConfig, subscribeAiConfig } from '../../utils/aiConfigCache'
 // BUG-FIX R8#8 · localStorage 数字读 NaN 防御
 import { readNumber } from '../../utils/safeStorageRead'
 import { normalizeMixedChineseToSimplified } from '../../utils/chineseText'
+
+// BUG-FIX R8#19 · HTML/MD 内相对路径图片解析 helper
+//   srcdoc iframe 的 origin 是 about:srcdoc,renderer 的 base URL 又是 app HTML,
+//   两边都不知道用户的 .html / .md 文件实际存在哪。这里把 absPath 转成它所在
+//   目录的 file:// URL,作为 <base href> 或 <img src=...> 的锚点。
+//   webSecurity:false 已开,file:// 资源加载没问题。
+function fileBaseUrl(absPath: string): string {
+  const dir = absPath
+    .replace(/[\\/][^\\/]+$/, '')   // 去掉文件名,只留目录
+    .replace(/\\/g, '/')             // Windows 反斜杠 → 正斜杠
+    .replace(/^\/+/, '')             // 去掉前导 /(unix 绝对路径会有)
+  return 'file:///' + encodeURI(dir) + '/'
+}
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 
@@ -963,6 +977,18 @@ document.addEventListener('mouseup', function(e) {
 });
 </script>`
 
+      // BUG-FIX R8#19 · 注入 <base href> 让 HTML 内相对路径的图片/样式/链接
+      //   按 .html 文件所在目录解析。srcdoc 默认 base 是 about:srcdoc,所有
+      //   <img src="images/xxx.png"> 这种相对引用都会断。base 必须放 head 最前
+      //   (浏览器只认第一个 <base>),所以在 typographyStyle 注入之前先处理。
+      const baseTag = `<base href="${fileBaseUrl(absPath)}">`
+      const headOpenMatch = html.match(/<head[^>]*>/i)
+      if (headOpenMatch) {
+        html = html.replace(headOpenMatch[0], headOpenMatch[0] + baseTag)
+      } else {
+        html = baseTag + html
+      }
+
       if (html.includes('</head>')) {
         html = html.replace('</head>', typographyStyle + '</head>')
       } else if (html.includes('<body')) {
@@ -1853,7 +1879,23 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
       color: color || undefined,
     }}>
       <div style={{ filter: 'var(--reader-content-filter)' }}>
-        <Markdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{text}</Markdown>
+        <Markdown
+          remarkPlugins={[remarkMath]}
+          // BUG-FIX R8#19 · rehypeRaw 让 .md 里的原生 <img> / <a> 标签生效
+          //   (单 markdown 语法只覆盖 ![](url),教材/导出 markdown 常用 <img> 写法)
+          rehypePlugins={[rehypeRaw, rehypeKatex]}
+          components={{
+            // BUG-FIX R8#19 · .md 内相对路径图片按 md 文件所在目录解析。
+            //   react-markdown 默认会原样把 src 输出 <img>,但 renderer 的 base
+            //   是 app HTML 不是 md 文件,所以 ./assets/x.png 这种引用全断。
+            img: ({ src, alt }) => {
+              if (!src) return null
+              const isExternal = /^(https?:|data:|file:)/i.test(src)
+              const resolved = isExternal ? src : fileBaseUrl(absPath) + src.replace(/^\.\//, '')
+              return <img src={resolved} alt={alt || ''} style={{ maxWidth: '100%', height: 'auto', borderRadius: 4, margin: '8px 0' }} />
+            },
+          }}
+        >{text}</Markdown>
       </div>
     </div>
   )

@@ -14,6 +14,17 @@ import { atomicWriteJson, safeLoadJsonOrBackup } from './library'
 const DATA_DIR = path.join(app.getPath('home'), '.lit-manager')
 const SUMMONS_DIR = path.join(DATA_DIR, 'agent', 'summons')
 
+// BUG-FIX R8#21 · personaId / sessionId 路径清洗(同 personas.ts / R2#γ / R8#16 模式)
+//   两个 id 都进 path.join 拼出 SUMMONS_DIR/<personaId>/<sessionId>.json。
+//   当前都是 uuid() 安全,但 IPC 暴露,defense-in-depth 挡 ../../../etc/passwd 等。
+const SAFE_ID = /^[a-zA-Z0-9_-]+$/
+function unsafePersonaId(id: unknown): boolean {
+  return typeof id !== 'string' || !SAFE_ID.test(id)
+}
+function unsafeSessionId(id: unknown): boolean {
+  return typeof id !== 'string' || !SAFE_ID.test(id)
+}
+
 function personaDir(personaId: string): string {
   return path.join(SUMMONS_DIR, personaId)
 }
@@ -71,7 +82,7 @@ export function registerSummonSessionIpc(): void {
     error?: string
   }> => {
     try {
-      if (!personaId) return { success: false, error: 'personaId 必填' }
+      if (unsafePersonaId(personaId)) return { success: false, error: 'personaId 含非法字符或为空' }
       await ensurePersonaDir(personaId)
       const files = await fs.readdir(personaDir(personaId))
       const sessions: SummonSessionSummary[] = []
@@ -106,7 +117,7 @@ export function registerSummonSessionIpc(): void {
     error?: string
   }> => {
     try {
-      if (!personaId || !sessionId) return { success: false, error: 'personaId / sessionId 必填' }
+      if (unsafePersonaId(personaId) || unsafeSessionId(sessionId)) return { success: false, error: 'personaId / sessionId 含非法字符或为空' }
       const file = sessionFile(personaId, sessionId)
       const s = await safeLoadJsonOrBackup<SummonSession | null>(file, null)
       if (!s) return { success: false, error: '会话不存在' }
@@ -126,6 +137,9 @@ export function registerSummonSessionIpc(): void {
     try {
       if (!session?.sessionId || !session?.personaId) {
         return { success: false, error: 'session 缺少必要字段 (sessionId / personaId)' }
+      }
+      if (unsafePersonaId(session.personaId) || unsafeSessionId(session.sessionId)) {
+        return { success: false, error: 'personaId / sessionId 含非法字符' }
       }
       // Don't persist empty sessions — saves a lot of noise files for users
       // who click "新对话" then navigate away without saying anything.
@@ -176,7 +190,7 @@ export function registerSummonSessionIpc(): void {
     error?: string
   }> => {
     try {
-      if (!personaId || !sessionId) return { success: false, error: 'personaId / sessionId 必填' }
+      if (unsafePersonaId(personaId) || unsafeSessionId(sessionId)) return { success: false, error: 'personaId / sessionId 含非法字符或为空' }
       await fs.unlink(sessionFile(personaId, sessionId)).catch((e) => {
         if (e?.code === 'ENOENT') return  // already gone — still success
         throw e

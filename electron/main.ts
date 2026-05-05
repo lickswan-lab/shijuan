@@ -9,7 +9,7 @@ import { registerAgentIpc } from './ipc/agent'  // Needed for Hermes memory + kn
 import { registerApprenticeIpc } from './ipc/apprentice'  // Hermes apprentice log (weekly observation)
 import { registerDiagnosticIpc, appendCrashLog } from './ipc/diagnostic'
 import { registerOnlineSearchIpc } from './ipc/onlineSearch'
-import { registerPersonasIpc } from './ipc/personas'  // 召唤 — persona archives with multi-source web search
+import { registerPersonasIpc, seedBundledSkills } from './ipc/personas'  // 召唤 — persona archives with multi-source web search
 import { registerPersonaPortraitIpc } from './ipc/personaPortrait'  // 召唤 — resolves bundled / user persona portraits to data URLs
 import { registerCitationVerifierIpc } from './ipc/citationVerifier'  // Wave-4 — reverse-parse [资料 N] in AI output
 import { registerSummonSessionIpc } from './ipc/summonSession'  // 召唤对话会话持久化（per-persona session history）
@@ -215,7 +215,13 @@ if (!gotTheLock) {
       if (win.isMinimized()) win.restore()
       win.focus()
       win.flashFrame(true)
-      setTimeout(() => win.flashFrame(false), 3000)
+      // BUG-FIX R8#22 · 3s 后窗口可能已销毁(用户关 app / 主窗口被替换),裸调
+      //   win.flashFrame(false) 会抛 "Object has been destroyed"。同 R4#4 模式
+      //   给 isDestroyed 兜底。timer handle 不需要 track:second-instance 事件
+      //   稀疏触发,且单 timer 闭包 leak 量级可忽略。
+      setTimeout(() => {
+        if (!win.isDestroyed()) win.flashFrame(false)
+      }, 3000)
     }
   })
 
@@ -242,6 +248,16 @@ if (!gotTheLock) {
   safeRegister('onlineSearch', registerOnlineSearchIpc)
   safeRegister('updater', registerUpdaterIpc)
   safeRegister('diagnostic', registerDiagnosticIpc)
+
+  // 1.3.3 · 内置 6 个 skill 首次启动注入 · fire-and-forget
+  //   marker 已存在 → 早退;不阻塞窗口创建。失败不影响 app 启动。
+  void seedBundledSkills().then((r) => {
+    if (r.seeded > 0 || r.failed > 0) {
+      logStartup('bundled-skill-seed', r)
+    }
+  }).catch((err) => {
+    logStartup('bundled-skill-seed crashed', { err: err?.stack || String(err) })
+  })
 
   app.whenReady().then(() => {
     try {

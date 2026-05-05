@@ -4,6 +4,302 @@
 
 ---
 
+## 2026-05-05 · 1.3.3 发布准备 · 内置 6 个最早 skill 首次启动注入 + R8#19-24 累计修复打包
+
+主题：**1.3.3 把 confucius/laozi/mozi/plato/socrates/aristotle 6 个 skill 打入 asar,首次启动自动 import 到 ~/.lit-manager/agent/personas/,新用户安装即用**
+
+### 1.3.3 新增
+
+`package.json` build.files
+1. 加 `skills/**/*` 让 electron-builder 把 skills/ 整个目录(18 个 skill 的源文件夹,~1.3 MB)进 asar。pack-portable.mjs 默认就会包含 skills/(无 ROOT_EXCLUDES 排除),无需改动。
+
+`electron/ipc/personas.ts` 新增 `seedBundledSkills()` (export)
+1. BUILTIN_SKILL_SLUGS = `['confucius','laozi','mozi','plato','socrates','aristotle']` —— 1.3.2 release 同款 6 位
+2. marker 文件 `~/.lit-manager/.bundled-seeded-v1.3.3` 防重复 seed,版本号挂文件名,未来想"补发"换 marker 名即可
+3. 已存在的 persona(按 skillSlug / canonicalName / name 匹配)跳过,**绝不覆盖** —— 防破坏用户改过的 persona 或社区下载的同名版本
+4. 失败容忍:任何一个 slug 读不到 / parse 失败 / 写盘失败,记 warning 跳过,不影响其它 5 个;整个 seed 错误也不阻塞 app 启动
+5. importedFrom 固定指向 bundled skills 目录(asar 内 / resources 内) —— uninstall 后附属包丢失但 fullMarkdown 仍能用,personas.ts:1611 已有 try/catch 兜底
+
+`electron/main.ts` 启动流程
+1. import `seedBundledSkills` 并在 IPC register 之后 fire-and-forget 调用
+2. seed 不阻塞 createWindow → 窗口照常弹出,seed 在后台跑 ~100ms
+3. logStartup 写出 `{ seeded, skipped, failed }`,crash.log 可查
+
+### 累计修复(从 1.3.2 → 1.3.3 的 6 轮 night-shift Bug)
+
+| Round | 主题 | 风险等级 |
+|---|---|---|
+| R8#19 | HTML/MD 内相对路径图片渲染断 | 中(用户可见功能性问题) |
+| R8#20 | TranslateModal timer race + cleanup leak | 低 |
+| R8#21 | personaId 路径清洗(防 IPC 路径穿越) | 低(defense-in-depth) |
+| R8#22 | second-instance win.flashFrame isDestroyed 防御 | 低 |
+| R8#23 | 混元 thinking 字段双注入清理(reasoning_effort 单字段) | 中(若 TokenHub 严格校验 → 400) |
+| R8#24 | probeOllama timer finally clear | 极低 |
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0(main 235ms / preload 13ms / renderer 4.77s)
+- `tsc -b --noEmit`: 58 个 baseline 错误维持不变(本批改动无新增 TS 问题)
+- `npm run dist`: 待跑(下一步)
+- `node scripts/compress-asar.mjs`: 待跑(下一步)
+
+### 后续
+
+待 dist 完成后:
+1. 上传 GitHub Release `v1.3.3` artifacts(NSIS / portable / mac zip)
+2. 上传 `app.asar.gz` 用于 1.3.2 → 1.3.3 应用内更新
+3. 用户冒烟测试(无痕窗口验证 Google + GitHub OAuth 登录,因为 OAuth client secret 已 rotate 完成,见 community_preview/SESSION_STATE.md 注脚)
+
+---
+
+## 2026-05-05 · Batch 67 · 夜间值守 Round 8 #24 · Bug · probeOllama timer finally clear
+
+主题：**Bug · probeOllama 的 1.5s abort timer 在 catch 路径不 clear,与同文件 fetchAndExtract / personas.ts / onlineSearch.ts / personas-search-helper.ts 的 try-finally 模式不一致**
+
+### 修了什么(R8#24)
+
+`electron/ipc/aiApi.ts:624-641`
+
+`probeOllama()` 用 AbortController + 1.5s timer 守护 fetch:
+- try 路径:fetch 完成后 line 629 `clearTimeout(timer)` ✓
+- **catch 路径:fetch 抛错(daemon 不在 / DNS 失败 / refused)时 timer 不 clear**
+
+修法:把 `const ctrl` / `const timer` 提到 try 外,`clearTimeout` 移到 finally。
+
+### 为什么有用
+
+实际副作用很轻 —— 1.5s 后 timer fire 调用一个已结束的 AbortController.abort() 是 noop,不会 throw 或污染状态。但:
+1. Node 仍持有 timer handle 1.5s,Settings 面板每次打开都 probe 一次,长会话累积
+2. 跟同文件 line 968 `fetchAndExtract` 的 try-finally 模式不一致 —— 同一作者两种风格,未来读者会困惑哪个是对的
+3. 关闭即时性:Settings 关掉后 timer 还得跑完才释放
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0(main 264ms / preload 14ms / renderer 4.73s)
+- `tsc -b --noEmit`: 58 个 baseline 错误维持不变
+
+### 后续  下轮 Round 8 #25 必须 PERF 或 UX(R8#19-24 连做 6 个 Bug,因为用户显式调用"软件整体的多轮 bug 排查"+"重点验证腾讯混元接入"两次 override 类型轮换;现在恢复正常)。
+
+继续观察(本次 sweep 未修):
+- 混元 `chatUrl: tokenhub.tencentmaas.com` / 4 个模型 ID 静态层无法验证,需实测一次混元请求看 API 是否真的工作
+- 混元 `hunyuan-2.0-thinking-` 系列若强制 thinking,effort=low 时可能被服务端忽略 / 报错 —— 等用户反馈
+- `aiThrottle.ts:537 setInterval(broadcastStatus)` 用 unref(),没在 before-quit clear 但 process exit 自然死亡,无 leak
+
+---
+
+## 2026-05-05 · Batch 66 · 夜间值守 Round 8 #23 · Bug · 混元 thinking 字段双注入清理
+
+主题：**Bug · 腾讯混元 TokenHub 接入里 effort 注入冗余 body.thinking(Anthropic 风格字段),严格 schema 校验下可能 400,移除只保留 reasoning_effort**
+
+### 修了什么(R8#23)
+
+`electron/ipc/aiApi.ts:456-458`
+
+原代码:
+```ts
+} else if (providerId === 'hunyuan') {
+  body.reasoning_effort = effort
+  body.thinking = { type: effort === 'low' ? 'disabled' : 'enabled' }
+}
+```
+
+移除 `body.thinking` 那一行,只保留 `body.reasoning_effort`。
+
+### 为什么有用
+
+腾讯混元 TokenHub(`tokenhub.tencentmaas.com/v1/chat/completions`)是 OpenAI 兼容接口:
+- `reasoning_effort` 是 OpenAI 标准字段(GPT-5 / o-series 都用),OpenAI compat 接口几乎肯定接受 ✓
+- `body.thinking = { type: 'enabled' / 'disabled' }` 是 **Anthropic Messages API** 的字段格式
+  - 腾讯混元官方文档没出现过顶级 thinking 字段
+  - 候选的腾讯式 thinking 字段是 `extra_body.enable_thinking`(同 Qwen)或 `chat_options.thinking`,但都不是顶级
+
+两种可能后果:
+1. **严格 schema 校验** → 整个请求 400 失败 → 用户选混元任何含 effort 的请求都挂
+2. **容忍未知字段** → thinking 被静默忽略,reasoning_effort 仍生效
+
+第 1 种是 blocker,第 2 种字段冗余无害。**移除冗余字段是最稳的方向**。
+
+### 接入静态验证总览
+
+混元接入主体是完整的:
+- Provider 定义(id/chatUrl/models/auth) `aiApi.ts:154-166` ✓
+- API key 存取(走 generic IPC 自动覆盖) ✓
+- Rate limit 30 RPM / 2 并发 `aiRateLimits.ts:50-55` ✓
+- Effort/thinking 注入(hy3 / thinking 模型) `aiApi.ts:412-413, 456-458` 本轮修
+- Web search(manual function calling loop) `aiApi.ts:891` ✓
+- UI 自动可见(ModelSelector 是 provider-agnostic) ✓
+
+未验证项(需运行时实测):
+- `chatUrl: tokenhub.tencentmaas.com` 域名静态层无法验证,DNS / SSL 握手要实际触发
+- 4 个模型 ID(`hy3-preview` / `hunyuan-2.0-thinking-20251109` / `hunyuan-2.0-instruct-20251111` / `hunyuan-role-latest`)是日期 snapshot 形式,未来腾讯版本切换需手动跟进
+- `hunyuan-2.0-thinking-` 系列是否强制 thinking 模式 / effort=low 是否被尊重,要实测
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0(main 264ms / preload 14ms / renderer 4.73s)
+
+---
+
+## 2026-05-05 · Batch 65 · 夜间值守 Round 8 #22 · Bug · second-instance win.flashFrame isDestroyed 防御
+
+主题：**Bug · 单实例锁 second-instance 触发后 3s,主窗口若已销毁裸调 flashFrame 会抛 "Object has been destroyed",同 R4#4 模式补 isDestroyed 兜底**
+
+### 修了什么(R8#22)
+
+`electron/main.ts:218`
+
+`app.on('second-instance', ...)` 用户启动第二个拾卷实例时,旧实例窗口闪烁 3s 提示。原:
+```ts
+setTimeout(() => win.flashFrame(false), 3000)
+```
+3s 内用户关 app / 旧主窗口被替换 / mac dock 触发关窗保活 → win 进 destroyed 状态,timer fire 时 flashFrame(false) 抛错。
+
+修:加 `if (!win.isDestroyed()) win.flashFrame(false)` 兜底。timer handle 不 track —— second-instance 事件稀疏触发,单 timer 闭包 leak 量级可忽略。
+
+### 为什么有用
+
+跟 R4#4(`midnight scheduler win.isDestroyed()` 检查)是同一类问题。R4#4 已经把 setInterval 那条线扫干净,这里是漏网的 setTimeout 同模式。后者触发概率更低(用户得真正启动第二实例),但行为一旦撞上是 main process exception,会污染 crash log。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0(main 233ms / preload 13ms / renderer 4.12s)
+- `tsc -b --noEmit`: 58 个 baseline 错误维持不变,无新增
+
+---
+
+## 2026-05-05 · Batch 64 · 夜间值守 Round 8 #21 · Bug · personaId 路径清洗(全 IPC 覆盖)
+
+主题：**Bug · personaId / sessionId 进 path.join 无清洗,defense-in-depth 挡路径穿越,同 R2#γ / R4#3 / R8#16 模式**
+
+### 修了什么(R8#21)
+
+`electron/ipc/personas.ts`
+
+新增 helper:
+```ts
+const SAFE_PERSONA_ID = /^[a-zA-Z0-9_-]+$/
+function isUnsafePersonaId(id: unknown): boolean {
+  return typeof id !== 'string' || !SAFE_PERSONA_ID.test(id)
+}
+```
+
+11 个接收 personaId 的 IPC handler 入口加早返:
+- `persona-load` / `persona-save`(校验 `persona.id`)/ `persona-reveal` / `persona-delete`
+- `persona-append-source` / `persona-export-skill`
+- `persona-rag-retrieve` / `persona-rag-build` / `persona-rag-status` / `persona-rag-clear`
+- `persona-get-system-prompt`
+
+不通过返回 `{ success: false, error: 'personaId 含非法字符' }`,handler body 不执行。
+
+`electron/ipc/personaPortrait.ts`
+
+`persona-get-portrait` 入口同样加 SAFE_PERSONA_ID 校验(避免 portrait 加载阶段绕过 personas.ts 的校验)。
+
+`electron/ipc/summonSession.ts`
+
+新增 SAFE_ID + 两个 helper(unsafePersonaId / unsafeSessionId)。4 个 IPC(summon-session-list / load / save / delete)入口都校验,save 还校验 `session.personaId / session.sessionId`(因为 personaId 从 session 内部字段拿)。
+
+### 为什么有用
+
+R1 观察项的"未来需小心"项,当时被搁置(personaId 由 uuid() 产出安全)。但:
+1. IPC 是 renderer 可控接口,renderer 被 XSS 或前端 bug 都能塞脏 id
+2. 召唤社区 / future imported skill 的 id 来源会随版本变化(skill zip 自带 id 字段)
+3. R2#γ(lecture sessionId) / R4#3(lecture-save sessionId) / R8#16(apprentice weekCode)都已统一加了同样的 defense-in-depth,personaId 是最后一类未覆盖的 path-fragment
+
+修复后:`../../../etc/passwd` / `..\\..\\windows\\system32\\cmd.exe` / 含 `\0\r\n` 的 id 全部被早返挡住,不会触达 path.join。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0(main 231ms / preload 13ms / renderer 4.00s)
+- `tsc -b --noEmit`: 58 个 baseline 错误维持不变,无新增
+
+---
+
+## 2026-05-05 · Batch 63 · 夜间值守 Round 8 #20 · Bug · TranslateModal setTimeout leak
+
+主题：**Bug · 翻译 modal 复制提示 / 保存为文献两条 deferred 操作的 setTimeout 不跟踪,modal 关闭后回调仍触发,同 R2#α / ONBOARD#1 / R7#1 模式**
+
+### 修了什么(R8#20)
+
+`src/components/PdfViewer/TranslateModal.tsx`
+
+两处裸 setTimeout 改用 ref 跟踪:
+- `handleCopyResult` 复制成功 1.8s 后清"已复制到剪贴板"提示 → `copyMsgTimerRef`
+- `handleSaveAsEntry` 保存为文献 400ms 后调 `onClose` 自动关 modal → `closeAfterSaveTimerRef`
+
+每次 schedule 前 clear 前一个(防短时间多次操作 timer 累积),unmount cleanup useEffect 清两个 timer。`useRef` 加进 react import。
+
+### 为什么有用
+
+TranslateModal 是 PdfViewer 的子模块,在文献切换 / 用户关 modal / 用户连点保存按钮时频繁 mount/unmount。原本 `setTimeout(() => setLocalProgressMsg(''), 1800)` 直接裸跑,modal 切 open=false 不 unmount 也好,unmount 也好,1.8s 内 fire 都会:
+- 在 hidden 组件上 set state(无害但污染 React 警告)
+- onClose 在已经关掉的 modal 上重复调用(可能触发父组件 stale state 路径)
+- 用户连点复制按钮 → 累积多个 timer,最后一个赢但中间几个空跑
+
+跟 R2#α(LectureMode handleGenerateSummary stream leak)/ ONBOARD#1(OnboardingModal goToFeatureTour timer)/ R7#1(rereading AI stream)是同一类问题。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0(main 239ms / preload 13ms / renderer 4.82s)
+
+---
+
+### 后续  下轮 Round 8 #23 必须 PERF 或 UX(本轮 #20-22 连做 3 个 Bug,因为用户显式调用"软件整体的多轮 bug 排查"override 了类型轮换;现在恢复正常)。
+
+观察清单(本次 sweep 发现但未修):
+- `OnlineSearchModal.tsx:93` setTimeout 无 cleanup —— 在线搜索整体封锁中,触发不到,留待功能复活时再修
+- `MemoList.tsx` 4 处 inline `setTimeout(() => ref?.focus(), 50)` —— ref 链式调用本身安全,优雅性问题不是 bug
+- `agent-save-skills` / `agent-save-insight` 无 RMW 锁 —— UI 已下线,触发不到,只为 legacy 用户文件读写保留
+
+---
+
+## 2026-05-05 · Batch 62 · 夜间值守 Round 8 #19 · Bug · HTML/MD 相对路径图片渲染断
+
+主题：**Bug · srcdoc iframe + react-markdown 没有 file 锚点导致 HTML/MD 内相对路径图全断,补 base href + img resolver 修通**
+
+### 修了什么(R8#19)
+
+`src/components/PdfViewer/PdfViewer.tsx`
+
+1. 新增 module-scope helper `fileBaseUrl(absPath)`：把 `.html` / `.md` 的绝对路径转成它所在目录的 `file:///...` URL。Windows 反斜杠 → 正斜杠,encodeURI 处理中文/空格。
+
+2. `HtmlViewer` srcdoc 注入 `<base href>`：原本 `frame.srcdoc = html` 让 iframe 的 origin 是 `about:srcdoc`,所有 `<img src="images/x.png">` 这种相对引用都解析不到。`<base>` 必须放 head 最前(浏览器只认第一个 base),所以在 typographyStyle 注入之前先处理。
+
+3. `TextFileContent`(.md/.txt 渲染) 给 `<Markdown>` 加 `rehypeRaw` + 自定义 `img` 组件:
+   - `rehypeRaw` 让源文里的原生 `<img>` / `<a>` 标签生效(教材/Obsidian 导出 markdown 经常这样写,之前会被当文本忽略)
+   - 自定义 `img` 把相对 src 拼成 file:// 绝对 URL,external 协议(http/data/file)直通
+
+不动:
+- PDF(react-pdf 把图嵌入 canvas,工作正常)
+- DOCX(mammoth.convertToHtml 默认把图转 base64 data URI 内联,工作正常)
+- `.doc` 二进制(mammoth 不支持,本轮范围只动图片;后续单独评估删 SUPPORTED_EXTS 还是换库)
+
+### 为什么有用
+
+调研发现拾卷支持的 5 类格式里 PDF/DOCX 图片正常,**HTML/MD 在用户最常见的"图文同目录"场景下完全断**(教材导出、Obsidian 笔记、HTML 备份都是这种结构)。Wallpaper/截图/示意图全部加载失败,用户看到 broken image icon。本轮把 HTML 和 MD 的相对路径 image src 都接到本地文件系统,5 类格式里能渲染图的从 2/5 提到 4/5。
+
+主进程 `webSecurity:false` 早就开了(原本是为了 PDF 加载),file:// 资源加载本来就允许,本次只是给两个 viewer 补上"找得到文件位置"的锚点。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0(main 231ms / preload 15ms / renderer 4.00s)
+- baseline `tsc -b --noEmit` 错误数 58 → 58(全部为既存错误,行号偏移与本轮新增 14/26/42 行完全一致,无新增类型问题)
+
+### 后续  下轮 Round 8 #20 必须 PERF 或 UX(因为 #19 是 Bug)。
+
+注:2026-04-30 / 2026-05-02 两条 "继承开发 · UX · ...扩散收口" 没占用主 Round 计数(标题无 `Batch N · Round 8 #N`),按未编号 follow-up 处理,所以本轮接 R8#18 之后编 #19。
+
+`.doc` 二进制 / SUPPORTED_EXTS 处置作为独立 follow-up 留给 UX 或 Bug 轮:目前 mammoth 喂 .doc 会失败显示 "DOCX 解析失败:...",不算静默 bug,但 SUPPORTED_EXTS 仍声称支持,属于伪装可用。
+
+---
+
 ## 2026-05-02 · 1.3.2 发布准备 · 在线搜索封锁 / 召唤社区上线
 
 主题：**把当前版本定为 1.3.2，暂时关闭在线搜索，并只开放六位人物 skill**

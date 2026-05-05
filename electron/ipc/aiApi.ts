@@ -454,8 +454,15 @@ function injectEffort(body: any, providerId: string, modelId: string, effort?: E
     body.extra_body = body.extra_body || {}
     body.extra_body.enable_thinking = effort === 'high' || effort === 'medium'
   } else if (providerId === 'hunyuan') {
+    // BUG-FIX R8#23 · 腾讯混元 TokenHub 是 OpenAI 兼容接口,thinking 控制只确定接受
+    //   顶级 reasoning_effort(OpenAI 标准字段)。原代码同时塞了 body.thinking =
+    //   { type: 'enabled'/'disabled' },但这是 Anthropic Messages API 的字段格式,
+    //   腾讯官方文档未列出 TokenHub 接受顶级 thinking 字段。
+    //   如果 TokenHub 严格 schema 校验未知字段 → 400 失败;若容忍 → 字段被忽略,
+    //   effort 仍通过 reasoning_effort 生效。两种结果里"严格校验 → 整请求挂"是
+    //   blocker,移除冗余字段是最稳的方向。未来如腾讯发布官方 thinking 字段格式
+    //   再补(常见候选:extra_body.enable_thinking 同 Qwen / chat_options.thinking)。
     body.reasoning_effort = effort
-    body.thinking = { type: effort === 'low' ? 'disabled' : 'enabled' }
   } else if (providerId === 'glm') {
     // GLM-5 thinking 是布尔开关：high → 开，low/medium → 关
     if (effort === 'high') body.thinking = { type: 'enabled' }
@@ -622,11 +629,15 @@ async function callClaudeCli(messages: Array<{ role: string; content: string }>,
 // short timeout. Short timeout is deliberate — Settings UI blocks on this and
 // we don't want it hanging for 30s when Ollama isn't installed.
 async function probeOllama(): Promise<{ available: boolean; models: Array<{ id: string; name: string }> }> {
+  // BUG-FIX R8#24 · 把 timer 提到 try 外,clearTimeout 移到 finally。
+  //   原代码 clearTimeout 在 try 内 fetch 之后,catch 路径(fetch 抛错时)不清 timer。
+  //   1.5s 后 ctrl.abort() 调一个已结束的 controller(noop),没有真副作用,但 Node
+  //   仍会持有 timer handle 直到 fire,且与同文件 fetchAndExtract / personas.ts /
+  //   onlineSearch.ts / personas-search-helper.ts 的 try-finally 模式不一致。
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 1500)
   try {
-    const ctrl = new AbortController()
-    const timer = setTimeout(() => ctrl.abort(), 1500)
     const res = await fetch(`${OLLAMA_ENDPOINT}/api/tags`, { signal: ctrl.signal })
-    clearTimeout(timer)
     if (!res.ok) return { available: false, models: [] }
     const data: any = await res.json()
     const rawModels = Array.isArray(data?.models) ? data.models : []
@@ -637,6 +648,8 @@ async function probeOllama(): Promise<{ available: boolean; models: Array<{ id: 
     return { available: true, models }
   } catch {
     return { available: false, models: [] }
+  } finally {
+    clearTimeout(timer)
   }
 }
 

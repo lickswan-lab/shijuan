@@ -20,7 +20,8 @@
       "output": "dist"
     },
     "files": [
-      "out/**/*"
+      "out/**/*",
+      "skills/**/*"
     ],
     "win": {
       "target": [

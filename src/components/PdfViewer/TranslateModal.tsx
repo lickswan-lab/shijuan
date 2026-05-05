@@ -14,7 +14,7 @@
 // Why inline instead of a PdfViewer-local helper: the modal is self-contained
 // and might also be triggered from the top bar in the future; keeping it in a
 // separate file lets that happen without further refactoring.
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useUiStore } from '../../store/uiStore'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useTranslationJobsStore } from '../../store/translationJobsStore'
@@ -143,6 +143,24 @@ export default function TranslateModal(props: TranslateModalProps) {
   const [range, setRange] = useState<{ start: number; end: number }>({ start: 1, end: Math.min(5, totalPages || 1) })
   const [localProgressMsg, setLocalProgressMsg] = useState('')
 
+  // BUG-FIX R8#20 · 跟踪两条 deferred 操作的 timer:
+  //   - copyMsgTimerRef:复制成功后 1.8s 清掉"已复制到剪贴板"提示
+  //   - closeAfterSaveTimerRef:保存为文献成功后 400ms 自动关 modal
+  //   原本 setTimeout 直接裸跑,modal 关掉(open=false)或 unmount 后,delay 内的回调
+  //   仍会触发 setLocalProgressMsg / onClose,污染 React 状态或重复关闭。
+  const copyMsgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const closeAfterSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Unmount cleanup:把两个 timer 全清掉。即使 modal 只是切 open=false 不 unmount,
+  // 下方 handleCopyResult / handleSaveAsEntry 内部 schedule 新 timer 之前也会
+  // clear 前一个,所以重叠触发也安全。
+  useEffect(() => {
+    return () => {
+      if (copyMsgTimerRef.current) clearTimeout(copyMsgTimerRef.current)
+      if (closeAfterSaveTimerRef.current) clearTimeout(closeAfterSaveTimerRef.current)
+    }
+  }, [])
+
   // Local model override — defaults to the globally selected model but can be
   // overridden per-translation (e.g. pick a bigger model for long docs).
   // We keep it local so switching here doesn't pollute the global choice used
@@ -228,7 +246,12 @@ export default function TranslateModal(props: TranslateModalProps) {
     try {
       await navigator.clipboard.writeText(result)
       setLocalProgressMsg('已复制到剪贴板')
-      setTimeout(() => setLocalProgressMsg(''), 1800)
+      // BUG-FIX R8#20 · clear 前一个再 schedule,防短时间多次复制 timer 累积
+      if (copyMsgTimerRef.current) clearTimeout(copyMsgTimerRef.current)
+      copyMsgTimerRef.current = setTimeout(() => {
+        copyMsgTimerRef.current = null
+        setLocalProgressMsg('')
+      }, 1800)
     } catch {
       setLocalProgressMsg('复制失败，请手动选择文本')
     }
@@ -286,7 +309,13 @@ export default function TranslateModal(props: TranslateModalProps) {
       // Close the modal and open the new entry so the user sees it
       // immediately — same UX as "保存为备忘" jumps into the memo.
       openEntry(entry).catch(() => {})
-      setTimeout(() => onClose(), 400)
+      // BUG-FIX R8#20 · clear 前一个再 schedule,防用户连点保存按钮 onClose 被
+      //   重复调度。modal unmount 时 cleanup 会清掉。
+      if (closeAfterSaveTimerRef.current) clearTimeout(closeAfterSaveTimerRef.current)
+      closeAfterSaveTimerRef.current = setTimeout(() => {
+        closeAfterSaveTimerRef.current = null
+        onClose()
+      }, 400)
     } catch (err: any) {
       setLocalProgressMsg(`保存失败：${err?.message || err}`)
     }
