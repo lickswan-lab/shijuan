@@ -4,18 +4,20 @@
 
 ---
 
-## 2026-05-05 · 1.3.3 发布准备 · 内置 6 个最早 skill 首次启动注入 + R8#19-24 累计修复打包
+## 2026-05-05 · 1.3.4 发布 · 内置 6 个最早 skill 首次启动注入 + R8#19-24 累计修复
 
-主题：**1.3.3 把 confucius/laozi/mozi/plato/socrates/aristotle 6 个 skill 打入 asar,首次启动自动 import 到 ~/.lit-manager/agent/personas/,新用户安装即用**
+主题：**1.3.4 把 confucius/laozi/mozi/plato/socrates/aristotle 6 个 skill 打入 asar,首次启动自动 import 到 ~/.lit-manager/agent/personas/,新用户安装即用**
 
-### 1.3.3 新增
+注:1.3.3 是 2026-05-04 GitHub Actions 自动 build 上线的版本(无内置 skill,无本批 R8 修复)。本次新功能跳过 1.3.3 改 tag 直接发 1.3.4,保留 1.3.3 release 历史可回滚。
+
+### 1.3.4 新增
 
 `package.json` build.files
 1. 加 `skills/**/*` 让 electron-builder 把 skills/ 整个目录(18 个 skill 的源文件夹,~1.3 MB)进 asar。pack-portable.mjs 默认就会包含 skills/(无 ROOT_EXCLUDES 排除),无需改动。
 
 `electron/ipc/personas.ts` 新增 `seedBundledSkills()` (export)
 1. BUILTIN_SKILL_SLUGS = `['confucius','laozi','mozi','plato','socrates','aristotle']` —— 1.3.2 release 同款 6 位
-2. marker 文件 `~/.lit-manager/.bundled-seeded-v1.3.3` 防重复 seed,版本号挂文件名,未来想"补发"换 marker 名即可
+2. marker 文件 `~/.lit-manager/.bundled-seeded-v1.3.3` 防重复 seed(版本号沿用 v1.3.3 是因为代码先在 1.3.3 写,改名重发会让旧 1.3.3 的 user 重复 seed)
 3. 已存在的 persona(按 skillSlug / canonicalName / name 匹配)跳过,**绝不覆盖** —— 防破坏用户改过的 persona 或社区下载的同名版本
 4. 失败容忍:任何一个 slug 读不到 / parse 失败 / 写盘失败,记 warning 跳过,不影响其它 5 个;整个 seed 错误也不阻塞 app 启动
 5. importedFrom 固定指向 bundled skills 目录(asar 内 / resources 内) —— uninstall 后附属包丢失但 fullMarkdown 仍能用,personas.ts:1611 已有 try/catch 兜底
@@ -46,10 +48,9 @@
 
 ### 后续
 
-待 dist 完成后:
-1. 上传 GitHub Release `v1.3.3` artifacts(NSIS / portable / mac zip)
-2. 上传 `app.asar.gz` 用于 1.3.2 → 1.3.3 应用内更新
-3. 用户冒烟测试(无痕窗口验证 Google + GitHub OAuth 登录,因为 OAuth client secret 已 rotate 完成,见 community_preview/SESSION_STATE.md 注脚)
+1. push tag `v1.3.4` → GitHub Actions workflow `.github/workflows/build.yml` 自动 build 三平台(win + mac-intel + mac-arm) + softprops/action-gh-release publish 到 v1.3.4 release
+2. 18 个 skill zip(community_preview/assets/skills/*.zip)单独上传到 v1.3.4 release "备着"作为 fallback / 离线分发
+3. 用户冒烟测试 Google + GitHub OAuth 登录(client secret 已 rotate 见 community_preview/SESSION_STATE.md 注脚)
 
 ---
 
