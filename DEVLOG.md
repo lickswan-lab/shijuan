@@ -4,6 +4,67 @@
 
 ---
 
+## 2026-05-06 · Batch 69 · 夜间值守 Round 8 #26 · UX · 召唤态粘性化 · popover 选→设态,noteInput 发→走 persona
+
+主题：**UX · 注释面板召唤从"一选立即生成"改为"选完保持召唤态,后续 noteInput 都用该 persona 答",支持多轮对话**
+
+### 修了什么(R8#26)
+
+`src/components/AnnotationPanel/AnnotationPanel.tsx`:
+
+旧流程:
+```
+用户选中文字 → 点"召唤"打开 popover → 选老子
+  ↓ 立即:handleSummonAnnotate(老子) 一次性生成批注 → 完
+```
+
+新流程(粘性召唤态):
+```
+用户选中文字 → 点"召唤" popover → 选老子
+  ↓ setActivePersona({老子}) — UI 出现召唤态指示条
+用户在 noteInput 写问题 → 点 "问 老子"
+  ↓ handleAskQuestion 检查 activePersona → 走 handleSummonAnnotate
+老子回答存入 historyChain
+用户继续写下一个问题 → 仍是老子答(persona 保持)
+…
+用户点 "退出" 按钮 → setActivePersona(null) → 回学徒模式
+切到另一篇文献 → activePersona 自动 reset(useEffect on currentEntry?.id)
+```
+
+具体改动:
+
+1. **加 state** `activePersona: { id, name } | null`(in-memory,切文献 reset)
+2. **popover onClick** 改为 `setActivePersona({...})`,不再直接调 `handleSummonAnnotate`
+3. **handleAskQuestion 分流** —— 有 `activePersona` 走 persona 路径(persona system_prompt + RAG),无则走旧学徒路径(`handleAskQuestionWithText`)
+4. **召唤态指示条** 渲染在 textarea 上方,显示 "当前由 X 视角批注 / 应答" + 退出按钮
+5. **placeholder 切换** —— 召唤态:`"想问 X 什么？(留空也可)"`;学徒:原文案
+6. **send 按钮** —— 文字按 activePersona 切 "问 X" / "发送 AI";召唤态允许空 noteInput(让 persona 自行批注),学徒态仍需要 noteInput
+
+### 为什么有用
+
+用户截图反馈:点"召唤老子"立即出来一段批注,**但他没机会带着具体问题"问"老子**。当前实现是 prompt 模板硬编码"请以你的视角批注下面这段文字",不支持"我对老子有具体疑问,想和老子来回讨论"。
+
+新流程让召唤变成"对话伙伴"模式:选完就是开了对话频道,用户可以打多个问题,每次老子用 persona system_prompt(含蒸馏出来的心智模型 / 思想张力等)回答,真正发挥蒸馏的价值。
+
+`handleSummonAnnotate` 的核心逻辑(读 systemPrompt → 构造 userQ → startJob)保留不动 —— 它本来就支持 noteInput 作为用户追问(line 1585 有 `noteInput.trim() ? ...` 分支),只是之前 popover 一选就 immediate fire 让这条分支几乎没机会用。本次改动让"用户先写问题再 fire"成为主路径。
+
+### 验证
+
+- `npx tsc --noEmit`: EXIT=0
+- `npm run build`: EXIT=0(main 218ms / preload 12ms / renderer 4.17s)
+- baseline `tsc -b --noEmit` 错误数维持
+
+### 后续
+
+下轮 Round 8 #27 必须 Bug 或 PERF(因为 #26 是 UX)。
+
+跟随观察项:
+- 召唤态下"继续问下一个" 时,handleSummonAnnotate 每次都重新 personaGetSystemPrompt(含 RAG retrieve) —— 如果用户连发 5 个问题,5 次 RAG 检索,可能慢。考虑 cache systemPrompt per (personaId, anchorText) 在 activePersona 期间复用
+- 若用户切换到另一段选中文字,召唤态保留但 anchor 变了 —— 当前代码直接用新 anchor,语义合理。但 UI 上 active persona 不变可能让用户以为还在原段落上下文。考虑选中变化时清掉
+- 目前没把 activePersona 持久化到 PdfMeta,所以应用重启后状态丢。这是有意的(召唤态是会话级临时状态),但若用户希望"上次召唤的人保持到下次打开",可以考虑写到 uiStore localStorage。本批不做
+
+---
+
 ## 2026-05-06 · Batch 68 · 夜间值守 Round 8 #25 · PERF · 注释栏拖动同步 IO 阻塞清除
 
 主题：**PERF · AnnotationPanel resize 拖动 onMove 每帧 localStorage.setItem(同步 IO ~2-5ms),60Hz 拖动累计 240ms/秒主线程阻塞,改成 raf 节流 setState + mouseup 一次性 persist**

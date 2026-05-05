@@ -883,6 +883,12 @@ export default function AnnotationPanel() {
   const [personaListAnno, setPersonaListAnno] = useState<Array<{ id: string; name: string; canonicalName?: string; currentFitnessTotal?: number }>>([])
   // Popover toggle for the 召唤 button — shows persona picker above the button.
   const [personaPopoverOpen, setPersonaPopoverOpen] = useState(false)
+  // UX-R8#26 · 召唤态:popover 选完 persona 后保持(粘性),之后 noteInput 发送都走
+  //   该 persona 的 system_prompt 多轮对话,不再"一选就 immediate generate"。null = 学徒模式。
+  //   in-memory only(切文献 reset),不持久化:用户期望"召唤态"是当前阅读会话内的临时状态。
+  const [activePersona, setActivePersona] = useState<{ id: string; name: string } | null>(null)
+  // 切换文献时退出召唤态(用户在新文献里通常想从学徒模式重新开始,而不是继承上篇的 persona)
+  useEffect(() => { setActivePersona(null) }, [currentEntry?.id])
   // P0-2: popover 外层容器 ref — 用 document click 判断点击在容器外时关闭，替代仅靠再点按钮
   const summonPopoverRef = useRef<HTMLDivElement | null>(null)
   // P0-3: 召唤失败用 in-app toast 替代 alert()，5s 自消失
@@ -1552,8 +1558,14 @@ export default function AnnotationPanel() {
 
   // Convenience wrapper
   const handleAskQuestion = useCallback(() => {
+    // UX-R8#26 · 召唤态分流:有 activePersona → 走 persona 路径(handleSummonAnnotate
+    //   会用 noteInput 作为用户追问,持续粘性);否则学徒路径(handleAskQuestionWithText)。
+    if (activePersona) {
+      void handleSummonAnnotate(activePersona.id, activePersona.name)
+      return
+    }
     handleAskQuestionWithText(noteInput)
-  }, [noteInput, handleAskQuestionWithText])
+  }, [noteInput, handleAskQuestionWithText, activePersona])
 
   // Summon-mode annotate — call a distilled persona's skill as system prompt
   // and ask it to annotate the currently selected text. Result becomes an
@@ -2187,8 +2199,37 @@ export default function AnnotationPanel() {
 
       {/* Unified input area */}
       <div className="ai-chat-input">
+        {/* UX-R8#26 · 召唤态指示条:有 activePersona 时显示当前由谁答 + 退出按钮。
+             位置在 textarea 之上让用户写问题前一眼看清"现在是 X 模式"。 */}
+        {activePersona && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '6px 10px', marginBottom: 6,
+            background: 'rgba(200, 149, 108, 0.10)',
+            border: '1px solid rgba(200, 149, 108, 0.35)',
+            borderRadius: 6, fontSize: 11.5, color: 'var(--text-secondary)',
+          }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent-hover)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2l2.39 4.84L20 8l-4 3.9.94 5.55L12 14.77 7.06 17.45 8 11.9 4 8l5.61-1.16L12 2z"/>
+            </svg>
+            <span style={{ flex: 1 }}>当前由 <b style={{ color: 'var(--accent-hover)' }}>{activePersona.name}</b> 视角批注 / 应答</span>
+            <button
+              onClick={() => setActivePersona(null)}
+              title="退出召唤态,回到学徒模式"
+              style={{
+                fontSize: 11, padding: '3px 8px', border: '1px solid var(--border)',
+                background: 'transparent', borderRadius: 4, cursor: 'pointer',
+                color: 'var(--text-muted)',
+              }}
+            >退出</button>
+          </div>
+        )}
         <textarea
-          placeholder={hasNewContext ? '针对补充选中的文本写下想法...' : '写下想法 / 向 AI 提要求...'}
+          placeholder={
+            activePersona
+              ? `想问 ${activePersona.name} 什么？(留空也可,直接发送让其自行批注)`
+              : (hasNewContext ? '针对补充选中的文本写下想法...' : '写下想法 / 向 AI 提要求...')
+          }
           value={noteInput}
           onChange={e => setNoteInput(e.target.value)}
           onKeyDown={e => {
@@ -2223,10 +2264,12 @@ export default function AnnotationPanel() {
             <button
               className="btn btn-sm"
               onClick={handleAskQuestion}
-              disabled={aiLoading || !noteInput.trim()}
+              // UX-R8#26 · 召唤态允许空 noteInput(persona 自行批注模式);
+              //   非召唤态仍需要 noteInput(学徒路径需要明确问题)
+              disabled={aiLoading || (!activePersona && !noteInput.trim())}
               style={{ fontSize: 12, padding: '6px 14px', whiteSpace: 'nowrap', flexShrink: 0 }}
             >
-              {aiLoading ? '...' : '发送 AI'}
+              {aiLoading ? '...' : (activePersona ? `问 ${activePersona.name}` : '发送 AI')}
             </button>
             {/* 召唤名家在批注旁留言——2026-04 放开。
                 点按钮 → 弹出 persona popover → 选一位 → handleSummonAnnotate。
@@ -2272,9 +2315,12 @@ export default function AnnotationPanel() {
                       {personaListAnno.map(p => (
                         <button
                           key={p.id}
+                          // UX-R8#26 · 进入召唤态(粘性),不立即生成。后续 noteInput 发送
+                          //   会带 persona system_prompt。点同一人物再次=刷新选择,
+                          //   切到别人=换一位,点退出按钮=回学徒模式。
                           onClick={() => {
                             setPersonaPopoverOpen(false)
-                            void handleSummonAnnotate(p.id, p.canonicalName || p.name)
+                            setActivePersona({ id: p.id, name: p.canonicalName || p.name })
                           }}
                           style={{
                             display: 'block', width: '94%', textAlign: 'left',
