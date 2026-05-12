@@ -174,7 +174,7 @@ export interface TextMark {
 
 export interface HistoryEntry {
   id: string
-  type: 'note' | 'question' | 'stance' | 'link' | 'ai_interpretation' | 'ai_qa' | 'ai_feedback' | 'ai_persona'
+  type: 'note' | 'question' | 'stance' | 'link' | 'ai_interpretation' | 'ai_qa' | 'ai_feedback' | 'ai_persona' | 'ai_guide'
   //     笔记    质疑         立场       关联      AI解读               AI问答      AI即时反馈     名家召唤批注
   content: string
   userQuery?: string

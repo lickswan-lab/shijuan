@@ -21,7 +21,7 @@ jobs:
       # 1. Optimized electron-packager path (produces raw-dir zip and extracts app.asar for patch updates)
       - run: node scripts/pack-portable.mjs
       - name: Zip Windows build (packager)
-        run: Compress-Archive -Path "dist-packager\拾卷-win32-x64\*" -DestinationPath "dist-packager\shijuan-win-x64.zip"
+        run: .\scripts\create-windows-zip.ps1 -SourceDir "dist-packager\拾卷-win32-x64" -Destination "dist-packager\shijuan-win-x64.zip" -RootName "shijuan-win-x64"
         shell: pwsh
       - name: Copy app.asar for patch update
         run: Copy-Item "dist-packager\拾卷-win32-x64\resources\app.asar" "dist-packager\app.asar"

@@ -29,6 +29,21 @@ function plainTextCitation(entry: LibraryEntry): string {
   return parts.join(' ').trim()
 }
 
+const inlineTreeInputStyle: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  border: '1px solid var(--accent)',
+  borderRadius: 6,
+  padding: '2px 7px',
+  fontSize: 13,
+  lineHeight: 1.35,
+  outline: 'none',
+  background: 'var(--bg)',
+  color: 'var(--text)',
+  caretColor: 'var(--accent)',
+  boxShadow: '0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent)',
+}
+
 // 2026-04-28 · 嵌套子分组:把 folder 树按 DFS 展平为 (folder, depth) 列表,
 //   用于"移入分组"下拉菜单的缩进显示。父级在子级前面。坏 parentId(指向不存在
 //   的 folder)的当作根级处理,避免数据损坏导致整棵树丢失。
@@ -582,10 +597,7 @@ const FolderItem = memo(function FolderItem({ folder, multiSelect, selectedIds, 
             onKeyDown={e => { if (e.key === 'Enter') handleRename(); if (e.key === 'Escape') setEditing(false) }}
             onClick={e => e.stopPropagation()}
             autoFocus
-            style={{
-              flex: 1, border: '1px solid var(--accent)', borderRadius: 4,
-              padding: '1px 6px', fontSize: 13, outline: 'none', background: 'var(--bg)'
-            }}
+            style={inlineTreeInputStyle}
           />
         ) : (
           <>
@@ -634,10 +646,7 @@ const FolderItem = memo(function FolderItem({ folder, multiSelect, selectedIds, 
                 }}
                 placeholder="子分组名称..."
                 autoFocus
-                style={{
-                  flex: 1, border: '1px solid var(--accent)', borderRadius: 4,
-                  padding: '1px 6px', fontSize: 13, outline: 'none', background: 'var(--bg)',
-                }}
+                style={inlineTreeInputStyle}
               />
             </div>
           )}
@@ -1047,10 +1056,7 @@ function LibraryPanel() {
                   onKeyDown={e => { if (e.key === 'Enter') confirmNewFolder(); if (e.key === 'Escape') setNewFolderName(null) }}
                   placeholder="输入分组名称..."
                   autoFocus
-                  style={{
-                    flex: 1, border: '1px solid var(--accent)', borderRadius: 4,
-                    padding: '1px 6px', fontSize: 13, outline: 'none', background: 'var(--bg)'
-                  }}
+                  style={inlineTreeInputStyle}
                 />
               </div>
             )}

@@ -10,6 +10,7 @@ interface TextSelection {
 
 // ===== Batch OCR queue (v1.2.7) =====
 export type OcrEngine = 'glm' | 'rapidocr'
+const RAPID_OCR_LOCKED = true
 
 export interface OcrQueueItem {
   entryId: string
@@ -74,6 +75,7 @@ interface UiState {
 
   // Annotation color (for next annotation to be created)
   annotationColor: string
+  annotationDraftInput: string | null
 
   // Agent
   rightPanel: 'annotation' | 'agent'
@@ -136,6 +138,7 @@ interface UiState {
   setAiWebSearch: (on: boolean) => void
   setOcrEngine: (engine: OcrEngine) => void
   setAnnotationColor: (color: string) => void
+  setAnnotationDraftInput: (input: string | null) => void
   setRightPanel: (panel: 'annotation' | 'agent') => void
   setHermesHasInsight: (has: boolean) => void
   toggleDarkMode: () => void
@@ -152,6 +155,21 @@ interface UiState {
   setUpdateAvailable: (u: { version: string; downloadUrl: string | null; asarSize: number } | null) => void
   setForceOnboarding: (on: boolean) => void
   setForceFeatureTour: (on: boolean) => void
+}
+
+function emitReaderLayoutWillChange() {
+  // Right-side panels are overlays now, so opening/closing them must not ask
+  // readers to restore layout. The reader should simply keep its scroll.
+}
+
+function emitReaderLayoutDidChange() {
+  // Kept as a named hook for future real layout changes; intentionally no-op.
+}
+
+function withReaderLayoutChange(update: () => void) {
+  emitReaderLayoutWillChange()
+  update()
+  emitReaderLayoutDidChange()
 }
 
 export const useUiStore = create<UiState>((set, get) => ({
@@ -194,10 +212,11 @@ export const useUiStore = create<UiState>((set, get) => ({
   ocrEngine: (() => {
     try {
       const v = localStorage.getItem('sj-ocrEngine')
-      return v === 'rapidocr' ? 'rapidocr' : 'glm'
+      return v === 'rapidocr' && !RAPID_OCR_LOCKED ? 'rapidocr' : 'glm'
     } catch { return 'glm' }
   })(),
   annotationColor: 'yellow',
+  annotationDraftInput: null,
   rightPanel: 'annotation',
   hermesHasInsight: false,
   darkMode: (() => { try { return localStorage.getItem('sj-darkMode') === 'true' } catch { return false } })(),
@@ -218,10 +237,10 @@ export const useUiStore = create<UiState>((set, get) => ({
   forceOnboarding: false,
   forceFeatureTour: false,
 
-  toggleSidebar: () => set(s => ({ sidebarCollapsed: !s.sidebarCollapsed })),
-  toggleAnnotationPanel: () => set(s => ({ annotationPanelCollapsed: !s.annotationPanelCollapsed, rightPanel: 'annotation' as const })),
-  setTextSelection: (sel) => set({ textSelection: sel, annotationPanelCollapsed: sel ? false : true, rightPanel: 'annotation' as const }),
-  setActiveAnnotation: (id) => set({ activeAnnotationId: id, annotationPanelCollapsed: id ? false : true, rightPanel: 'annotation' as const }),
+  toggleSidebar: () => withReaderLayoutChange(() => set(s => ({ sidebarCollapsed: !s.sidebarCollapsed }))),
+  toggleAnnotationPanel: () => withReaderLayoutChange(() => set(s => ({ annotationPanelCollapsed: !s.annotationPanelCollapsed, rightPanel: 'annotation' as const }))),
+  setTextSelection: (sel) => withReaderLayoutChange(() => set({ textSelection: sel, annotationPanelCollapsed: sel ? false : true, rightPanel: 'annotation' as const })),
+  setActiveAnnotation: (id) => withReaderLayoutChange(() => set({ activeAnnotationId: id, annotationPanelCollapsed: id ? false : true, rightPanel: 'annotation' as const })),
   clearAnnotationFocus: () => set({ activeAnnotationId: null, textSelection: null }),
   setSearchQuery: (query) => set({ searchQuery: query }),
   setShowSettings: (show) => set({ showSettings: show }),
@@ -244,8 +263,9 @@ export const useUiStore = create<UiState>((set, get) => ({
     set({ aiWebSearch: on })
   },
   setOcrEngine: (engine) => {
-    try { localStorage.setItem('sj-ocrEngine', engine) } catch { /* ignore */ }
-    set({ ocrEngine: engine })
+    const next = engine === 'rapidocr' && RAPID_OCR_LOCKED ? 'glm' : engine
+    try { localStorage.setItem('sj-ocrEngine', next) } catch { /* ignore */ }
+    set({ ocrEngine: next })
   },
   toggleDarkMode: () => set(s => {
     const next = !s.darkMode
@@ -256,6 +276,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     return { darkMode: next }
   }),
   setAnnotationColor: (color) => set({ annotationColor: color }),
+  setAnnotationDraftInput: (input) => set({ annotationDraftInput: input }),
   // 2026-04-28 CLEAN · setImmersiveMode + setDualPageMode 已删(沉浸式阅读下线)。
   setCurrentVisiblePage: (page) => {
     const cur = get().currentVisiblePage
@@ -299,7 +320,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     },
   }),
   setUpdateAvailable: (u) => set({ updateAvailable: u }),
-  setRightPanel: (panel) => set({ rightPanel: panel, annotationPanelCollapsed: false, ...(panel === 'agent' ? { hermesHasInsight: false } : {}) }),
+  setRightPanel: (panel) => withReaderLayoutChange(() => set({ rightPanel: panel, annotationPanelCollapsed: false, ...(panel === 'agent' ? { hermesHasInsight: false } : {}) })),
   setHermesHasInsight: (has) => set({ hermesHasInsight: has }),
   setForceOnboarding: (on) => set({ forceOnboarding: on }),
   setForceFeatureTour: (on) => set({ forceFeatureTour: on }),

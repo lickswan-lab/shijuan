@@ -74,7 +74,8 @@ export default function BatchOcrRunner() {
           ocrError: undefined,
         })
         // Pass entryId so the backend's chunk-progress events can be correlated here
-        const result = ocrEngine === 'rapidocr'
+        const effectiveOcrEngine = ocrEngine === 'rapidocr' ? 'glm' : ocrEngine
+        const result = effectiveOcrEngine === 'rapidocr'
           ? await api.rapidOcrPdf!(item.absPath, { entryId: item.entryId })
           : await api.glmOcrPdf!(item.absPath, { entryId: item.entryId })
         if (stopped) return

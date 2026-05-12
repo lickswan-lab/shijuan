@@ -1,44 +1,39 @@
-// FeatureTourModal — visual first-run walkthrough.
-// Triggered automatically the first time the user has any AI provider
-// configured AND has not yet seen the current tour. Can also be re-triggered
-// from Settings via `setForceFeatureTour(true)`.
-//
-// The tour now mirrors the 1.3.3 interface:
-//   1. 导入文献
-//   2. 阅读 / OCR
-//   3. 划线 / 高光 / 注释
-//   4. 管理注释与标记
-//   5. 学徒对话
-//   6. 召唤人物
-//
-// Each step pairs short copy with a miniature UI preview. That is more concrete
-// than asking new users to infer behavior from abstract icons.
+// FeatureTourModal: first-run walkthrough aligned with the 1.3.3 interface.
+// It uses small, simplified UI replicas rather than abstract screenshots, so
+// the guide stays readable when the main window is narrow.
 
-import { useEffect, useState, useCallback } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useUiStore } from '../../store/uiStore'
 
 const FLAG_KEY = 'sj-feature-tour-shown-v133'
 
 interface Step {
   title: string
+  label: string
   body: JSX.Element
   icon: JSX.Element
   visual: JSX.Element
 }
 
-// ===== Icons =====
-const iconStyle = { stroke: 'currentColor', strokeWidth: 1.7, fill: 'none', strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const }
+const iconStyle = {
+  stroke: 'currentColor',
+  strokeWidth: 1.8,
+  fill: 'none',
+  strokeLinecap: 'round' as const,
+  strokeLinejoin: 'round' as const,
+}
 
 const ImportIcon = () => (
-  <svg width="34" height="34" viewBox="0 0 24 24" {...iconStyle}>
-    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-    <polyline points="7 10 12 15 17 10" />
-    <line x1="12" y1="15" x2="12" y2="3" />
+  <svg width="32" height="32" viewBox="0 0 24 24" {...iconStyle}>
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    <polyline points="14 2 14 8 20 8" />
+    <line x1="12" y1="18" x2="12" y2="12" />
+    <polyline points="9 15 12 12 15 15" />
   </svg>
 )
 
 const ReaderIcon = () => (
-  <svg width="34" height="34" viewBox="0 0 24 24" {...iconStyle}>
+  <svg width="32" height="32" viewBox="0 0 24 24" {...iconStyle}>
     <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
     <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
     <path d="M9 7h7M9 11h7M9 15h4" />
@@ -46,7 +41,7 @@ const ReaderIcon = () => (
 )
 
 const MarkIcon = () => (
-  <svg width="34" height="34" viewBox="0 0 24 24" {...iconStyle}>
+  <svg width="32" height="32" viewBox="0 0 24 24" {...iconStyle}>
     <path d="M9 11l-6 6v3h3l6-6" />
     <path d="M14 5l5 5" />
     <path d="M16 3l5 5-9 9-5-5z" />
@@ -54,114 +49,214 @@ const MarkIcon = () => (
 )
 
 const NotesIcon = () => (
-  <svg width="34" height="34" viewBox="0 0 24 24" {...iconStyle}>
+  <svg width="32" height="32" viewBox="0 0 24 24" {...iconStyle}>
     <path d="M4 4h16v16H4z" />
     <path d="M8 8h8M8 12h8M8 16h5" />
   </svg>
 )
 
 const DialogueIcon = () => (
-  <svg width="34" height="34" viewBox="0 0 24 24" {...iconStyle}>
-    <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
-    <path d="M8 8h8M8 12h5" />
+  <svg width="32" height="32" viewBox="0 0 24 24" {...iconStyle}>
+    <path d="M12 2 2 7l10 5 10-5-10-5z" />
+    <path d="M2 12l10 5 10-5" />
+    <path d="M2 17l10 5 10-5" />
   </svg>
 )
 
 const SummonIcon = () => (
-  <svg width="34" height="34" viewBox="0 0 24 24" {...iconStyle}>
+  <svg width="32" height="32" viewBox="0 0 24 24" {...iconStyle}>
     <path d="M12 2l2.4 4.9L20 8l-4 3.9.9 5.6L12 14.8 7.1 17.5 8 11.9 4 8l5.6-1.1L12 2z" />
     <path d="M5 21h14" />
   </svg>
 )
 
-// ===== Small UI primitives =====
 const KBD: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <span style={{
-    display: 'inline-block', padding: '1px 7px', fontSize: 11,
-    fontFamily: 'ui-monospace, "Consolas", monospace',
-    border: '1px solid var(--border)', borderBottomWidth: 2,
-    borderRadius: 4, background: 'var(--bg-warm)',
-    color: 'var(--text-secondary)', lineHeight: 1.4,
-    margin: '0 1px', whiteSpace: 'nowrap',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 24,
+    height: 20,
+    padding: '0 7px',
+    border: '1px solid var(--border)',
+    borderBottomWidth: 2,
+    borderRadius: 5,
+    background: 'var(--bg)',
+    color: 'var(--text-secondary)',
+    fontSize: 11,
+    fontFamily: 'ui-monospace, Consolas, monospace',
+    lineHeight: 1,
   }}>{children}</span>
 )
 
-const Pill: React.FC<{ children: React.ReactNode; tone?: 'accent' | 'warm' }> = ({ children, tone = 'warm' }) => (
+const Pill: React.FC<{ children: React.ReactNode; accent?: boolean }> = ({ children, accent = false }) => (
   <span style={{
-    display: 'inline-block', padding: '1px 8px', fontSize: 11.5,
-    border: tone === 'accent' ? '1px solid var(--accent)' : '1px solid var(--border)',
-    borderRadius: 10, background: tone === 'accent' ? 'transparent' : 'var(--bg-warm)',
-    color: tone === 'accent' ? 'var(--accent)' : 'var(--text-secondary)',
-    margin: '0 2px', whiteSpace: 'nowrap',
+    display: 'inline-flex',
+    alignItems: 'center',
+    height: 23,
+    padding: '0 9px',
+    borderRadius: 999,
+    border: accent ? '1px solid var(--accent)' : '1px solid var(--border)',
+    background: accent ? 'rgba(195, 141, 92, 0.10)' : 'var(--bg)',
+    color: accent ? 'var(--accent)' : 'var(--text-secondary)',
+    fontSize: 12,
+    fontWeight: accent ? 600 : 400,
+    whiteSpace: 'nowrap',
   }}>{children}</span>
 )
 
-const MiniButton: React.FC<{ children: React.ReactNode; active?: boolean; accent?: boolean }> = ({ children, active = false, accent = false }) => (
+const MiniButton: React.FC<{ children: React.ReactNode; active?: boolean; compact?: boolean }> = ({
+  children,
+  active = false,
+  compact = false,
+}) => (
   <span style={{
-    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-    minHeight: 20, padding: '2px 8px', borderRadius: 5,
-    border: active || accent ? '1px solid var(--accent)' : '1px solid var(--border)',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: compact ? 24 : 28,
+    padding: compact ? '0 8px' : '0 11px',
+    borderRadius: 7,
+    border: active ? '1px solid var(--accent)' : '1px solid var(--border)',
     background: active ? 'var(--accent)' : 'var(--bg)',
-    color: active ? '#fff' : accent ? 'var(--accent)' : 'var(--text-secondary)',
-    fontSize: 10.5, fontWeight: active || accent ? 600 : 400,
+    color: active ? '#fff' : 'var(--text-secondary)',
+    fontSize: compact ? 11 : 12,
+    fontWeight: active ? 650 : 500,
     whiteSpace: 'nowrap',
   }}>{children}</span>
 )
 
 const MiniTab: React.FC<{ children: React.ReactNode; active?: boolean }> = ({ children, active = false }) => (
   <span style={{
-    display: 'inline-flex', flex: 1, alignItems: 'center', justifyContent: 'center',
-    padding: '5px 0', fontSize: 10.5, fontWeight: active ? 600 : 400,
+    flex: 1,
+    height: 34,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     borderBottom: active ? '2px solid var(--accent)' : '2px solid transparent',
     color: active ? 'var(--accent)' : 'var(--text-muted)',
+    fontSize: 12,
+    fontWeight: active ? 650 : 500,
   }}>{children}</span>
 )
 
-const MockLine: React.FC<{ w?: string; strong?: boolean; accent?: boolean }> = ({ w = '100%', strong = false, accent = false }) => (
+const MockLine: React.FC<{ w?: string; h?: number; accent?: boolean }> = ({ w = '100%', h = 6, accent = false }) => (
   <div style={{
-    width: w, height: strong ? 7 : 5, borderRadius: 5,
-    background: accent ? 'rgba(195, 141, 92, 0.35)' : strong ? 'var(--text-muted)' : 'var(--border-light)',
-    opacity: accent ? 1 : strong ? 0.42 : 0.95,
+    width: w,
+    height: h,
+    borderRadius: 999,
+    background: accent ? 'rgba(195, 141, 92, 0.36)' : 'var(--border)',
+    opacity: accent ? 1 : 0.82,
   }} />
 )
 
 const PreviewFrame: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
   <div style={{
     border: '1px solid var(--border-light)',
-    borderRadius: 8,
-    background: 'linear-gradient(180deg, var(--bg) 0%, var(--bg-warm) 100%)',
-    padding: 10,
+    borderRadius: 10,
+    background: 'linear-gradient(180deg, rgba(255,255,255,0.35), rgba(255,255,255,0.08))',
+    padding: 12,
     marginBottom: 14,
   }}>
     <div style={{
-      fontSize: 10.5, color: 'var(--text-muted)',
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      marginBottom: 8,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 10,
+      fontSize: 12,
+      color: 'var(--text-muted)',
     }}>
       <span>界面指引</span>
-      <span style={{ color: 'var(--accent)', fontWeight: 600 }}>{label}</span>
+      <span style={{ color: 'var(--accent)', fontWeight: 650 }}>{label}</span>
     </div>
+    {children}
+  </div>
+)
+
+const SidebarIconButton: React.FC<{ active?: boolean; children: React.ReactNode }> = ({ active = false, children }) => (
+  <div style={{
+    flex: 1,
+    height: 34,
+    borderRadius: 8,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: active ? 'var(--accent)' : 'var(--text-secondary)',
+    background: active ? 'var(--accent-soft)' : 'transparent',
+  }}>
     {children}
   </div>
 )
 
 const ImportPreview = () => (
   <PreviewFrame label="左侧文献栏底部">
-    <div style={{ display: 'grid', gridTemplateColumns: '112px 1fr', gap: 10, minHeight: 126 }}>
-      <div style={{ border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', padding: 8, display: 'flex', flexDirection: 'column', gap: 7 }}>
-        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text)' }}>文献</div>
-        <MockLine w="84%" strong />
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: '190px 1fr',
+      minHeight: 150,
+      border: '1px solid var(--border)',
+      borderRadius: 9,
+      overflow: 'hidden',
+      background: 'var(--bg)',
+    }}>
+      <div style={{ borderRight: '1px solid var(--border-light)' }}>
+        <div style={{ display: 'flex', borderBottom: '1px solid var(--border-light)' }}>
+          <MiniTab active>文献库</MiniTab>
+          <MiniTab>笔记</MiniTab>
+        </div>
+        <div style={{ padding: '10px 10px 7px' }}>
+          <div style={{
+            height: 30,
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            color: 'var(--text-muted)',
+            fontSize: 12,
+            display: 'flex',
+            alignItems: 'center',
+            padding: '0 10px',
+          }}>搜索文献 / 全文搜索...</div>
+        </div>
+        <div style={{
+          display: 'flex',
+          gap: 5,
+          padding: '0 10px 10px',
+          borderBottom: '1px solid var(--border-light)',
+        }}>
+          <SidebarIconButton active>
+            <svg width="17" height="17" viewBox="0 0 24 24" {...iconStyle}>
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="12" y1="18" x2="12" y2="12" />
+              <polyline points="9 15 12 12 15 15" />
+            </svg>
+          </SidebarIconButton>
+          <SidebarIconButton>
+            <svg width="17" height="17" viewBox="0 0 24 24" {...iconStyle}>
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              <line x1="12" y1="17" x2="12" y2="11" />
+              <polyline points="9 14 12 11 15 14" />
+            </svg>
+          </SidebarIconButton>
+          <SidebarIconButton>
+            <svg width="17" height="17" viewBox="0 0 24 24" {...iconStyle}>
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              <line x1="12" y1="11" x2="12" y2="17" />
+              <line x1="9" y1="14" x2="15" y2="14" />
+            </svg>
+          </SidebarIconButton>
+          <SidebarIconButton>
+            <svg width="17" height="17" viewBox="0 0 24 24" {...iconStyle}>
+              <rect x="5" y="5" width="14" height="14" rx="2.5" />
+              <path d="m8.6 12.2 2.2 2.3 4.7-5.1" />
+            </svg>
+          </SidebarIconButton>
+        </div>
+      </div>
+      <div style={{ padding: 18, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 10 }}>
+        <MockLine w="48%" h={8} />
+        <MockLine w="84%" />
         <MockLine w="72%" />
         <MockLine w="90%" />
-        <div style={{ flex: 1 }} />
-        <MiniButton accent>导入文件</MiniButton>
-        <MiniButton>导入文件夹</MiniButton>
-      </div>
-      <div style={{ border: '1px dashed var(--border)', borderRadius: 6, padding: 12, display: 'flex', flexDirection: 'column', gap: 9, justifyContent: 'center' }}>
-        <MockLine w="52%" strong />
-        <MockLine w="90%" />
-        <MockLine w="78%" />
-        <MockLine w="84%" />
       </div>
     </div>
   </PreviewFrame>
@@ -169,39 +264,145 @@ const ImportPreview = () => (
 
 const ReaderPreview = () => (
   <PreviewFrame label="阅读器顶部工具栏">
-    <div style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', background: 'var(--bg)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: 8, borderBottom: '1px solid var(--border-light)', overflow: 'hidden' }}>
-        <MiniButton>PDF</MiniButton>
-        <MiniButton active>OCR 文本</MiniButton>
-        <MiniButton accent>重新<br />OCR</MiniButton>
-        <MiniButton>翻译</MiniButton>
+    <div style={{
+      border: '1px solid var(--border)',
+      borderRadius: 9,
+      overflow: 'hidden',
+      background: 'var(--bg)',
+    }}>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(130px, 1fr) auto auto auto',
+        alignItems: 'center',
+        gap: 9,
+        minHeight: 52,
+        padding: '9px 12px',
+        borderBottom: '1px solid var(--border-light)',
+      }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{
+            fontSize: 13,
+            fontWeight: 650,
+            color: 'var(--text)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>身份群体与阶级</div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>1-7 页</div>
+        </div>
+        <div style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+          <MiniButton active compact>PDF</MiniButton>
+          <MiniButton compact>OCR 文本</MiniButton>
+        </div>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <MiniButton compact>-</MiniButton>
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>100%</span>
+          <MiniButton compact>+</MiniButton>
+        </div>
+        <div style={{ display: 'inline-flex', gap: 7 }}>
+          <MiniButton active compact>OCR<br />识别</MiniButton>
+          <MiniButton compact>翻译</MiniButton>
+        </div>
       </div>
-      <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <MockLine w="88%" strong />
-        <MockLine w="96%" />
-        <MockLine w="72%" />
-        <MockLine w="91%" />
+      <div style={{
+        height: 188,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'linear-gradient(180deg, var(--bg-warm), var(--bg))',
+      }}>
+        <div style={{
+          width: 150,
+          height: 174,
+          borderRadius: 9,
+          background: '#fff',
+          border: '1px solid rgba(220,216,205,0.95)',
+          boxShadow: '0 12px 28px rgba(60,50,30,0.10)',
+          padding: 24,
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'flex-end',
+          gap: 8,
+        }}>
+          <MockLine w="64%" h={7} />
+          <MockLine w="94%" />
+          <MockLine w="82%" />
+          <MockLine w="88%" accent />
+        </div>
       </div>
     </div>
   </PreviewFrame>
 )
 
 const MarkPreview = () => (
-  <PreviewFrame label="选中文字后出现">
-    <div style={{ position: 'relative', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', padding: '34px 14px 16px' }}>
-      <div style={{ position: 'absolute', top: 8, left: 36, display: 'flex', gap: 5, padding: 4, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', boxShadow: '0 4px 14px rgba(60,40,20,0.12)' }}>
-        <MiniButton accent>划线</MiniButton>
-        <MiniButton>高光</MiniButton>
-        <MiniButton>注释</MiniButton>
+  <PreviewFrame label="选中文字后的标记栏">
+    <div style={{
+      position: 'relative',
+      border: '1px solid var(--border)',
+      borderRadius: 9,
+      background: 'var(--bg)',
+      padding: '58px 18px 20px',
+      minHeight: 144,
+    }}>
+      <div style={{
+        position: 'absolute',
+        top: 16,
+        left: 28,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 9,
+        padding: '8px 10px',
+        borderRadius: 11,
+        background: 'rgba(53, 43, 32, 0.96)',
+        boxShadow: '0 10px 26px rgba(40,30,20,0.24)',
+      }}>
+        {[
+          { text: '标记', active: true },
+          { text: '划线', active: false },
+          { text: '高光', active: false },
+        ].map(btn => (
+          <span key={btn.text} style={{
+            height: 32,
+            minWidth: 50,
+            padding: '0 12px',
+            borderRadius: 8,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            border: btn.active ? '1px solid rgba(215, 171, 128, 0.55)' : '1px solid rgba(255,255,255,0.86)',
+            background: btn.active ? 'var(--accent)' : 'rgba(255, 252, 240, 0.96)',
+            color: btn.active ? '#fff' : 'rgba(74, 64, 52, 0.82)',
+            fontSize: 14,
+            fontWeight: 650,
+            lineHeight: 1,
+            boxShadow: btn.active ? 'inset 0 1px 0 rgba(255,255,255,0.18)' : 'none',
+          }}>{btn.text}</span>
+        ))}
+        {['#FFD43B', '#FF6B6B', '#51CF66', '#339AF0', '#FF922B'].map(c => (
+          <span key={c} style={{
+            width: 22,
+            height: 22,
+            borderRadius: '50%',
+            background: c,
+            border: c === '#339AF0' ? '3px solid #fff' : '1px solid rgba(255,255,255,0.68)',
+            boxShadow: c === '#339AF0' ? '0 0 0 1px rgba(80, 132, 184, 0.8)' : 'none',
+          }} />
+        ))}
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <MockLine w="92%" />
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <MockLine w="26%" />
-          <span style={{ width: '42%', height: 12, borderRadius: 3, background: 'rgba(245, 207, 95, 0.45)', borderBottom: '2px solid var(--accent)' }} />
-          <MockLine w="19%" />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+        <MockLine w="96%" />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <MockLine w="25%" />
+          <span style={{
+            width: '44%',
+            height: 15,
+            borderRadius: 4,
+            background: 'rgba(255, 212, 59, 0.42)',
+            borderBottom: '2px solid #339AF0',
+          }} />
+          <MockLine w="18%" />
         </div>
-        <MockLine w="83%" />
+        <MockLine w="82%" />
       </div>
     </div>
   </PreviewFrame>
@@ -209,25 +410,25 @@ const MarkPreview = () => (
 
 const NotesPreview = () => (
   <PreviewFrame label="右侧注释面板">
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 126px', gap: 10 }}>
-      <div style={{ border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 172px', gap: 12 }}>
+      <div style={{ border: '1px solid var(--border)', borderRadius: 9, background: 'var(--bg)', padding: 14, display: 'flex', flexDirection: 'column', gap: 9 }}>
         <MockLine w="82%" />
-        <MockLine w="94%" accent />
-        <MockLine w="70%" />
-        <div style={{ alignSelf: 'flex-start', marginTop: 4 }}>
-          <MiniButton>右键取消标记</MiniButton>
+        <MockLine w="92%" accent />
+        <MockLine w="76%" />
+        <div style={{ marginTop: 5, width: 118 }}>
+          <MiniButton compact>点击标记编辑</MiniButton>
         </div>
       </div>
-      <div style={{ border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', padding: 8, display: 'flex', flexDirection: 'column', gap: 7 }}>
-        <div style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--text)' }}>注释</div>
-        <div style={{ border: '1px solid var(--border-light)', borderRadius: 5, padding: 6 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--text-muted)', marginBottom: 5 }}>
+      <div style={{ border: '1px solid var(--border)', borderRadius: 9, background: 'var(--bg)', padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 650, color: 'var(--text)' }}>注释</div>
+        <div style={{ border: '1px solid var(--border-light)', borderRadius: 7, padding: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
             <span>想法</span><span>×</span>
           </div>
-          <MockLine w="92%" />
+          <MockLine w="90%" />
         </div>
-        <div style={{ border: '1px solid var(--border-light)', borderRadius: 5, padding: 6 }}>
-          <MockLine w="74%" />
+        <div style={{ border: '1px solid var(--border-light)', borderRadius: 7, padding: 8 }}>
+          <MockLine w="72%" />
         </div>
       </div>
     </div>
@@ -236,153 +437,274 @@ const NotesPreview = () => (
 
 const DialoguePreview = () => (
   <PreviewFrame label="右侧学徒 · 对话">
-    <div style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', background: 'var(--bg)' }}>
-      <div style={{ padding: '7px 10px', borderBottom: '1px solid var(--border-light)', display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text)' }}>学徒</span>
-        <MiniButton>模型</MiniButton>
+    <div style={{ border: '1px solid var(--border)', borderRadius: 9, overflow: 'hidden', background: 'var(--bg)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 38, padding: '0 12px', borderBottom: '1px solid var(--border-light)' }}>
+        <DialogueIcon />
+        <span style={{ fontSize: 13, fontWeight: 650, color: 'var(--text)' }}>学徒</span>
+        <MiniButton compact>模型</MiniButton>
       </div>
       <div style={{ display: 'flex', borderBottom: '1px solid var(--border-light)' }}>
         <MiniTab active>对话</MiniTab>
         <MiniTab>召唤</MiniTab>
       </div>
-      <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ alignSelf: 'flex-end', maxWidth: '72%', padding: 7, borderRadius: 8, background: 'var(--accent-soft)', fontSize: 10.5, color: 'var(--text)' }}>这段论证在说什么？</div>
-        <div style={{ alignSelf: 'flex-start', maxWidth: '78%', padding: 7, borderRadius: 8, border: '1px solid var(--border-light)', fontSize: 10.5, color: 'var(--text-secondary)' }}>我会结合当前书页、划线和注释来回答。</div>
-        <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
-          <MiniButton accent>☆ 召唤</MiniButton>
-          <MiniButton>输入问题...</MiniButton>
+      <div style={{ padding: 13, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ alignSelf: 'flex-end', maxWidth: '70%', padding: '8px 11px', borderRadius: 10, background: 'var(--accent-soft)', color: 'var(--text)', fontSize: 12 }}>这段论证在说什么？</div>
+        <div style={{ alignSelf: 'flex-start', maxWidth: '78%', padding: '8px 11px', borderRadius: 10, border: '1px solid var(--border-light)', color: 'var(--text-secondary)', fontSize: 12 }}>我会结合当前书页、划线和注释来回答。</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '92px 1fr 34px', gap: 8, marginTop: 2 }}>
+          <MiniButton compact>召唤</MiniButton>
+          <div style={{ border: '1px solid var(--border)', borderRadius: 8, height: 30, display: 'flex', alignItems: 'center', padding: '0 10px', color: 'var(--text-muted)', fontSize: 12 }}>输入问题...</div>
+          <MiniButton active compact>→</MiniButton>
         </div>
       </div>
     </div>
   </PreviewFrame>
 )
 
-const SummonPreview = () => (
-  <PreviewFrame label="右侧学徒 · 召唤">
-    <div style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', background: 'var(--bg)' }}>
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--border-light)' }}>
-        <MiniTab>对话</MiniTab>
-        <MiniTab active>召唤</MiniTab>
-      </div>
-      <div style={{ padding: 10, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 7 }}>
-        {['孔子', '老子', '墨子'].map(name => (
-          <div key={name} style={{ border: '1px solid var(--border-light)', borderRadius: 6, padding: 7, textAlign: 'center', background: 'var(--bg-warm)' }}>
-            <div style={{ width: 28, height: 28, borderRadius: '50%', background: 'rgba(195,141,92,0.24)', margin: '0 auto 5px', border: '1px solid var(--accent-soft)' }} />
-            <div style={{ fontSize: 10.5, color: 'var(--text)', fontWeight: 600 }}>{name}</div>
-          </div>
-        ))}
-      </div>
-      <div style={{ padding: '0 10px 10px', display: 'flex', gap: 6 }}>
-        <MiniButton active>召唤孔子</MiniButton>
-        <MiniButton>多人辩论</MiniButton>
-      </div>
-    </div>
-  </PreviewFrame>
-)
+const SummonPreview = () => {
+  const rows = [
+    ['柏拉图', '古希腊 · 古典期 · 哲学家', true],
+    ['孔子', '中国 · 春秋 · 思想家', true],
+    ['老子', '中国 · 春秋 · 道家', true],
+  ] as const
 
-// ===== Steps =====
+  return (
+    <PreviewFrame label="右侧学徒 · 底部召唤按钮">
+      <div style={{
+        border: '1px solid var(--border)',
+        borderRadius: 9,
+        overflow: 'hidden',
+        background: 'var(--bg)',
+      }}>
+        <div style={{ display: 'flex', borderBottom: '1px solid var(--border-light)' }}>
+          <MiniTab active>对话</MiniTab>
+          <MiniTab>召唤</MiniTab>
+        </div>
+
+        <div style={{ padding: 12, borderBottom: '1px solid var(--border-light)' }}>
+          <div style={{
+            border: '1px solid var(--border)',
+            borderRadius: 10,
+            background: 'color-mix(in srgb, var(--bg-warm) 88%, var(--bg) 12%)',
+            boxShadow: '0 8px 24px rgba(62, 48, 28, 0.06)',
+            padding: 10,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <span style={{
+                width: 24,
+                height: 24,
+                borderRadius: 6,
+                color: 'var(--text-muted)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+              }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" {...iconStyle}>
+                  <polyline points="15 18 9 12 15 6" />
+                </svg>
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>当前召唤</span>
+                  <span style={{
+                    fontSize: 10,
+                    color: 'var(--accent-hover)',
+                    background: 'var(--accent-soft)',
+                    border: '1px solid var(--border-light)',
+                    borderRadius: 999,
+                    padding: '1px 7px',
+                  }}>3 / 3</span>
+                  <span style={{
+                    color: 'var(--accent-hover)',
+                    fontWeight: 700,
+                    fontSize: 12,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}>柏拉图 · 孔子 · 老子</span>
+                </div>
+                <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>
+                  选中的人物会参与下一次回答
+                </div>
+              </div>
+              <MiniButton compact>全部取消</MiniButton>
+            </div>
+
+            <div style={{
+              marginBottom: 8,
+              padding: '8px 10px',
+              borderRadius: 8,
+              border: '1px solid var(--border-light)',
+              background: 'var(--bg)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+            }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--text)' }}>辩论模式</div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>关 · 每次各自独立回答一次</div>
+              </div>
+              <MiniButton compact>开启</MiniButton>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              {rows.map(([name, desc, selected]) => (
+                <div key={name} style={{
+                  minHeight: 36,
+                  padding: '6px 8px',
+                  borderRadius: 8,
+                  background: selected ? 'color-mix(in srgb, var(--accent-soft) 82%, var(--bg) 18%)' : 'transparent',
+                  border: `1px solid ${selected ? 'color-mix(in srgb, var(--accent) 48%, var(--border) 52%)' : 'transparent'}`,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}>
+                  <span style={{
+                    width: 16,
+                    height: 16,
+                    borderRadius: 5,
+                    border: `1.5px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
+                    background: selected ? 'var(--accent)' : 'var(--bg)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                  }}>
+                    {selected && (
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="4 12 10 18 20 6" />
+                      </svg>
+                    )}
+                  </span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--accent-hover)' }}>{name}</div>
+                    <div style={{ fontSize: 10.5, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{
+              fontSize: 10,
+              color: 'var(--text-muted)',
+              textAlign: 'center',
+              marginTop: 8,
+              paddingTop: 7,
+              borderTop: '1px solid var(--border-light)',
+            }}>
+              输入 @柏拉图 可指定单人回答；不指定时按召唤席轮流回应
+            </div>
+          </div>
+        </div>
+
+        <div style={{ padding: '8px 12px', display: 'flex', gap: 7, alignItems: 'center' }}>
+          <MiniButton active compact>柏拉图 +2</MiniButton>
+          <div style={{
+            flex: 1,
+            minWidth: 0,
+            height: 32,
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            background: 'var(--bg)',
+            color: 'var(--text-muted)',
+            display: 'flex',
+            alignItems: 'center',
+            padding: '0 10px',
+            fontSize: 12,
+          }}>问所有召唤者 · 或 @柏拉图 指定...</div>
+          <MiniButton active compact>↗</MiniButton>
+        </div>
+      </div>
+    </PreviewFrame>
+  )
+}
+
 const STEPS: Step[] = [
   {
     title: '导入文献',
+    label: 'STEP 1',
     icon: <ImportIcon />,
     visual: <ImportPreview />,
     body: (
       <>
-        从左侧文献栏底部开始：点 <Pill tone="accent">导入文件</Pill> 或 <Pill>导入文件夹</Pill>。
-        支持 <strong>PDF / EPUB / DOCX / TXT / Markdown</strong> 等常见格式，文件夹会按目录自动建立分组。
-        <br /><br />
-        也可以直接把文件拖进窗口；Zotero / EndNote 导出的 <KBD>.bib</KBD> 可从顶栏批量导入。
+        从左侧 <Pill accent>文献库</Pill> 的搜索框下方开始：第一个图标导入文件，第二个图标导入文件夹。支持 PDF、EPUB、DOCX、TXT、Markdown 等常见格式，也可以直接把文件拖进窗口。
       </>
     ),
   },
   {
     title: '阅读与 OCR',
+    label: 'STEP 2',
     icon: <ReaderIcon />,
     visual: <ReaderPreview />,
     body: (
       <>
-        普通电子书导入后可以直接读；扫描版 PDF 先点顶部工具栏里的 <Pill tone="accent">OCR</Pill>。
-        OCR 完成后可在 <Pill>PDF</Pill> 和 <Pill>OCR 文本</Pill> 之间切换。
-        <br /><br />
-        OCR 文本、HTML、EPUB、DOCX、TXT 都会使用轻降眩光阅读层，阅读亮度更稳。
+        普通电子书导入后可以直接读；扫描版 PDF 点顶部工具栏的 <Pill accent>OCR 识别</Pill>。完成后可在 <Pill>PDF</Pill> 和 <Pill>OCR 文本</Pill> 间切换，缩放、翻译和字号调节都在同一条工具栏里。
       </>
     ),
   },
   {
-    title: '划线 · 高光 · 注释',
+    title: '标记与注释',
+    label: 'STEP 3',
     icon: <MarkIcon />,
     visual: <MarkPreview />,
     body: (
       <>
-        在阅读器里选中任意文字，浮动工具栏会直接贴着选区出现。
-        <Pill>划线</Pill> 用来留痕，<Pill>高光</Pill> 用来强调，<Pill tone="accent">注释</Pill> 会把你的想法绑定到这段原文。
-        <br /><br />
-        写注释时可用 <KBD>Ctrl</KBD> + <KBD>Enter</KBD> 快速保存。
+        选中文本后会先按上次记忆的颜色生成标记，再显示设置栏。你可以切换划线、高光或颜色；再次点已标记文本可以继续编辑，写注释时用 <KBD>Ctrl</KBD> + <KBD>Enter</KBD> 保存。
       </>
     ),
   },
   {
-    title: '管理注释与标记',
+    title: '管理注释',
+    label: 'STEP 4',
     icon: <NotesIcon />,
     visual: <NotesPreview />,
     body: (
       <>
-        右侧注释面板会集中显示当前书的注释卡片，点卡片可回到对应原文。
-        已有划线或高光可以在原文上<strong>右键</strong>取消；注释卡片右上角的 <KBD>×</KBD> 用来删除注释。
-        <br /><br />
-        这些标记都保存在本地，跟着这本书走，不依赖网络。
+        右侧注释面板集中显示当前文献的划线、高光和注释。点击卡片会回到原文位置，点击原文里的标记可以修改属性；这些内容都保存在本地，跟随这本文献一起沉淀。
       </>
     ),
   },
   {
     title: '学徒对话',
+    label: 'STEP 5',
     icon: <DialogueIcon />,
     visual: <DialoguePreview />,
     body: (
       <>
-        右侧 <Pill tone="accent">学徒</Pill> 面板现在以 <Pill>对话</Pill> 为主：你可以围绕当前页、选中文本、划线和注释继续追问。
-        <br /><br />
-        原来的定期观察独立入口已经下线，观察能力转入对话和召唤流程里：直接问学徒“帮我梳理最近读到的线索”即可。
+        右侧 <Pill accent>学徒</Pill> 以对话为主：它会结合当前书页、选中文本、划线和注释回答。原来的学徒周报入口已经下线，最近阅读整理和追问能力整合进学徒对话。
       </>
     ),
   },
   {
     title: '召唤人物',
+    label: 'STEP 6',
     icon: <SummonIcon />,
     visual: <SummonPreview />,
     body: (
       <>
-        在学徒面板切到 <Pill tone="accent">召唤</Pill>，选择已经发布的 skill 人物，或从本地资料蒸馏新人物。
-        回到 <Pill>对话</Pill> 后，底部的召唤按钮可切换当前对话中的人物。
-        <br /><br />
-        1.3.3 公开社区先放出孔子、老子、墨子、苏格拉底、柏拉图、亚里士多德六位，可一对一追问，也可多重召唤讨论。
+        切到 <Pill accent>召唤</Pill> 后选择已发布的 skill 人物，回到 <Pill>对话</Pill> 后底部召唤按钮会切换当前对话中的人物。1.3.3 公共社区先开放孔子、老子、墨子、苏格拉底、柏拉图、亚里士多德六位。
       </>
     ),
   },
 ]
 
-// ===== Component =====
 export default function FeatureTourModal(): JSX.Element | null {
   const [shouldShow, setShouldShow] = useState(false)
   const [stepIdx, setStepIdx] = useState(0)
   const forceFeatureTour = useUiStore(s => s.forceFeatureTour)
   const setForceFeatureTour = useUiStore(s => s.setForceFeatureTour)
 
-  // Trigger on mount: if flag not set AND any AI provider has a key configured.
   useEffect(() => {
     let alreadyShown = false
     try { alreadyShown = !!localStorage.getItem(FLAG_KEY) } catch {}
-    if (alreadyShown) return
-    if (!window.electronAPI?.aiGetProviders) return
+    if (alreadyShown || !window.electronAPI?.aiGetProviders) return
 
     let cancelled = false
     const t = setTimeout(() => {
       if (cancelled) return
       window.electronAPI.aiGetProviders().then((providers: any[]) => {
-        if (cancelled) return
-        const hasAnyKey = providers.some(p => p.hasKey)
-        if (hasAnyKey) setShouldShow(true)
-      }).catch(() => { /* don't block boot */ })
+        if (!cancelled && providers.some(p => p.hasKey)) setShouldShow(true)
+      }).catch(() => {})
     }, 1800)
 
     return () => { cancelled = true; clearTimeout(t) }
@@ -398,11 +720,8 @@ export default function FeatureTourModal(): JSX.Element | null {
   }, [forceFeatureTour, setForceFeatureTour])
 
   const next = useCallback(() => {
-    if (stepIdx >= STEPS.length - 1) {
-      close(true)
-    } else {
-      setStepIdx(i => i + 1)
-    }
+    if (stepIdx >= STEPS.length - 1) close(true)
+    else setStepIdx(i => i + 1)
   }, [stepIdx, close])
 
   const prev = useCallback(() => {
@@ -423,16 +742,20 @@ export default function FeatureTourModal(): JSX.Element | null {
   if (!shouldShow && !forceFeatureTour) return null
 
   const step = STEPS[stepIdx]
-  const isLast = stepIdx === STEPS.length - 1
   const isFirst = stepIdx === 0
+  const isLast = stepIdx === STEPS.length - 1
 
   return (
     <div
       style={{
-        position: 'fixed', inset: 0, zIndex: 1001,
+        position: 'fixed',
+        inset: 0,
+        zIndex: 1001,
         background: 'rgba(40, 30, 20, 0.42)',
         backdropFilter: 'blur(2px)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
         padding: 20,
         animation: 'sj-tour-fade 0.18s ease-out',
       }}
@@ -441,87 +764,74 @@ export default function FeatureTourModal(): JSX.Element | null {
       <div
         onClick={e => e.stopPropagation()}
         style={{
-          maxWidth: 640, width: '100%',
+          width: 'min(760px, calc(100vw - 40px))',
           maxHeight: 'calc(100vh - 40px)',
           overflowY: 'auto',
           background: 'var(--bg, #faf6ef)',
-          borderRadius: 12,
-          padding: '24px 30px 22px',
-          boxShadow: '0 12px 36px rgba(60, 40, 20, 0.22)',
+          borderRadius: 14,
+          padding: '26px 34px 24px',
+          boxShadow: '0 18px 48px rgba(40, 30, 20, 0.26)',
           border: '1px solid var(--border)',
           fontFamily: 'inherit',
           animation: 'sj-tour-pop 0.22s cubic-bezier(.2,.9,.3,1.15)',
         }}
       >
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          marginBottom: 14,
-        }}>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
             {STEPS.map((_, i) => (
               <button
                 key={i}
                 onClick={() => setStepIdx(i)}
                 title={`第 ${i + 1} 步`}
                 style={{
-                  width: i === stepIdx ? 18 : 6, height: 6, borderRadius: 3,
-                  padding: 0, border: 'none',
-                  background: i === stepIdx
-                    ? 'var(--accent)'
-                    : i < stepIdx ? 'var(--text-muted)' : 'var(--border)',
+                  width: i === stepIdx ? 22 : 7,
+                  height: 7,
+                  borderRadius: 999,
+                  padding: 0,
+                  border: 'none',
+                  background: i === stepIdx ? 'var(--accent)' : i < stepIdx ? 'rgba(75,65,50,0.38)' : 'var(--border)',
                   cursor: 'pointer',
-                  transition: 'width 0.2s, background 0.2s',
+                  transition: 'width 0.18s ease, background 0.18s ease',
                 }}
               />
             ))}
-            <span style={{
-              marginLeft: 10, fontSize: 11, color: 'var(--text-muted)',
-              letterSpacing: 0.4,
-            }}>
-              {stepIdx + 1} / {STEPS.length}
-            </span>
+            <span style={{ marginLeft: 12, fontSize: 12, color: 'var(--text-muted)' }}>{stepIdx + 1} / {STEPS.length}</span>
           </div>
           <button
             onClick={() => close(true)}
-            title="跳过教程（不再提示）"
             style={{
-              padding: '3px 10px', fontSize: 11,
-              background: 'transparent', border: 'none',
-              color: 'var(--text-muted)', cursor: 'pointer',
-              borderRadius: 4,
+              padding: '4px 10px',
+              fontSize: 12,
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-muted)',
+              cursor: 'pointer',
+              borderRadius: 6,
             }}
-            onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-warm)' }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
           >
             跳过
           </button>
         </div>
 
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 13,
-          marginBottom: 14, color: 'var(--accent)',
-        }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 15, marginBottom: 18, color: 'var(--accent)' }}>
           <div style={{
-            width: 48, height: 48,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 56,
+            height: 56,
+            borderRadius: 11,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
             background: 'var(--bg-warm)',
-            borderRadius: 8,
             border: '1px solid var(--border-light)',
             flexShrink: 0,
           }}>
             {step.icon}
           </div>
           <div>
-            <div style={{
-              fontSize: 11, color: 'var(--text-muted)', letterSpacing: 1,
-              marginBottom: 3, textTransform: 'uppercase',
-            }}>
-              功能指引 · STEP {stepIdx + 1}
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: 1, marginBottom: 4 }}>
+              功能指引 · {step.label}
             </div>
-            <div style={{
-              fontSize: 19, fontWeight: 600, color: 'var(--text)',
-              letterSpacing: 0.4,
-            }}>
+            <div style={{ fontSize: 23, lineHeight: 1.2, fontWeight: 750, color: 'var(--text)' }}>
               {step.title}
             </div>
           </div>
@@ -530,52 +840,51 @@ export default function FeatureTourModal(): JSX.Element | null {
         {step.visual}
 
         <div style={{
-          fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.85,
-          padding: '13px 15px',
+          fontSize: 14,
+          color: 'var(--text-secondary)',
+          lineHeight: 1.9,
+          padding: '15px 18px',
           background: 'var(--bg-warm)',
-          borderRadius: 8,
+          borderRadius: 10,
           border: '1px solid var(--border-light)',
-          marginBottom: 18,
+          marginBottom: 20,
         }}>
           {step.body}
         </div>
 
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          gap: 10,
-        }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '132px 1fr 132px', alignItems: 'center', gap: 12 }}>
           <button
             onClick={prev}
             disabled={isFirst}
             style={{
-              padding: '7px 14px', fontSize: 12.5,
-              background: 'transparent',
+              height: 40,
               border: '1px solid var(--border)',
-              borderRadius: 6,
+              borderRadius: 8,
+              background: 'transparent',
               color: isFirst ? 'var(--text-muted)' : 'var(--text-secondary)',
               cursor: isFirst ? 'not-allowed' : 'pointer',
-              opacity: isFirst ? 0.4 : 1,
-              transition: 'background 0.12s',
+              opacity: isFirst ? 0.42 : 1,
+              fontSize: 14,
             }}
-            onMouseEnter={e => { if (!isFirst) e.currentTarget.style.background = 'var(--bg-warm)' }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
           >
             ← 上一步
           </button>
-          <span style={{ fontSize: 10.5, color: 'var(--text-muted)', opacity: 0.75, textAlign: 'center' }}>
-            <KBD>←</KBD> <KBD>→</KBD> 切换 · <KBD>Esc</KBD> 跳过
-          </span>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 6, color: 'var(--text-muted)', fontSize: 12, opacity: 0.8 }}>
+            <KBD>←</KBD><KBD>→</KBD><span style={{ alignSelf: 'center' }}>切换</span><KBD>Esc</KBD><span style={{ alignSelf: 'center' }}>跳过</span>
+          </div>
           <button
             onClick={next}
             autoFocus
             style={{
-              padding: '7px 18px', fontSize: 12.5, fontWeight: 600,
-              background: 'var(--accent)', border: 'none',
-              borderRadius: 6, color: '#fff', cursor: 'pointer',
-              transition: 'opacity 0.12s',
+              height: 42,
+              border: 'none',
+              borderRadius: 8,
+              background: 'var(--accent)',
+              color: '#fff',
+              cursor: 'pointer',
+              fontSize: 14,
+              fontWeight: 700,
             }}
-            onMouseEnter={e => { e.currentTarget.style.opacity = '0.88' }}
-            onMouseLeave={e => { e.currentTarget.style.opacity = '1' }}
           >
             {isLast ? '完成 ✓' : '下一步 →'}
           </button>
@@ -585,7 +894,7 @@ export default function FeatureTourModal(): JSX.Element | null {
       <style>{`
         @keyframes sj-tour-fade { from { opacity: 0 } to { opacity: 1 } }
         @keyframes sj-tour-pop {
-          from { opacity: 0; transform: translateY(-8px) scale(0.96) }
+          from { opacity: 0; transform: translateY(-8px) scale(0.97) }
           to { opacity: 1; transform: translateY(0) scale(1) }
         }
       `}</style>

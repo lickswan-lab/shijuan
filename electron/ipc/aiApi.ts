@@ -92,6 +92,7 @@ function reportOcrProgress(entryId: string | undefined, chunkIndex: number, tota
 }
 
 type OcrEngineId = 'glm' | 'rapidocr'
+const RAPID_OCR_LOCKED = true
 
 interface OcrPdfResult {
   success: boolean
@@ -2120,10 +2121,20 @@ export function registerAiApiIpc(): void {
   // === OCR (cloud GLM + local RapidOCR) ===
 
   ipcMain.handle('rapid-ocr-probe', async () => {
+    if (RAPID_OCR_LOCKED) {
+      return {
+        available: false,
+        error: '本地 RapidOCR 暂时锁定，请先使用 GLM OCR。',
+        installCommand: RAPID_OCR_INSTALL_COMMAND,
+      }
+    }
     return probeRapidOcr()
   })
 
   ipcMain.handle('rapid-ocr-pdf', async (_event, pdfAbsPath: string, opts?: { entryId?: string; startPage?: number; endPage?: number }) => {
+    if (RAPID_OCR_LOCKED) {
+      return { success: false, engine: 'rapidocr', error: '本地 RapidOCR 暂时锁定，请先使用 GLM OCR。' }
+    }
     try {
       const result = await callRapidOcrPdf(pdfAbsPath, opts)
       return result

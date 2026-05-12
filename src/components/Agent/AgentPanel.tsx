@@ -67,6 +67,26 @@ const AGENT_WIDTH_KEY = 'sj-agent-panel-width'
 const AGENT_WIDTH_MIN = 320
 const AGENT_WIDTH_MAX = 800
 const AGENT_WIDTH_DEFAULT = 380
+const READER_SAFE_WIDTH = 520
+
+function clampAgentPanelWidth(width: number) {
+  if (typeof window === 'undefined') {
+    return Math.max(AGENT_WIDTH_MIN, Math.min(AGENT_WIDTH_MAX, width))
+  }
+  const maxForViewport = Math.max(
+    AGENT_WIDTH_MIN,
+    Math.min(AGENT_WIDTH_MAX, window.innerWidth - READER_SAFE_WIDTH),
+  )
+  return Math.max(AGENT_WIDTH_MIN, Math.min(maxForViewport, width))
+}
+
+function emitAgentLayoutChange() {
+  // Agent panel is an overlay; changing its width must not reflow readers.
+}
+
+function emitAgentLayoutWillChange() {
+  // No-op for overlay panels.
+}
 
 // 2026-04-24 多重召唤
 const MAX_SUMMONED = 3
@@ -520,20 +540,25 @@ export default function AgentPanel() {
   const [panelWidth, setPanelWidth] = useState<number>(() => {
     try {
       const v = Number(localStorage.getItem(AGENT_WIDTH_KEY))
-      return v >= AGENT_WIDTH_MIN && v <= AGENT_WIDTH_MAX ? v : AGENT_WIDTH_DEFAULT
-    } catch { return AGENT_WIDTH_DEFAULT }
+      return Number.isFinite(v) ? clampAgentPanelWidth(v) : AGENT_WIDTH_DEFAULT
+    } catch { return clampAgentPanelWidth(AGENT_WIDTH_DEFAULT) }
   })
+  useEffect(() => {
+    document.documentElement.style.setProperty('--right-panel-width', `${panelWidth}px`)
+  }, [panelWidth])
   const panelWidthRef = useRef(panelWidth)
   panelWidthRef.current = panelWidth
 
   const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
+    emitAgentLayoutWillChange()
     const startX = e.clientX
     const startW = panelWidthRef.current
     const onMove = (ev: MouseEvent) => {
       // Pulling mouse LEFT (decreasing clientX) widens the panel
       const dx = startX - ev.clientX
-      const next = Math.max(AGENT_WIDTH_MIN, Math.min(AGENT_WIDTH_MAX, startW + dx))
+      const next = clampAgentPanelWidth(startW + dx)
+      panelWidthRef.current = next
       setPanelWidth(next)
     }
     const onUp = () => {
@@ -541,7 +566,11 @@ export default function AgentPanel() {
       document.removeEventListener('mouseup', onUp)
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
-      try { localStorage.setItem(AGENT_WIDTH_KEY, String(panelWidthRef.current)) } catch { /* ignore */ }
+      const finalWidth = clampAgentPanelWidth(panelWidthRef.current)
+      setPanelWidth(finalWidth)
+      panelWidthRef.current = finalWidth
+      try { localStorage.setItem(AGENT_WIDTH_KEY, String(finalWidth)) } catch { /* ignore */ }
+      emitAgentLayoutChange()
     }
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
@@ -1227,11 +1256,12 @@ export default function AgentPanel() {
 
   return (
     <div style={{
-      display: 'flex', flexDirection: 'column', height: '100%',
+      display: 'flex', flexDirection: 'column', height: 'calc(100vh - var(--titlebar-height, 44px))',
       background: 'var(--bg)',
       width: panelWidth, flexShrink: 0,
-      position: 'relative',
+      position: 'fixed', top: 'var(--titlebar-height, 44px)', right: 0, bottom: 0, zIndex: 45,
       borderLeft: '1px solid var(--border-light)',
+      boxShadow: '-16px 0 34px rgba(50, 35, 18, 0.12)',
     }}>
       {/* Resize handle — 4px invisible strip on the left edge; 1px visible
           border above gives the visual separation. Hover shows the col-resize

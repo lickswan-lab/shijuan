@@ -15,6 +15,30 @@ import { readNumber } from '../../utils/safeStorageRead'
 import { fetchPersonaList, subscribePersonaList } from '../../utils/personaListCache'
 import ImeInput from '../common/ImeInput'
 
+const RIGHT_PANEL_MIN_WIDTH = 200
+const RIGHT_PANEL_MAX_WIDTH = 800
+const READER_SAFE_WIDTH = 520
+
+function clampRightPanelWidth(width: number) {
+  if (typeof window === 'undefined') {
+    return Math.max(RIGHT_PANEL_MIN_WIDTH, Math.min(RIGHT_PANEL_MAX_WIDTH, width))
+  }
+  const maxForViewport = Math.max(
+    RIGHT_PANEL_MIN_WIDTH,
+    Math.min(RIGHT_PANEL_MAX_WIDTH, window.innerWidth - READER_SAFE_WIDTH),
+  )
+  return Math.max(RIGHT_PANEL_MIN_WIDTH, Math.min(maxForViewport, width))
+}
+
+function emitRightPanelLayoutChange() {
+  // The right panel is now an overlay. Resizing/opening it should not trigger
+  // reader layout restoration; EPUB/HTML can otherwise jump to stale anchors.
+}
+
+function emitRightPanelLayoutWillChange() {
+  // No-op for overlay panels.
+}
+
 // ===== Hermes background learning =====
 // Silently appends annotation events to agent memory for behavior learning
 const hermesEventQueue: string[] = []
@@ -275,6 +299,7 @@ function getTypeDisplay(type: HistoryEntry['type']) {
     ai_interpretation: { label: 'AI', color: 'var(--success)', bgClass: 'ai-response' },
     ai_qa: { label: 'AI', color: 'var(--warning)', bgClass: 'ai-qa' },
     ai_feedback: { label: 'AI', color: '#9DB5B2', bgClass: 'ai-feedback' },
+    ai_guide: { label: '导读', color: '#5B8E82', bgClass: 'ai-guide' },
     // 召唤名家以其视角批注——label 会被 HistoryEntryItem 覆盖成 personaName
     ai_persona: { label: '🧙', color: '#9b59b6', bgClass: 'ai-persona' },
   }
@@ -317,11 +342,15 @@ const HistoryEntryItem = React.memo(function HistoryEntryItem({
   const display = getTypeDisplay(entry.type)
   const headerLabel = entry.author === 'user'
     ? '我'
+    : entry.type === 'ai_guide'
+      ? '导读'
     : entry.type === 'ai_persona'
       ? (entry.personaName || entry.modelLabel || '召唤')
       : (entry.modelLabel || 'AI')
   const headerColor = entry.author === 'user'
     ? 'var(--accent)'
+    : entry.type === 'ai_guide'
+      ? display.color
     : entry.type === 'ai_persona'
       ? display.color
       : 'var(--success)'
@@ -815,24 +844,32 @@ export default function AnnotationPanel() {
   // uses these to title page groups with actual chapter names.
   const tocLabels = useUiStore(s => s.currentDocTocLabels)
   // BUG-FIX R8#8 · NaN 防御 + 最小宽度 80px 兜底,避免 panel 缩到 0 隐身
-  const [panelWidth, _setPanelWidth] = useState(() => readNumber('sj-annPanelWidth', 380, 80))
+  const [panelWidth, _setPanelWidth] = useState(() => clampRightPanelWidth(readNumber('sj-annPanelWidth', 380, 80)))
   // PERF-R8#25 · setPanelWidth 的 localStorage 写入只在非拖动场景使用(初次 mount /
   //   外部代码改宽度等)。拖动 hot-path 走 _setPanelWidth + onUp 一次性 persist —— 见
   //   handleResizeStart。原代码 onMove 每帧 setPanelWidth → 每秒 60+ 次同步 IO,卡顿明显。
-  const setPanelWidth = (w: number) => { _setPanelWidth(w); try { localStorage.setItem('sj-annPanelWidth', String(w)) } catch {} }
+  const setPanelWidth = (w: number) => {
+    const next = clampRightPanelWidth(w)
+    _setPanelWidth(next)
+    try { localStorage.setItem('sj-annPanelWidth', String(next)) } catch {}
+    emitRightPanelLayoutChange()
+  }
   const resizingRef = useRef(false)
+  const [resizing, setResizing] = useState(false)
 
   // Resize handler
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
+    emitRightPanelLayoutWillChange()
     resizingRef.current = true
+    setResizing(true)
     const startX = e.clientX
     const startWidth = panelWidth
     // PERF-R8#25 · 拖动期间记录最终值,mouseup 时一次性写盘
     let lastWidth = startWidth
     // PERF-R8#25 · raf 节流:同一帧内多个 mousemove 只 setState 一次,
     //   避免 React 重渲整个 ~2100 行 AnnotationPanel 组件的累积成本
-    let rafPending = false
+    let rafId: number | null = null
 
     const onMove = (ev: MouseEvent) => {
       if (!resizingRef.current) return
@@ -841,23 +878,29 @@ export default function AnnotationPanel() {
       // shrink the right panel hard so the reading column (OCR/TXT/MD/DOCX)
       // can stretch wide; upper bound 800 lets users park reference notes
       // in a roomy column when they have screen real estate.
-      lastWidth = Math.max(200, Math.min(800, startWidth + delta))
-      if (rafPending) return
-      rafPending = true
-      requestAnimationFrame(() => {
-        rafPending = false
+      lastWidth = clampRightPanelWidth(startWidth + delta)
+      if (rafId !== null) return
+      rafId = requestAnimationFrame(() => {
+        rafId = null
         // PERF-R8#25 · 拖动 hot-path 不写 localStorage(同步 IO 阻塞),只更 state
         _setPanelWidth(lastWidth)
       })
     }
     const onUp = () => {
       resizingRef.current = false
+      setResizing(false)
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId)
+        rafId = null
+      }
+      _setPanelWidth(lastWidth)
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
       // PERF-R8#25 · 一次性 persist 最终宽度
       try { localStorage.setItem('sj-annPanelWidth', String(lastWidth)) } catch {}
+      emitRightPanelLayoutChange()
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
@@ -867,6 +910,9 @@ export default function AnnotationPanel() {
   const [noteInput, setNoteInput] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
   const [streamingText, setStreamingText] = useState('')
+  useEffect(() => {
+    document.documentElement.style.setProperty('--right-panel-width', `${panelWidth + 8}px`)
+  }, [panelWidth])
   // Annotation list search (filters both current and other-entries annotations)
   const [annSearch, setAnnSearch] = useState('')
   // 2026-04-28 · 苏格拉底模式彻底删除(用户决定下线,UI 按钮 batch 43 已删但
@@ -877,7 +923,15 @@ export default function AnnotationPanel() {
   const aiModel = useUiStore(s => s.selectedAiModel)
   const setAiModel = useUiStore(s => s.setSelectedAiModel)
   const annotationColor = useUiStore(s => s.annotationColor)
+  const annotationDraftInput = useUiStore(s => s.annotationDraftInput)
+  const setAnnotationDraftInput = useUiStore(s => s.setAnnotationDraftInput)
   const [configuredProviders, setConfiguredProviders] = useState<Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>>([])
+
+  useEffect(() => {
+    if (!annotationDraftInput) return
+    setNoteInput(annotationDraftInput)
+    setAnnotationDraftInput(null)
+  }, [annotationDraftInput, setAnnotationDraftInput])
 
   // Persona list for "召唤名家批注" entry — loaded alongside providers below.
   const [personaListAnno, setPersonaListAnno] = useState<Array<{ id: string; name: string; canonicalName?: string; currentFitnessTotal?: number }>>([])
@@ -1448,7 +1502,7 @@ export default function AnnotationPanel() {
         messages.push({ role: 'assistant', content: entry.content })
       } else if (['note', 'question', 'stance'].includes(entry.type)) {
         messages.push({ role: 'user', content: `[我的笔记] ${entry.content}` })
-      } else if (entry.type === 'ai_interpretation' || entry.type === 'ai_feedback') {
+      } else if (entry.type === 'ai_interpretation' || entry.type === 'ai_feedback' || entry.type === 'ai_guide') {
         messages.push({ role: 'assistant', content: entry.content })
       }
     }
@@ -1964,8 +2018,12 @@ export default function AnnotationPanel() {
     const hasAny = hasCurrentAnnotations || totalOtherAnnotations > 0
 
     return (
-      <div style={{ display: 'flex', flexShrink: 0 }}>
-        <div onMouseDown={handleResizeStart} style={{ width: 6, cursor: 'col-resize', background: 'var(--border-light)', flexShrink: 0, transition: 'background 0.15s' }} onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent)')} onMouseLeave={e => (e.currentTarget.style.background = 'var(--border-light)')} />
+      <div className="right-panel-overlay" style={{ width: panelWidth + 8 }}>
+        <div
+          className={`right-panel-resizer${resizing ? ' is-dragging' : ''}`}
+          onMouseDown={handleResizeStart}
+          title="拖动调整注释栏宽度"
+        />
         <div className="annotation-panel" style={{ width: panelWidth }}>
         <div className="annotation-panel-header">
           <span>注释</span>
@@ -2058,10 +2116,44 @@ export default function AnnotationPanel() {
     )
   }
 
+  const historyChainContent = (
+    <>
+      {displayAnnotation?.historyChain.map(entry => (
+        <HistoryEntryItem
+          key={entry.id}
+          entry={entry}
+          onEdit={handleEdit}
+          onDelete={handleDelete}
+          onCite={displayAnnotation ? handleCite : undefined}
+          entryDocId={currentEntry?.id}
+          annotationId={displayAnnotation?.id}
+        />
+      ))}
+      <div ref={historyEndRef} />
+
+      {citingEntry && (
+        <div style={{ position: 'relative' }}>
+          <BlockCiteDropdown
+            historyEntry={citingEntry.historyEntry}
+            annotation={citingEntry.annotation}
+            entryId={currentEntry?.id || ''}
+            entryTitle={currentEntry?.title || ''}
+            onDone={() => setCitingEntry(null)}
+          />
+        </div>
+      )}
+    </>
+  )
+
   // ===== Active annotation view =====
   return (
-    <div style={{ display: 'flex', flexShrink: 0 }}>
-      <div onMouseDown={handleResizeStart} style={{ width: 6, cursor: 'col-resize', background: 'var(--border-light)', flexShrink: 0, transition: 'background 0.15s' }} onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent)')} onMouseLeave={e => (e.currentTarget.style.background = 'var(--border-light)')} />
+    <>
+    <div className="right-panel-overlay" style={{ width: panelWidth + 8 }}>
+      <div
+        className={`right-panel-resizer${resizing ? ' is-dragging' : ''}`}
+        onMouseDown={handleResizeStart}
+        title="拖动调整注释栏宽度"
+      />
       <div className="annotation-panel" style={{ width: panelWidth }}>
       <div className="annotation-panel-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -2132,35 +2224,7 @@ export default function AnnotationPanel() {
 
       {/* History chain */}
       <div className="history-chain">
-        {displayAnnotation?.historyChain.map(entry => (
-          <HistoryEntryItem
-            key={entry.id}
-            entry={entry}
-            onEdit={handleEdit}
-            onDelete={handleDelete}
-            onCite={displayAnnotation ? handleCite : undefined}
-            entryDocId={currentEntry?.id}
-            annotationId={displayAnnotation?.id}
-          />
-        ))}
-        {/* Note: per-entry AI streaming lives INSIDE the entry block now
-            (via store subscription). The legacy "floating AI streaming
-            indicator" at the bottom of the chain was removed to avoid the
-            "ghost indicator after navigating away" bug. */}
-        <div ref={historyEndRef} />
-
-        {/* Block cite dropdown */}
-        {citingEntry && (
-          <div style={{ position: 'relative' }}>
-            <BlockCiteDropdown
-              historyEntry={citingEntry.historyEntry}
-              annotation={citingEntry.annotation}
-              entryId={currentEntry?.id || ''}
-              entryTitle={currentEntry?.title || ''}
-              onDone={() => setCitingEntry(null)}
-            />
-          </div>
-        )}
+        {historyChainContent}
       </div>
 
       {/* AI Instant Feedback bubble · Batch 43 暂时隐藏
@@ -2372,6 +2436,7 @@ export default function AnnotationPanel() {
         </div>
       </div>
     </div>
+    </div>
     {/* P0-3: 召唤批注错误 toast — 取代 alert()。用 fixed 定位避免依赖祖先 position：relative;
          底部居中漂浮，5s 自消失，点击立即关闭。
          UX-R8#13 · ctaSettings=true 时多挂"去设置"按钮直接打开 Settings 面板,
@@ -2421,6 +2486,6 @@ export default function AnnotationPanel() {
       @keyframes sj-pop-in { from { opacity: 0; transform: translateY(-4px) scale(0.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
       @keyframes sj-anno-toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
     `}</style>
-    </div>
+    </>
   )
 }

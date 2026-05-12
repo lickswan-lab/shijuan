@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from 'react'
 
 export type OcrMode = 'full' | 'range' | 'around-current'
 export type OcrEngine = 'glm' | 'rapidocr'
+const RAPID_OCR_LOCKED = true
 
 export interface OcrRangeChoice {
   startPage?: number
@@ -53,16 +54,17 @@ export default function OcrRangeModal({
   // 重置默认值（每次打开 modal 时）
   useEffect(() => {
     if (!open) return
+    if (RAPID_OCR_LOCKED && ocrEngine === 'rapidocr') onEngineChange?.('glm')
     setMode(defaultMode)
     setStartStr('1')
     setEndStr(String(totalPages || 1))
     setErrorMsg(null)
     const t = setTimeout(() => confirmBtnRef.current?.focus(), 30)
     return () => clearTimeout(t)
-  }, [open, defaultMode, totalPages])
+  }, [open, defaultMode, totalPages, ocrEngine, onEngineChange])
 
   useEffect(() => {
-    if (!open || ocrEngine !== 'rapidocr') return
+    if (!open || RAPID_OCR_LOCKED || ocrEngine !== 'rapidocr') return
     let cancelled = false
     setRapidStatus({ checking: true, available: false, message: '正在检查本地 RapidOCR...' })
     window.electronAPI?.rapidOcrProbe?.()
@@ -134,6 +136,11 @@ export default function OcrRangeModal({
 
   function handleConfirm() {
     setErrorMsg(null)
+    if (RAPID_OCR_LOCKED && ocrEngine === 'rapidocr') {
+      onEngineChange?.('glm')
+      setErrorMsg('本地 RapidOCR 暂时锁定，请先使用 GLM OCR。')
+      return
+    }
     if (ocrEngine === 'glm' && glmApiKeyStatus !== 'set') {
       setErrorMsg('GLM OCR 需要先在设置里配置 GLM API KEY，或切换到本地 RapidOCR。')
       return
@@ -240,7 +247,8 @@ export default function OcrRangeModal({
             <EngineOption
               checked={ocrEngine === 'rapidocr'}
               title="本地 RapidOCR"
-              sub="离线 · 不消耗 API KEY"
+              sub={RAPID_OCR_LOCKED ? '暂时锁定 · 先用 GLM OCR' : '离线 · 不消耗 API KEY'}
+              disabled={RAPID_OCR_LOCKED}
               onClick={() => onEngineChange?.('rapidocr')}
             />
             <EngineOption
@@ -375,20 +383,22 @@ export default function OcrRangeModal({
 }
 
 function EngineOption({
-  checked, title, sub, onClick,
-}: { checked: boolean; title: string; sub: string; onClick: () => void }) {
+  checked, title, sub, disabled, onClick,
+}: { checked: boolean; title: string; sub: string; disabled?: boolean; onClick: () => void }) {
   return (
     <button
       type="button"
-      onClick={onClick}
+      disabled={disabled}
+      onClick={() => { if (!disabled) onClick() }}
       style={{
         textAlign: 'left',
         padding: '11px 12px',
         borderRadius: 8,
         border: `1px solid ${checked ? 'var(--accent)' : 'var(--border-light)'}`,
-        background: checked ? 'var(--accent-soft, rgba(200,149,108,0.10))' : 'transparent',
-        color: 'var(--text)',
-        cursor: 'pointer',
+        background: checked ? 'var(--accent-soft, rgba(200,149,108,0.10))' : disabled ? 'rgba(61, 53, 41, 0.035)' : 'transparent',
+        color: disabled ? 'var(--text-muted)' : 'var(--text)',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.62 : 1,
         transition: 'all 160ms ease',
       }}
     >

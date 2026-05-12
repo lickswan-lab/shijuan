@@ -19,8 +19,11 @@ import 'react-pdf/dist/esm/Page/AnnotationLayer.css'
 import 'katex/dist/katex.min.css'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
+import { useAnnotationAiJobsStore } from '../../store/annotationAiJobsStore'
+import type { Annotation, HistoryEntry, LibraryEntry } from '../../types/library'
 import { cleanOcrText } from './cleanOcrText'
 import { collectTextNodes } from './highlights'
+import { buildGuidedReadingMessages } from './guidedReadingSkill'
 import TranslateModal, { type TranslateModalProps } from './TranslateModal'
 import { useTranslationJobsStore } from '../../store/translationJobsStore'
 // 2026-04-28 · 局部 OCR 范围选择 modal 重新接入
@@ -44,7 +47,10 @@ function fileBaseUrl(absPath: string): string {
   return 'file:///' + encodeURI(dir) + '/'
 }
 
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  '../../../node_modules/react-pdf/node_modules/pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url,
+).toString()
 
 // cleanOcrText and highlight utils are now in separate files
 
@@ -61,11 +67,95 @@ const PRESET_MARK_COLORS = [
   { name: 'orange', label: '橙', hex: '#FF922B' },
 ]
 
+type AnnotationViewTarget = { id: string; selectedText: string; hasGuide?: boolean }
+type WrapTarget = { text: string; id?: string; hasGuide?: boolean; [key: string]: any }
+
+const GUIDE_IFRAME_CSS = `
+      .ocr-ann-underline.ocr-guide-underline {
+        text-decoration: none !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        box-decoration-break: clone;
+        -webkit-box-decoration-break: clone;
+        transition: background 0.18s ease, box-shadow 0.18s ease, color 0.18s ease;
+      }
+      .ocr-ann-underline.ocr-guide-underline.is-guide-hover {
+        background: rgba(91, 142, 130, 0.14) !important;
+        box-shadow: 0 0 0 1px rgba(91, 142, 130, 0.18), 0 4px 16px rgba(91, 142, 130, 0.08) !important;
+      }
+      .ocr-ann-marker.ocr-guide-marker {
+        width: auto;
+        min-width: 0;
+        height: 15px;
+        padding: 0 4px;
+        margin-left: 0;
+        border-radius: 999px;
+        background: linear-gradient(135deg, rgba(91, 142, 130, 0.95), rgba(200, 149, 108, 0.92));
+        color: #fffaf0;
+        font-size: 9.5px;
+        line-height: 15px;
+        font-weight: 700;
+        text-align: center;
+        opacity: 0.9;
+        box-shadow: 0 2px 8px rgba(66, 48, 32, 0.16);
+      }
+      .ocr-ann-marker.ocr-guide-marker:hover {
+        opacity: 1;
+        transform: translateY(-1px) scale(1.08);
+      }
+`
+
 function getTextMarkClassName(type: TextMarkType, color?: string): string {
   const safeColor = color || 'yellow'
   return type === 'bold'
     ? `ocr-mark mark-highlight-${safeColor}`
     : `ocr-mark mark-underline-${safeColor}`
+}
+
+function getModelLabel(modelSpec: string): string {
+  const [, modelId] = modelSpec.includes(':') ? modelSpec.split(':', 2) : ['', modelSpec]
+  return modelId
+    .replace(/^glm-/, 'GLM-')
+    .replace(/^gpt-/, 'GPT-')
+    .replace(/^claude-/, 'Claude ')
+    .replace(/^gemini-/, 'Gemini ')
+    .replace(/^moonshot-/, 'Moonshot ')
+    .replace(/^deepseek-/, 'DeepSeek ')
+    .replace(/^doubao-/, '豆包 ')
+    .replace(/^kimi-/, 'Kimi ')
+    .replace(/^qwen3?\.?6?-?/, 'Qwen ')
+    .replace(/-\d{8,}$/, '')
+}
+
+function annotationHasGuide(annotation: Pick<Annotation, 'historyChain'>): boolean {
+  return annotation.historyChain?.some(entry => entry.type === 'ai_guide') || false
+}
+
+function setGuideHover(root: ParentNode, annId: string, on: boolean) {
+  root.querySelectorAll(`.ocr-ann-underline[data-ann-id="${annId}"]`).forEach(el => {
+    el.classList.toggle('is-guide-hover', on)
+  })
+}
+
+function bindGuideMarkerHover(root: ParentNode, marker: HTMLElement, annId: string) {
+  marker.addEventListener('mouseenter', () => setGuideHover(root, annId, true))
+  marker.addEventListener('mouseleave', () => setGuideHover(root, annId, false))
+}
+
+function buildSelectionSurroundingContext(docText: string | null, selectedText: string, contextWindow: number): string | undefined {
+  if (!docText || !selectedText) return undefined
+  const windowSize = contextWindow === -1 ? Math.min(docText.length, 6000) : Math.max(800, contextWindow)
+  const normalizedDoc = normalizeMixedChineseToSimplified(docText)
+  const cleanDoc = normalizedDoc.replace(/\s+/g, '')
+  const cleanSel = normalizeMixedChineseToSimplified(selectedText).replace(/\s+/g, '')
+  if (!cleanDoc || !cleanSel) return undefined
+  const pos = cleanDoc.indexOf(cleanSel.slice(0, Math.min(cleanSel.length, 180)))
+  if (pos < 0) return undefined
+  const ratio = normalizedDoc.length / cleanDoc.length
+  const origPos = Math.floor(pos * ratio)
+  const start = Math.max(0, origPos - windowSize)
+  const end = Math.min(normalizedDoc.length, origPos + selectedText.length + windowSize)
+  return `${start > 0 ? '[...] ' : ''}${normalizedDoc.substring(start, end)}${end < normalizedDoc.length ? ' [...]' : ''}`
 }
 
 function normalizeMarkText(text: string): string {
@@ -113,8 +203,399 @@ function getReaderSurfaceColor(bgHue: number, bgSat: number, bgLight: number): s
   return `hsl(${bgHue}, ${bgSat}%, ${light}%)`
 }
 
+type ReaderPositionMode = 'pdf' | 'ocr'
+
+const READER_POS_KEY_PREFIX = 'sj-readpos-v2'
+
+function getReaderPositionMode(viewMode: ViewMode): ReaderPositionMode {
+  return viewMode === 'ocr' ? 'ocr' : 'pdf'
+}
+
+function readLiveReaderTop(entryId: string, mode: ReaderPositionMode): number | null {
+  try {
+    const raw = localStorage.getItem(`${READER_POS_KEY_PREFIX}:${entryId}:${mode}`)
+    if (!raw) return null
+    const n = Number(raw)
+    return Number.isFinite(n) && n > 10 ? n : null
+  } catch {
+    return null
+  }
+}
+
+function writeLiveReaderTop(entryId: string, mode: ReaderPositionMode, top: number) {
+  if (!entryId || top <= 10) return
+  try { localStorage.setItem(`${READER_POS_KEY_PREFIX}:${entryId}:${mode}`, String(Math.round(top))) } catch {}
+}
+
+type ReaderAnchor = {
+  top: number
+  page?: number
+  pageViewportOffset?: number
+  text?: string
+  blockViewportOffset?: number
+  exactText?: string
+  exactViewportOffset?: number
+}
+
+const READER_ANCHOR_BLOCK_SELECTOR = [
+  'p',
+  'li',
+  'blockquote',
+  'pre',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'td',
+  'th',
+  '.ocr-markdown-content p',
+  '.ocr-markdown-content li',
+  '.ocr-markdown-content h1',
+  '.ocr-markdown-content h2',
+  '.ocr-markdown-content h3',
+  '.ocr-markdown-content h4',
+].join(',')
+
+function normalizeReaderAnchorText(value: string): string {
+  return normalizeMixedChineseToSimplified(value || '').replace(/\s+/g, '').slice(0, 120)
+}
+
+function getElementReadableText(el: Element | null | undefined): string {
+  if (!el) return ''
+  return ((el as HTMLElement).innerText || el.textContent || '').trim()
+}
+
+function isUsableReaderBlock(el: Element | null | undefined): el is HTMLElement {
+  if (!el) return false
+  const html = el as HTMLElement
+  if (html.closest('.floating-toolbar, .immersive-annotation-box, button, input, textarea, select')) return false
+  return normalizeReaderAnchorText(getElementReadableText(html)).length >= 16
+}
+
+function closestReaderBlock(start: Element | null, root: HTMLElement): HTMLElement | null {
+  let node: Element | null = start
+  while (node && node !== root && root.contains(node)) {
+    if ((node as HTMLElement).matches?.(READER_ANCHOR_BLOCK_SELECTOR) && isUsableReaderBlock(node)) {
+      return node as HTMLElement
+    }
+    node = node.parentElement
+  }
+  node = start
+  while (node && node !== root && root.contains(node)) {
+    if (isUsableReaderBlock(node)) return node as HTMLElement
+    node = node.parentElement
+  }
+  return null
+}
+
+function collectReaderBlocks(root: HTMLElement): HTMLElement[] {
+  const nodes = Array.from(root.querySelectorAll<HTMLElement>(READER_ANCHOR_BLOCK_SELECTOR))
+  const usable = nodes.filter(isUsableReaderBlock)
+  if (usable.length > 0) return usable
+  return Array.from(root.querySelectorAll<HTMLElement>('[data-page-number], article, section, div'))
+    .filter(el => el !== root && isUsableReaderBlock(el))
+}
+
+function collectTextNodeIndex(root: HTMLElement, limit = 600000): { text: string; map: Array<{ node: Text; offset: number }> } {
+  const doc = root.ownerDocument || document
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement
+      if (!parent) return NodeFilter.FILTER_REJECT
+      if (!root.contains(parent)) return NodeFilter.FILTER_REJECT
+      if (parent.closest('.floating-toolbar, .immersive-annotation-box, button, input, textarea, select, script, style')) {
+        return NodeFilter.FILTER_REJECT
+      }
+      if (!node.nodeValue?.trim()) return NodeFilter.FILTER_REJECT
+      return NodeFilter.FILTER_ACCEPT
+    },
+  })
+  let text = ''
+  const map: Array<{ node: Text; offset: number }> = []
+  while (walker.nextNode() && text.length < limit) {
+    const node = walker.currentNode as Text
+    const raw = node.nodeValue || ''
+    const normalized = normalizeMixedChineseToSimplified(raw)
+    for (let i = 0; i < normalized.length && text.length < limit; i++) {
+      const ch = normalized[i]
+      if (/\s/.test(ch)) continue
+      text += ch
+      map.push({ node, offset: Math.min(i, raw.length) })
+    }
+  }
+  return { text, map }
+}
+
+function findTextRectInRoot(root: HTMLElement, target: string): DOMRect | null {
+  const needle = normalizeReaderAnchorText(target)
+  if (needle.length < 8) return null
+  const { text, map } = collectTextNodeIndex(root)
+  if (!text || map.length === 0) return null
+  const candidates = [
+    needle,
+    needle.slice(0, Math.min(90, needle.length)),
+    needle.slice(0, Math.min(60, needle.length)),
+    needle.slice(Math.max(0, needle.length - Math.min(60, needle.length))),
+  ].filter(item => item.length >= 8)
+  for (const candidate of candidates) {
+    const idx = text.indexOf(candidate)
+    if (idx < 0) continue
+    const start = map[idx]
+    const end = map[Math.min(idx + candidate.length - 1, map.length - 1)]
+    if (!start || !end) continue
+    try {
+      const range = (root.ownerDocument || document).createRange()
+      range.setStart(start.node, start.offset)
+      range.setEnd(end.node, Math.min((end.node.nodeValue || '').length, end.offset + 1))
+      const rect = Array.from(range.getClientRects()).find(r => r.width > 0 || r.height > 0) || range.getBoundingClientRect()
+      range.detach?.()
+      if (rect && (rect.width > 0 || rect.height > 0)) return rect
+    } catch {}
+  }
+  return null
+}
+
+function captureSelectionTextAnchor(root: HTMLElement, win: Window = window): Pick<ReaderAnchor, 'exactText' | 'exactViewportOffset'> | null {
+  try {
+    const sel = win.getSelection()
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
+    const range = sel.getRangeAt(0)
+    const common = range.commonAncestorContainer
+    const element = common.nodeType === Node.TEXT_NODE ? common.parentElement : common as Element
+    if (!element || !root.contains(element)) return null
+    const text = normalizeReaderAnchorText(range.toString())
+    if (text.length < 8) return null
+    const rect = Array.from(range.getClientRects()).find(r => r.width > 0 || r.height > 0) || range.getBoundingClientRect()
+    if (!rect || (!rect.width && !rect.height)) return null
+    const rootRect = root.getBoundingClientRect()
+    return { exactText: text, exactViewportOffset: rect.top - rootRect.top }
+  } catch {
+    return null
+  }
+}
+
+function captureCaretTextAnchor(root: HTMLElement, clientX: number, clientY: number): Pick<ReaderAnchor, 'exactText' | 'exactViewportOffset'> | null {
+  try {
+    const doc = root.ownerDocument || document
+    const range: Range | null = (doc as any).caretRangeFromPoint
+      ? (doc as any).caretRangeFromPoint(clientX, clientY)
+      : (() => {
+          const pos = (doc as any).caretPositionFromPoint?.(clientX, clientY)
+          if (!pos?.offsetNode) return null
+          const r = doc.createRange()
+          r.setStart(pos.offsetNode, pos.offset)
+          r.collapse(true)
+          return r
+        })()
+    if (!range) return null
+    const node = range.startContainer
+    if (node.nodeType !== Node.TEXT_NODE) return null
+    const parent = node.parentElement
+    if (!parent || !root.contains(parent)) return null
+    const raw = node.nodeValue || ''
+    const offset = Math.max(0, Math.min(raw.length, range.startOffset))
+    const start = Math.max(0, offset - 48)
+    const end = Math.min(raw.length, offset + 72)
+    let snippet = normalizeReaderAnchorText(raw.slice(start, end))
+    if (snippet.length < 12) {
+      const block = closestReaderBlock(parent, root)
+      snippet = normalizeReaderAnchorText(getElementReadableText(block || parent)).slice(0, 90)
+    }
+    if (snippet.length < 12) return null
+    const rootRect = root.getBoundingClientRect()
+    return { exactText: snippet, exactViewportOffset: clientY - rootRect.top }
+  } catch {
+    return null
+  }
+}
+
+function findReaderBlockByText(root: HTMLElement, text: string): HTMLElement | null {
+  const needle = normalizeReaderAnchorText(text)
+  if (needle.length < 16) return null
+  for (const block of collectReaderBlocks(root)) {
+    const haystack = normalizeReaderAnchorText(getElementReadableText(block))
+    if (!haystack) continue
+    if (haystack.includes(needle) || needle.includes(haystack.slice(0, Math.min(needle.length, haystack.length)))) {
+      return block
+    }
+  }
+  const shorter = needle.slice(0, 60)
+  if (shorter.length < 16) return null
+  return collectReaderBlocks(root).find(block => normalizeReaderAnchorText(getElementReadableText(block)).includes(shorter)) || null
+}
+
+function isCanvasPdfPage(pageEl: HTMLElement | null): boolean {
+  if (!pageEl) return false
+  return !!pageEl.querySelector('canvas')
+}
+
+function captureReaderAnchor(el: HTMLElement): ReaderAnchor {
+  const rect = el.getBoundingClientRect()
+  const selectionAnchor = captureSelectionTextAnchor(el)
+  if (selectionAnchor?.exactText) {
+    return { top: el.scrollTop, ...selectionAnchor }
+  }
+  const x = Math.max(rect.left + 16, Math.min(rect.left + rect.width * 0.45, rect.right - 16))
+  const probeYs = [
+    rect.top + Math.min(120, rect.height * 0.22),
+    rect.top + rect.height * 0.38,
+    rect.top + Math.min(220, rect.height * 0.55),
+  ].filter(y => y > rect.top && y < rect.bottom)
+
+  for (const y of probeYs) {
+    const target = document.elementFromPoint(x, y) as HTMLElement | null
+    if (!target || !el.contains(target)) continue
+    const caretAnchor = captureCaretTextAnchor(el, x, y)
+    if (caretAnchor?.exactText) {
+      return { top: el.scrollTop, ...caretAnchor }
+    }
+    const pageEl = target.closest<HTMLElement>('[data-page-number]')
+    if (isCanvasPdfPage(pageEl)) {
+      const page = Number(pageEl?.dataset.pageNumber)
+      if (Number.isFinite(page) && page > 0) {
+        const pageRect = pageEl.getBoundingClientRect()
+        return { top: el.scrollTop, page, pageViewportOffset: pageRect.top - rect.top }
+      }
+    }
+    const block = closestReaderBlock(target, el)
+    if (block) {
+      const blockRect = block.getBoundingClientRect()
+      return {
+        top: el.scrollTop,
+        text: normalizeReaderAnchorText(getElementReadableText(block)),
+        blockViewportOffset: blockRect.top - rect.top,
+      }
+    }
+    if (pageEl) {
+      const page = Number(pageEl.dataset.pageNumber)
+      if (Number.isFinite(page) && page > 0) {
+        const pageRect = pageEl.getBoundingClientRect()
+        return { top: el.scrollTop, page, pageViewportOffset: pageRect.top - rect.top }
+      }
+    }
+  }
+
+  return { top: el.scrollTop }
+}
+
+function restoreReaderAnchor(el: HTMLElement, anchor: ReaderAnchor) {
+  const rect = el.getBoundingClientRect()
+  if (anchor.exactText && typeof anchor.exactViewportOffset === 'number') {
+    const exactRect = findTextRectInRoot(el, anchor.exactText)
+    if (exactRect) {
+      el.scrollTop += exactRect.top - rect.top - anchor.exactViewportOffset
+      return
+    }
+  }
+  if (anchor.text) {
+    const block = findReaderBlockByText(el, anchor.text)
+    if (block) {
+      const blockRect = block.getBoundingClientRect()
+      el.scrollTop += blockRect.top - rect.top - (anchor.blockViewportOffset ?? 0)
+      return
+    }
+  }
+  if (anchor.page) {
+    const page = el.querySelector<HTMLElement>(`[data-page-number="${anchor.page}"]`)
+    if (page) {
+      const pageRect = page.getBoundingClientRect()
+      el.scrollTop += pageRect.top - rect.top - (anchor.pageViewportOffset ?? 0)
+      return
+    }
+  }
+  if (anchor.top > 10) el.scrollTop = anchor.top
+}
+
+function captureIframeReaderAnchor(frame: HTMLIFrameElement): ReaderAnchor | null {
+  const doc = frame.contentDocument
+  const win = frame.contentWindow
+  const root = doc?.body
+  if (!doc || !root || !win) return null
+  const top = win.scrollY || doc.documentElement.scrollTop || root.scrollTop || 0
+  const selectionAnchor = captureSelectionTextAnchor(root, win)
+  if (selectionAnchor?.exactText) return { top, ...selectionAnchor }
+  const width = doc.documentElement.clientWidth || frame.clientWidth || 800
+  const height = doc.documentElement.clientHeight || frame.clientHeight || 800
+  const x = Math.max(16, Math.min(width * 0.45, width - 16))
+  const ys = [Math.min(120, height * 0.22), height * 0.38, Math.min(220, height * 0.55)]
+  for (const y of ys) {
+    const target = doc.elementFromPoint(x, y) as HTMLElement | null
+    if (!target || !root.contains(target)) continue
+    const caretAnchor = captureCaretTextAnchor(root, x, y)
+    if (caretAnchor?.exactText) return { top, ...caretAnchor }
+    const block = closestReaderBlock(target, root)
+    if (!block) continue
+    return {
+      top,
+      text: normalizeReaderAnchorText(getElementReadableText(block)),
+      blockViewportOffset: block.getBoundingClientRect().top,
+    }
+  }
+  return { top }
+}
+
+function restoreIframeReaderAnchor(frame: HTMLIFrameElement, anchor: ReaderAnchor | null) {
+  if (!anchor) return
+  const doc = frame.contentDocument
+  const win = frame.contentWindow
+  const root = doc?.body
+  if (!doc || !root || !win) return
+  if (anchor.exactText && typeof anchor.exactViewportOffset === 'number') {
+    const exactRect = findTextRectInRoot(root, anchor.exactText)
+    if (exactRect) {
+      const delta = exactRect.top - anchor.exactViewportOffset
+      win.scrollTo(0, (win.scrollY || doc.documentElement.scrollTop || 0) + delta)
+      return
+    }
+  }
+  if (anchor.text) {
+    const block = findReaderBlockByText(root, anchor.text)
+    if (block) {
+      const delta = block.getBoundingClientRect().top - (anchor.blockViewportOffset ?? 0)
+      win.scrollTo(0, (win.scrollY || doc.documentElement.scrollTop || 0) + delta)
+      return
+    }
+  }
+  if (anchor.top > 10) win.scrollTo(0, anchor.top)
+}
+
+function clampToolbarPoint(x: number, y: number) {
+  const margin = 42
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1200
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 800
+  return {
+    x: Math.max(margin, Math.min(vw - margin, Number.isFinite(x) ? x : vw / 2)),
+    y: Math.max(52, Math.min(vh - 16, Number.isFinite(y) ? y : vh / 2)),
+  }
+}
+
+function getToolbarPointFromRange(range: Range, event?: { clientX?: number; clientY?: number }) {
+  const rects = Array.from(range.getClientRects()).filter(r => r.width > 0 || r.height > 0)
+  const visible = rects.filter(r => r.bottom >= 0 && r.top <= window.innerHeight && r.right >= 0 && r.left <= window.innerWidth)
+  let rect: DOMRect | ClientRect | undefined
+  if (visible.length > 0 && typeof event?.clientX === 'number' && typeof event?.clientY === 'number') {
+    rect = visible.reduce((best, item) => {
+      const bx = best.left + best.width / 2
+      const by = best.top + best.height / 2
+      const ix = item.left + item.width / 2
+      const iy = item.top + item.height / 2
+      const bd = Math.hypot(bx - event.clientX!, by - event.clientY!)
+      const id = Math.hypot(ix - event.clientX!, iy - event.clientY!)
+      return id < bd ? item : best
+    }, visible[0])
+  } else {
+    rect = visible[visible.length - 1] || rects[rects.length - 1] || range.getBoundingClientRect()
+  }
+  const fallbackX = typeof event?.clientX === 'number' ? event.clientX : window.innerWidth / 2
+  const fallbackY = typeof event?.clientY === 'number' ? event.clientY : window.innerHeight / 2
+  const x = rect ? rect.left + rect.width / 2 : fallbackX
+  const y = rect ? rect.top - 8 : fallbackY - 8
+  return clampToolbarPoint(x, y)
+}
+
 // ===== Append Annotation List (warm theme, grouped by page, with cross-entry support) =====
-import type { Annotation } from '../../types/library'
 
 interface OtherEntryAnns { entryId: string; entryTitle: string; annotations: Annotation[] }
 
@@ -291,8 +772,8 @@ function AppendAnnotationList({ annotations, otherEntries, onAppend, onAppendOth
 
 function findAndWrapAll(
   container: HTMLElement,
-  targets: Array<{ text: string; id: string }>,
-  wrapFn: (target: { text: string; id: string }) => HTMLElement,
+  targets: WrapTarget[],
+  wrapFn: (target: WrapTarget) => HTMLElement,
   skipClass?: string,
 ) {
   // === Phase 1: build flat string + char→DOM map (one pass, before any wrap) ===
@@ -312,7 +793,7 @@ function findAndWrapAll(
   if (charMap.length === 0) return
 
   // === Phase 2: locate each target's [start, end) in the flat string ===
-  type Range = { target: { text: string; id: string }; start: number; end: number; idx: number }
+  type Range = { target: WrapTarget; start: number; end: number; idx: number }
   const ranges: Range[] = []
   for (let i = 0; i < targets.length; i++) {
     const target = targets[i]
@@ -326,7 +807,7 @@ function findAndWrapAll(
   // === Phase 3: subtract LATER ranges from each older range ===
   // For each range r, compute visible sub-intervals = [r.start, r.end) minus
   // the union of all ranges with idx > r.idx.
-  type WrapTask = { target: { text: string; id: string }; start: number; end: number }
+  type WrapTask = { target: WrapTarget; start: number; end: number }
   const tasks: WrapTask[] = []
   for (const r of ranges) {
     let intervals: Array<[number, number]> = [[r.start, r.end]]
@@ -393,7 +874,7 @@ function findAndWrapAll(
 
 function useAnnotationHighlights(
   containerRef: React.RefObject<HTMLDivElement | null>,
-  annotations: Array<{ id: string; selectedText: string }>,
+  annotations: AnnotationViewTarget[],
   onAnnotationClick: (id: string) => void,
   deps: unknown[]
 ) {
@@ -421,20 +902,20 @@ function useAnnotationHighlights(
         const targets = annotations
           .filter(a => a.selectedText && a.selectedText.length >= 4)
           .sort((a, b) => b.selectedText.length - a.selectedText.length)
-          .map(a => ({ text: a.selectedText, id: a.id }))
+          .map(a => ({ text: a.selectedText, id: a.id, hasGuide: a.hasGuide }))
 
         findAndWrapAll(container!, targets, (target) => {
           // Insert marker dot before the underline
           const marker = document.createElement('span')
           marker.className = 'ocr-ann-marker'
           marker.title = '已注释 · 点击查看'
-          marker.dataset.annotationId = target.id
-          marker.onclick = (ev) => { ev.stopPropagation(); onAnnotationClick(target.id) }
+          marker.dataset.annotationId = target.id || ''
+          marker.onclick = (ev) => { ev.stopPropagation(); if (target.id) onAnnotationClick(target.id) }
 
           // We'll insert the marker separately after wrapping
           const underline = document.createElement('span')
           underline.className = 'ocr-ann-underline'
-          underline.dataset.annotationId = target.id
+          underline.dataset.annotationId = target.id || ''
 
           // Hack: attach marker to underline so we can insert it after
           ;(underline as any).__marker = marker
@@ -452,6 +933,78 @@ function useAnnotationHighlights(
     }
 
     const raf = requestAnimationFrame(() => applyHighlights())
+    return () => cancelAnimationFrame(raf)
+  }, deps)
+}
+
+function useGuideAnnotationHighlights(
+  containerRef: React.RefObject<HTMLDivElement | null>,
+  annotations: AnnotationViewTarget[],
+  onAnnotationClick: (id: string) => void,
+  deps: unknown[]
+) {
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    function applyHighlights() {
+      try {
+        container.querySelectorAll('.ocr-ann-marker, .ocr-ann-underline').forEach(el => {
+          try {
+            const parent = el.parentNode
+            if (!parent) return
+            if (el.classList.contains('ocr-ann-marker')) {
+              parent.removeChild(el)
+              return
+            }
+            while (el.firstChild) parent.insertBefore(el.firstChild, el)
+            parent.removeChild(el)
+          } catch {}
+        })
+        try { container.normalize() } catch {}
+        if (!annotations.length) return
+
+        const targets = annotations
+          .filter(a => a.selectedText && a.selectedText.length >= 4)
+          .sort((a, b) => b.selectedText.length - a.selectedText.length)
+          .map(a => ({ text: a.selectedText, id: a.id, hasGuide: a.hasGuide }))
+
+        findAndWrapAll(container, targets, (target) => {
+          const marker = document.createElement('span')
+          marker.className = target.hasGuide ? 'ocr-ann-marker ocr-guide-marker' : 'ocr-ann-marker'
+          marker.title = target.hasGuide ? '导读：移入查看涉及文段，点击打开' : '已注释 · 点击查看'
+          marker.dataset.annId = target.id || ''
+          marker.dataset.annotationId = target.id || ''
+          if (target.hasGuide) marker.textContent = '导读'
+          marker.onclick = (ev) => {
+            ev.stopPropagation()
+            if (target.id) onAnnotationClick(target.id)
+          }
+          if (target.hasGuide && target.id) bindGuideMarkerHover(container, marker, target.id)
+
+          const underline = document.createElement('span')
+          underline.className = target.hasGuide ? 'ocr-ann-underline ocr-guide-underline' : 'ocr-ann-underline'
+          underline.dataset.annId = target.id || ''
+          underline.dataset.annotationId = target.id || ''
+          if (target.hasGuide) underline.dataset.guide = 'true'
+          ;(underline as any).__marker = marker
+          return underline
+        }, 'ocr-ann-underline')
+
+        const seenMarkers = new Set<string>()
+        container.querySelectorAll('.ocr-ann-underline').forEach(el => {
+          const annId = (el as HTMLElement).dataset.annId || (el as HTMLElement).dataset.annotationId || ''
+          if (annId && seenMarkers.has(annId)) return
+          if (annId) seenMarkers.add(annId)
+          const marker = (el as any).__marker
+          if (marker && el.parentNode) {
+            try { el.parentNode.insertBefore(marker, el) } catch {}
+          }
+        })
+      } catch {}
+    }
+
+    const raf = requestAnimationFrame(applyHighlights)
     return () => cancelAnimationFrame(raf)
   }, deps)
 }
@@ -570,7 +1123,7 @@ function PdfOutlineNode({ item, depth, onItemClick }: {
 // OCR Content component with per-page sections and markdown rendering
 function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText, marks, onRemoveMark, searchHighlight }: {
   text: string
-  annotations: Array<{ id: string; selectedText: string }>
+  annotations: AnnotationViewTarget[]
   onAnnotationClick: (id: string) => void
   activeSelectionText?: string
   marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
@@ -593,7 +1146,7 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
     : [cleaned]
 
   // Highlight annotations after render
-  useAnnotationHighlights(containerRef, normalizedAnnotations, onAnnotationClick, [cleaned, normalizedAnnotations])
+  useGuideAnnotationHighlights(containerRef, normalizedAnnotations, onAnnotationClick, [cleaned, normalizedAnnotations])
   // Search highlight + auto-scroll to first hit
   useSearchHighlight(containerRef, searchHighlight, [cleaned, searchHighlight])
 
@@ -716,18 +1269,21 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
 
 // HTML viewer: uses iframe for proper rendering + postMessage for text selection + annotation highlights
 function HtmlViewer({
-  absPath, onTextSelect, annotations, marks, onRemoveMark, onMarkEdit,
+  absPath, onTextSelect, annotations, marks, onRemoveMark, onMarkEdit, onAnnotationClick,
   fontSize = 16, fontWeight = 400, colorDepth = 80,
   bgHue = 38, bgSat = 55, bgLight = 92,
+  entryId,
   onToolbarShow,
   onToolbarDismiss,
 }: {
   absPath: string
+  entryId?: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
-  annotations?: Array<{ id: string; selectedText: string }>
+  annotations?: AnnotationViewTarget[]
   marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
   onRemoveMark?: (id: string) => void
   onMarkEdit?: (markId: string, x: number, y: number) => void
+  onAnnotationClick?: (id: string) => void
   // Typography controls from parent toolbar — mirror EPUB/DOCX behavior.
   fontSize?: number
   fontWeight?: number
@@ -742,7 +1298,10 @@ function HtmlViewer({
   onToolbarDismiss?: () => void
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
-  const annotationSignature = JSON.stringify((annotations || []).map(a => [a.id, a.selectedText]))
+  const htmlLayoutAnchorRef = useRef<ReaderAnchor | null>(null)
+  const onAnnotationClickRef = useRef(onAnnotationClick)
+  onAnnotationClickRef.current = onAnnotationClick
+  const annotationSignature = JSON.stringify((annotations || []).map(a => [a.id, a.selectedText, !!a.hasGuide]))
   const markSignature = JSON.stringify((marks || []).map(m => [m.id, m.type, m.color || '', m.selectedText]))
   const latestReaderStateRef = useRef({
     annotations,
@@ -801,6 +1360,21 @@ body { max-width: var(--reader-max-width, 920px); min-height: 100vh; margin: 0 a
       p { margin: 0 0 var(--reader-paragraph-gap, 0.9em) 0; }
       ::selection { background: rgba(200, 149, 108, 0.35); }
       .sj-ann-hl { background: rgba(200,149,108,0.2); border-bottom: 2px solid rgba(200,149,108,0.5); border-radius: 2px; }
+      .ocr-ann-marker {
+        display: inline-block;
+        width: 6px; height: 6px;
+        background: #C8956C;
+        border-radius: 50%;
+        margin: 0 3px 0 1px;
+        vertical-align: middle;
+        cursor: pointer;
+        opacity: 0.72;
+        transition: opacity 0.15s, transform 0.15s;
+        position: relative;
+        top: -1px;
+      }
+      .ocr-ann-marker:hover { opacity: 1; transform: scale(1.45); }
+      ${GUIDE_IFRAME_CSS}
       .ocr-mark { cursor: pointer; pointer-events: auto; }
       .mark-underline-yellow { text-decoration: underline; text-decoration-color: #FFD43B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
       .mark-underline-red { text-decoration: underline; text-decoration-color: #FF6B6B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
@@ -817,10 +1391,11 @@ body { max-width: var(--reader-max-width, 920px); min-height: 100vh; margin: 0 a
       img { max-width: 100%; height: auto; }
     `
 
-    doc.body.querySelectorAll('.ocr-mark, .sj-ann-hl').forEach(el => {
+    doc.body.querySelectorAll('.ocr-mark, .sj-ann-hl, .ocr-ann-marker').forEach(el => {
       try {
         const parent = el.parentNode
         if (!parent) return
+        if (el.classList.contains('ocr-ann-marker')) { parent.removeChild(el); return }
         while (el.firstChild) parent.insertBefore(el.firstChild, el)
         parent.removeChild(el)
       } catch {}
@@ -831,15 +1406,34 @@ body { max-width: var(--reader-max-width, 920px); min-height: 100vh; margin: 0 a
     } catch {}
 
     const annTargets = normalizeAnnotationTargets(state.annotations)
-      .map(a => ({ text: a.selectedText, id: a.id }))
+      .map(a => ({ text: a.selectedText, id: a.id, hasGuide: a.hasGuide }))
       .filter(a => a.text.length >= 2)
     if (annTargets.length) {
       findAndWrapAll(doc.body, annTargets, (target) => {
         const span = doc.createElement('span')
-        span.className = 'sj-ann-hl'
-        span.dataset.annotationId = target.id
+        span.className = target.hasGuide ? 'sj-ann-hl ocr-ann-underline ocr-guide-underline' : 'sj-ann-hl ocr-ann-underline'
+        span.dataset.annId = target.id || ''
+        span.dataset.annotationId = target.id || ''
         return span
       }, 'sj-ann-hl')
+      const seen = new Set<string>()
+      doc.body.querySelectorAll('.sj-ann-hl[data-ann-id]').forEach(el => {
+        const annId = (el as HTMLElement).dataset.annId || ''
+        if (!annId || seen.has(annId)) return
+        seen.add(annId)
+        const target = annTargets.find(item => item.id === annId)
+        const marker = doc.createElement('span')
+        marker.className = target?.hasGuide ? 'ocr-ann-marker ocr-guide-marker' : 'ocr-ann-marker'
+        marker.title = target?.hasGuide ? '导读：移入查看涉及文段，点击打开' : '已注释 · 点击查看'
+        ;(marker as HTMLElement).dataset.annId = annId
+        if (target?.hasGuide) marker.textContent = '导读'
+        marker.addEventListener('click', (e) => {
+          e.stopPropagation()
+          onAnnotationClickRef.current?.(annId)
+        })
+        if (target?.hasGuide) bindGuideMarkerHover(doc.body, marker, annId)
+        el.parentNode?.insertBefore(marker, el)
+      })
     }
 
     const markTargets = normalizeAnnotationTargets(state.marks).map(m => ({
@@ -860,7 +1454,7 @@ body { max-width: var(--reader-max-width, 920px); min-height: 100vh; margin: 0 a
     }
 
     if (win && scrollY > 0) requestAnimationFrame(() => win.scrollTo(0, scrollY))
-  }, [currentEntry?.id])
+  }, [])
 
   // Listen for selection messages from iframe. Two types:
   //   'text-selection' — fires on mouseup inside iframe with coords+text
@@ -882,11 +1476,39 @@ body { max-width: var(--reader-max-width, 920px); min-height: 100vh; margin: 0 a
       }
       if (e.data?.type === 'reader-dismiss') {
         onToolbarDismiss?.()
+        return
+      }
+      if (e.data?.type === 'reader-scroll') {
+        if (entryId) writeLiveReaderTop(entryId, 'pdf', Number(e.data.y) || 0)
       }
     }
     window.addEventListener('message', handler)
     return () => window.removeEventListener('message', handler)
-  }, [onMarkEdit, onToolbarDismiss, onToolbarShow])
+  }, [entryId, onMarkEdit, onToolbarDismiss, onToolbarShow])
+
+  useEffect(() => {
+    const capture = () => {
+      const frame = iframeRef.current
+      if (!frame) return
+      htmlLayoutAnchorRef.current = captureIframeReaderAnchor(frame)
+    }
+    const restore = () => {
+      const frame = iframeRef.current
+      const anchor = htmlLayoutAnchorRef.current
+      if (!frame || !anchor) return
+      const apply = () => restoreIframeReaderAnchor(frame, anchor)
+      requestAnimationFrame(apply)
+      window.setTimeout(apply, 80)
+      window.setTimeout(apply, 220)
+      window.setTimeout(() => { htmlLayoutAnchorRef.current = null }, 360)
+    }
+    window.addEventListener('shijuan-before-layout-change', capture)
+    window.addEventListener('shijuan-layout-change', restore)
+    return () => {
+      window.removeEventListener('shijuan-before-layout-change', capture)
+      window.removeEventListener('shijuan-layout-change', restore)
+    }
+  }, [])
 
   // Load HTML and inject selection script + annotation highlights
   useEffect(() => {
@@ -896,10 +1518,12 @@ body { max-width: var(--reader-max-width, 920px); min-height: 100vh; margin: 0 a
       ?? frame.contentDocument?.documentElement?.scrollTop
       ?? frame.contentDocument?.body?.scrollTop
       ?? 0
+    const savedScrollY = entryId ? readLiveReaderTop(entryId, 'pdf') : null
+    const targetScrollY = previousScrollY > 10 ? previousScrollY : (savedScrollY || 0)
     const restoreScroll = () => {
       const win = frame.contentWindow
-      if (!win || previousScrollY <= 0) return
-      requestAnimationFrame(() => win.scrollTo(0, previousScrollY))
+      if (!win || targetScrollY <= 0) return
+      requestAnimationFrame(() => win.scrollTo(0, targetScrollY))
     }
 
     window.electronAPI.readFileBuffer(absPath).then(buf => {
@@ -975,6 +1599,9 @@ document.addEventListener('mouseup', function(e) {
     window.parent.postMessage({ type: 'reader-dismiss' }, '*');
   }
 });
+window.addEventListener('scroll', function() {
+  window.parent.postMessage({ type: 'reader-scroll', y: window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0 }, '*');
+}, { passive: true });
 </script>`
 
       // BUG-FIX R8#19 · 注入 <base href> 让 HTML 内相对路径的图片/样式/链接
@@ -1012,7 +1639,7 @@ document.addEventListener('mouseup', function(e) {
     }).catch(() => {
       if (iframeRef.current) iframeRef.current.srcdoc = '<p>无法加载文件</p>'
     })
-  }, [absPath, applyReaderState])
+  }, [absPath, applyReaderState, entryId])
 
   useEffect(() => {
     applyReaderState()
@@ -1044,12 +1671,14 @@ function EpubViewer({
   marks, onRemoveMark, onMarkEdit,
   fontSize = 17, fontWeight = 400, colorDepth = 80,
   bgHue = 38, bgSat = 55, bgLight = 92,
+  entryId,
   onToolbarShow,
   onToolbarDismiss,
 }: {
   absPath: string
+  entryId?: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
-  annotations?: Array<{ id: string; selectedText: string }>
+  annotations?: AnnotationViewTarget[]
   onAnnotationClick?: (id: string) => void
   // Inline marks (6-color 高光 + 6-color underline), same shape as DocxViewer
   marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
@@ -1081,6 +1710,8 @@ function EpubViewer({
   const resizeRestoreReadyRef = useRef(false)
   const suppressRelocatedUntilRef = useRef(0)
   const lastSelectionBridgeAtRef = useRef(0)
+  const pendingLayoutCfiRef = useRef<string | null>(null)
+  const pendingLayoutTopRef = useRef(0)
   // Navigation state: TOC (chapter list) + current chapter label for the bar.
   const [toc, setToc] = useState<Array<{ label: string; href: string }>>([])
   const tocRef = useRef<Array<{ label: string; href: string }>>([])
@@ -1119,6 +1750,24 @@ function EpubViewer({
     return bl < 50
       ? `hsl(40, 15%, ${60 + (100 - cd) / 3}%)`
       : `hsl(30, 20%, ${100 - cd}%)`
+  }
+
+  const resolveTocLabel = (href?: string): string => {
+    if (!href) return ''
+    try {
+      const cleanHref = href.split('#')[0]
+      const direct = bookRef.current?.navigation?.get?.(href)
+        || bookRef.current?.navigation?.get?.(cleanHref)
+      if (direct?.label) return String(direct.label).trim()
+      const flat = tocRef.current
+      const match = flat.find(t => {
+        const itemHref = t.href.split('#')[0]
+        return itemHref === cleanHref || cleanHref.endsWith(itemHref) || itemHref.endsWith(cleanHref)
+      })
+      return match?.label?.trim() || ''
+    } catch {
+      return ''
+    }
   }
 
   const clearNativeSelection = (contents: any) => {
@@ -1248,6 +1897,7 @@ padding: 36px clamp(20px, 3vw, 38px) 72px !important;
         top: -1px;
       }
       .ocr-ann-marker:hover { opacity: 1; transform: scale(1.5); }
+      ${GUIDE_IFRAME_CSS}
     `
 
     normalizeDocumentTextNodes(doc.body)
@@ -1292,11 +1942,12 @@ padding: 36px clamp(20px, 3vw, 38px) 72px !important;
     const anns = annsRef.current
     if (!anns.length) return
 
-    const targets = anns.map(a => ({ text: a.selectedText, id: a.id }))
+    const targets = anns.map(a => ({ text: a.selectedText, id: a.id, hasGuide: a.hasGuide }))
     findAndWrapAll(doc.body, targets, (target) => {
       const span = doc.createElement('span')
-      span.className = 'ocr-ann-underline'
-      ;(span as any).dataset.annId = (target as any).id
+      span.className = target.hasGuide ? 'ocr-ann-underline ocr-guide-underline' : 'ocr-ann-underline'
+      ;(span as any).dataset.annId = (target as any).id || ''
+      if (target.hasGuide) (span as HTMLElement).dataset.guide = 'true'
       return span
     }, 'ocr-ann-underline')
 
@@ -1310,12 +1961,16 @@ padding: 36px clamp(20px, 3vw, 38px) 72px !important;
       if (!annId || seen.has(annId)) return
       seen.add(annId)
       const marker = doc.createElement('span')
-      marker.className = 'ocr-ann-marker'
+      const target = targets.find(item => item.id === annId)
+      marker.className = target?.hasGuide ? 'ocr-ann-marker ocr-guide-marker' : 'ocr-ann-marker'
+      marker.title = target?.hasGuide ? '导读：移入查看涉及文段，点击打开' : '已注释 · 点击查看'
+      if (target?.hasGuide) marker.textContent = '导读'
       ;(marker as any).dataset.annId = annId
       marker.addEventListener('click', (e) => {
         e.stopPropagation()
         onClickRef.current?.(annId)
       })
+      if (target?.hasGuide) bindGuideMarkerHover(doc.body, marker, annId)
       el.parentNode?.insertBefore(marker, el)
     })
   }
@@ -1430,11 +2085,10 @@ padding: 36px clamp(20px, 3vw, 38px) 72px !important;
             }
             applyHighlights(c)
           })
-          // Update chapter label from the spine item's nearest TOC entry
-          if (section?.href) {
-            const match = book.navigation?.get(section.href)
-            if (match?.label) setCurrentChapter(match.label.trim())
-          }
+          // Do not update the visible chapter from rendered sections:
+          // continuous mode may render adjacent offscreen chapters, and using
+          // those here makes the toolbar's "current chapter" drift. The
+          // relocated event below is tied to the actual viewport.
           // Prepend compensation
           const scrollEl = containerRef.current
           if (scrollEl && typeof section?.index === 'number') {
@@ -1481,8 +2135,8 @@ padding: 36px clamp(20px, 3vw, 38px) 72px !important;
           }
           const href: string | undefined = location?.start?.href
           if (!href) return
-          const match = book.navigation?.get(href)
-          if (match?.label) setCurrentChapter(match.label.trim())
+          const chapterLabel = resolveTocLabel(href)
+          if (chapterLabel) setCurrentChapter(chapterLabel)
 
           const flat = tocRef.current
           // Normalize: drop #fragment so "ch3.xhtml#s2" matches "ch3.xhtml".
@@ -1506,12 +2160,23 @@ padding: 36px clamp(20px, 3vw, 38px) 72px !important;
       // Resume from last saved CFI if any (set by relocated handler last
       // session). Falls back to opening at the spine's first item.
       const savedCfi = useLibraryStore.getState().currentPdfMeta?.lastReadCfi
+      const savedTop = entryId ? readLiveReaderTop(entryId, 'pdf') : null
       try {
         await rendition.display(savedCfi || undefined)
       } catch {
         await rendition.display()
       }
       if (typeof savedCfi === 'string' && savedCfi) latestCfiRef.current = savedCfi
+      if (savedTop && savedTop > 10) {
+        const restoreTop = () => {
+          const el = containerRef.current
+          if (el) {
+            el.scrollTop = savedTop
+            lastGoodScrollTopRef.current = savedTop
+          }
+        }
+        ;[80, 220, 500, 1000].forEach(delay => window.setTimeout(restoreTop, delay))
+      }
       resizeRestoreReadyRef.current = true
 
       // Generate the locations index so location.start.percentage works
@@ -1578,60 +2243,125 @@ padding: 36px clamp(20px, 3vw, 38px) 72px !important;
     if (!el) return
 
     let scrollRaf: number | null = null
+    let saveTimer: ReturnType<typeof setTimeout> | null = null
     const onScroll = () => {
       if (scrollRaf !== null) return
       scrollRaf = requestAnimationFrame(() => {
         scrollRaf = null
-        if (el.scrollTop > 10) lastGoodScrollTopRef.current = el.scrollTop
+        const top = Math.round(el.scrollTop)
+        if (top > 10) {
+          lastGoodScrollTopRef.current = top
+          if (entryId) writeLiveReaderTop(entryId, 'pdf', top)
+          if (entryId) {
+            if (saveTimer) clearTimeout(saveTimer)
+            saveTimer = setTimeout(() => {
+              useLibraryStore.getState().updatePdfMetaByEntryId(entryId, meta => ({
+                ...meta,
+                lastReadScrollTopByMode: { ...(meta.lastReadScrollTopByMode || {}), pdf: top },
+                lastReadViewMode: 'pdf',
+              })).catch(() => {})
+            }, 800)
+          }
+        }
       })
+    }
+
+    const captureLayoutAnchor = () => {
+      try {
+        const current = renditionRef.current?.currentLocation?.()
+        const cfi = current?.start?.cfi || latestCfiRef.current
+        pendingLayoutCfiRef.current = typeof cfi === 'string' ? cfi : null
+        pendingLayoutTopRef.current = Math.round(el.scrollTop)
+      } catch {
+        pendingLayoutCfiRef.current = latestCfiRef.current
+        pendingLayoutTopRef.current = Math.round(el.scrollTop)
+      }
+    }
+
+    const restoreLayoutAnchor = () => {
+      const cfi = pendingLayoutCfiRef.current
+      const top = pendingLayoutTopRef.current
+      if (!cfi && top <= 10) return
+      suppressRelocatedUntilRef.current = Date.now() + 1800
+      const apply = async () => {
+        const r = renditionRef.current
+        try {
+          if (r?.resize) r.resize(el.clientWidth, el.clientHeight)
+          if (cfi && r?.display) {
+            await r.display(cfi)
+            latestCfiRef.current = cfi
+          } else if (top > 10) {
+            el.scrollTop = top
+          }
+          if (top > 10 && el.scrollTop <= 10) el.scrollTop = top
+          lastGoodScrollTopRef.current = Math.max(el.scrollTop, top)
+        } catch {
+          if (top > 10) el.scrollTop = top
+        } finally {
+          suppressRelocatedUntilRef.current = Date.now() + 300
+        }
+      }
+      requestAnimationFrame(() => { void apply() })
+      window.setTimeout(() => { void apply() }, 120)
+      window.setTimeout(() => {
+        pendingLayoutCfiRef.current = null
+      }, 420)
     }
 
     let restoreTimer: ReturnType<typeof setTimeout> | null = null
     let lastWidth = el.clientWidth
+    let lastHeight = el.clientHeight
     const ro = new ResizeObserver(() => {
       if (!resizeRestoreReadyRef.current) return
       const nextWidth = el.clientWidth
       const nextHeight = el.clientHeight
-      if (!lastWidth || Math.abs(nextWidth - lastWidth) < 8) {
+      if (nextWidth <= 0 || nextHeight <= 0) return
+      const widthChanged = !lastWidth || Math.abs(nextWidth - lastWidth) >= 8
+      const heightChanged = !lastHeight || Math.abs(nextHeight - lastHeight) >= 8
+      if (!widthChanged && !heightChanged) {
         lastWidth = nextWidth
+        lastHeight = nextHeight
         return
       }
       lastWidth = nextWidth
+      lastHeight = nextHeight
 
-      const cfi = (() => {
-        try {
-          const loc = renditionRef.current?.currentLocation?.()
-          return (loc as any)?.start?.cfi || latestCfiRef.current || null
-        } catch { return null }
-      })()
       const scrollTop = lastGoodScrollTopRef.current
-      if (!cfi && scrollTop <= 10) return
 
       for (const contents of contentsMapRef.current.values()) clearNativeSelection(contents)
       suppressRelocatedUntilRef.current = Date.now() + 1600
       if (restoreTimer) clearTimeout(restoreTimer)
       restoreTimer = setTimeout(async () => {
+        const restoreScrollTop = () => {
+          if (scrollTop > 10 && el.scrollTop <= 10) el.scrollTop = scrollTop
+        }
         try {
           renditionRef.current?.resize?.(nextWidth, nextHeight)
-          if (cfi) await renditionRef.current?.display(cfi)
-          if (scrollTop > 10 && el.scrollTop <= 10) el.scrollTop = scrollTop
+          restoreScrollTop()
+          window.setTimeout(restoreScrollTop, 80)
+          window.setTimeout(restoreScrollTop, 220)
         } catch {
-          if (scrollTop > 10 && el.scrollTop <= 10) el.scrollTop = scrollTop
+          restoreScrollTop()
         } finally {
           suppressRelocatedUntilRef.current = Date.now() + 300
         }
-      }, 180)
+      }, 160)
     })
 
     el.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('shijuan-before-layout-change', captureLayoutAnchor)
+    window.addEventListener('shijuan-layout-change', restoreLayoutAnchor)
     ro.observe(el)
     return () => {
       el.removeEventListener('scroll', onScroll)
+      window.removeEventListener('shijuan-before-layout-change', captureLayoutAnchor)
+      window.removeEventListener('shijuan-layout-change', restoreLayoutAnchor)
       ro.disconnect()
       if (scrollRaf !== null) cancelAnimationFrame(scrollRaf)
+      if (saveTimer) clearTimeout(saveTimer)
       if (restoreTimer) clearTimeout(restoreTimer)
     }
-  }, [])
+  }, [entryId])
 
   // ResizeObserver above tells epub.js when the reading column width changes
   // (annotation panel open/close), then restores the current CFI so the text
@@ -1715,7 +2445,7 @@ padding: 36px clamp(20px, 3vw, 38px) 72px !important;
 function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationClick, onRemoveMark, activeSelectionText, searchHighlight }: {
   absPath: string
   onTextSelect: (sel: { pageNumber: number; text: string; startOffset: number; endOffset: number } | null) => void
-  annotations?: Array<{ id: string; selectedText: string }>
+  annotations?: AnnotationViewTarget[]
   marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
   onAnnotationClick?: (id: string) => void
   onRemoveMark?: (id: string) => void
@@ -1748,7 +2478,7 @@ function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationCli
     [activeSelectionText],
   )
 
-  useAnnotationHighlights(containerRef, normalizedAnnotations, onAnnotationClick || (() => {}), [html, normalizedAnnotations])
+  useGuideAnnotationHighlights(containerRef, normalizedAnnotations, onAnnotationClick || (() => {}), [html, normalizedAnnotations])
   // Search highlight
   useSearchHighlight(containerRef, searchHighlight, [html, searchHighlight])
 
@@ -1793,7 +2523,7 @@ function DocxViewer({ absPath, onTextSelect, annotations, marks, onAnnotationCli
 // Simple text file reader
 function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRemoveMark, activeSelectionText, fontSize, fontWeight, color, searchHighlight }: {
   absPath: string
-  annotations?: Array<{ id: string; selectedText: string }>
+  annotations?: AnnotationViewTarget[]
   onAnnotationClick?: (id: string) => void
   marks?: Array<{ id: string; type: 'underline' | 'bold'; color?: string; selectedText: string }>
   onRemoveMark?: (id: string) => void
@@ -1821,7 +2551,7 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
   )
 
   // Highlight annotations
-  useAnnotationHighlights(containerRef, normalizedAnnotations, onAnnotationClick || (() => {}), [text, normalizedAnnotations])
+  useGuideAnnotationHighlights(containerRef, normalizedAnnotations, onAnnotationClick || (() => {}), [text, normalizedAnnotations])
   // Search highlight
   useSearchHighlight(containerRef, searchHighlight, [text, searchHighlight])
 
@@ -1904,28 +2634,53 @@ function TextFileContent({ absPath, annotations, onAnnotationClick, marks, onRem
 
 // 2026-04-28 · 卡载兜底组件:正常情况下 PDF 加载 1~2 秒,8 秒还卡在"加载中"
 //   多半是文件路径异常 / 不存在 / pdf.js worker 死锁,显示文件路径 + 重试按钮。
-function StuckLoadingHint({ absPath, onRetry }: { absPath: string; onRetry: () => void }) {
+function PdfLoadingState({
+  absPath,
+  progress,
+  phase = '解析 PDF',
+  onRetry,
+}: {
+  absPath: string
+  progress?: number
+  phase?: string
+  onRetry: () => void
+}) {
   const [showStuck, setShowStuck] = useState(false)
   useEffect(() => {
     setShowStuck(false)
     const t = setTimeout(() => setShowStuck(true), 8000)
     return () => clearTimeout(t)
   }, [absPath])
-  if (!showStuck) {
-    return <div className="empty-state"><span className="loading-spinner" /><span style={{ marginTop: 10 }}>加载中...</span></div>
-  }
+  const pct = Math.max(0, Math.min(100, Math.round(progress || 0)))
   return (
     <div className="empty-state" style={{ maxWidth: 480, textAlign: 'center' }}>
-      <span style={{ fontSize: 28 }}>⏳</span>
-      <span style={{ marginTop: 8, fontSize: 13 }}>加载耗时较长</span>
-      <span style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)', wordBreak: 'break-all', fontFamily: 'monospace', maxWidth: '90%' }}>
-        {absPath || '(无路径)'}
+      <span className="loading-spinner" style={{ width: 18, height: 18 }} />
+      <span style={{ marginTop: 12, fontSize: 13, color: 'var(--text-secondary)' }}>
+        {showStuck ? '加载耗时较长' : phase}{pct > 0 && pct < 100 ? ` · ${pct}%` : ''}
       </span>
-      <span style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-        如果文件存在且不大,可能是后台 PDF.js worker 卡住。<br />
-        点击重试,或切换到其它文献再切回。
-      </span>
-      <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={onRetry}>重试加载</button>
+      <div style={{
+        width: 220, height: 4, borderRadius: 999, overflow: 'hidden',
+        background: 'var(--border)', marginTop: 12,
+      }}>
+        <div style={{
+          width: pct > 0 ? `${pct}%` : '34%',
+          height: '100%',
+          background: 'var(--accent)',
+          opacity: pct > 0 ? 1 : 0.72,
+          transition: 'width 0.2s ease',
+        }} />
+      </div>
+      {showStuck && (
+        <>
+          <span style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)', wordBreak: 'break-all', fontFamily: 'monospace', maxWidth: '90%' }}>
+            {absPath || '(无路径)'}
+          </span>
+          <span style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+            这个 PDF 仍在等待解析结果。文件可能较旧、扫描图层特殊，或 PDF worker 被上一轮加载拖住。
+          </span>
+          <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={onRetry}>重试加载</button>
+        </>
+      )}
     </div>
   )
 }
@@ -1950,6 +2705,10 @@ function LazyPdfPage({
   docKey: string
 }) {
   const ref = useRef<HTMLDivElement>(null)
+  const [renderedSize, setRenderedSize] = useState<{ width: number; height: number } | null>(null)
+  useEffect(() => {
+    setRenderedSize(null)
+  }, [docKey, pageNum, scale, inRange])
   // Widen-mounted observer: 400px rootMargin expands the preload range as the
   // user scrolls close. Note: "current page" for AnnotationPanel's page-group
   // auto-expansion is tracked by a separate scroll listener on the PdfViewer's
@@ -1970,12 +2729,25 @@ function LazyPdfPage({
   // Placeholder keeps roughly the same height as a real page so scrollbar
   // doesn't jump when pages materialize. 800 * scale ~= typical A4 at 100%.
   const phHeight = 800 * scale
+  const canvasRef = useCallback((canvas: HTMLCanvasElement | null) => {
+    if (!canvas) return
+    requestAnimationFrame(() => {
+      const width = parseFloat(canvas.style.width) || canvas.clientWidth
+      const height = parseFloat(canvas.style.height) || canvas.clientHeight
+      if (width > 0 && height > 0) setRenderedSize({ width, height })
+    })
+  }, [])
   return (
     <div
       ref={ref}
       className="pdf-page-wrapper"
       data-page-number={pageNum}
-      style={{ position: 'relative', minHeight: inRange ? undefined : phHeight }}
+      style={{
+        position: 'relative',
+        minHeight: inRange ? undefined : phHeight,
+        width: inRange && renderedSize ? renderedSize.width : undefined,
+        height: inRange && renderedSize ? renderedSize.height : undefined,
+      }}
     >
       <div style={{
         position: 'absolute', top: 4, right: 8, fontSize: 11,
@@ -1989,6 +2761,7 @@ function LazyPdfPage({
           key={`${docKey}-${pageNum}`}
           pageNumber={pageNum}
           scale={scale}
+          canvasRef={canvasRef}
           renderTextLayer={true}
           renderAnnotationLayer={false}
           loading={
@@ -2028,6 +2801,8 @@ export default function PdfViewer() {
   const darkMode = useUiStore(s => s.darkMode)
   const searchHighlight = useUiStore(s => s.searchHighlight)
   const setSearchHighlight = useUiStore(s => s.setSearchHighlight)
+  const annotationPanelCollapsed = useUiStore(s => s.annotationPanelCollapsed)
+  const rightPanel = useUiStore(s => s.rightPanel)
   const [numPages, setNumPages] = useState(0)
   const [scale, setScale] = useState(1.0)
   // Which pages are currently "in render range" — others render as a fixed-
@@ -2042,9 +2817,10 @@ export default function PdfViewer() {
     const t = setTimeout(() => setDebouncedScale(scale), 120)
     return () => clearTimeout(t)
   }, [scale])
-  const [pdfFileUrl, setPdfFileUrl] = useState<string | null>(null)
+  const [pdfFileUrl, setPdfFileUrl] = useState<ArrayBuffer | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [loadProgress, setLoadProgress] = useState<number>(0)
+  const [readerBusy, setReaderBusy] = useState<{ entryId: string; phase: string } | null>(null)
   // PDF outline (table of contents) — populated in onDocumentLoadSuccess
   const [outline, setOutline] = useState<Array<{ title: string; dest: any; items?: any[] }> | null>(null)
   const [showOutline, setShowOutline] = useState(false)
@@ -2059,6 +2835,25 @@ export default function PdfViewer() {
   const [rereadingReminder, setRereadingReminder] = useState<{ annCount: number; lastTime: string; aiVoice: string | null; aiLoading: boolean } | null>(null)
   const [ocrProgress, setOcrProgress] = useState<{ status: string } | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('pdf')
+  const loadPdfFromEntry = useCallback(async (entry: LibraryEntry) => {
+    const entryId = entry.id
+    setPdfFileUrl(null)
+    setLoadProgress(0)
+    try {
+      const buf = await window.electronAPI.readFileBuffer(entry.absPath)
+      if (useLibraryStore.getState().currentEntry?.id !== entryId) return
+      const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf)
+      setPdfFileUrl(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))
+      setLoadProgress(prev => Math.max(prev, 12))
+    } catch (err: any) {
+      if (useLibraryStore.getState().currentEntry?.id !== entryId) return
+      setLoadError(`PDF 读取失败: ${err?.message || err}`)
+      setReaderBusy(null)
+    }
+  }, [])
+  const pdfDocumentFile = useMemo(() => (
+    pdfFileUrl ? pdfFileUrl.slice(0) : null
+  ), [pdfFileUrl])
   // When a doc opens, switch to whatever view the user was last in (so the
   // saved scrollTop applies to the right layout). Only auto-switches once
   // per doc-open — user can still toggle freely.
@@ -2091,6 +2886,8 @@ export default function PdfViewer() {
   const setOcrBgLight = (v: number) => lsSet('sj-bgLight', v, _setOcrBgLight)
   const [showBgPicker, setShowBgPicker] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const latestScrollTopRef = useRef(0)
+  const layoutAnchorRef = useRef<ReaderAnchor | null>(null)
   // Save scroll position before entering immersive mode to restore on exit
   const savedScrollPos = useRef<number>(0)
 
@@ -2110,6 +2907,9 @@ export default function PdfViewer() {
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
+    // A previous restore pass may have hidden this same scroll node while
+    // switching documents. Always begin from a visible surface.
+    el.style.visibility = ''
     let raf: number | null = null
     // Debounced save of scrollTop AND viewMode to PdfMeta for resume-on-reopen.
     // Stored per-viewMode so PDF view scroll doesn't override OCR view
@@ -2119,18 +2919,41 @@ export default function PdfViewer() {
     // Capture the entry id at effect-bind time so debounced writes go to the
     // right doc even if the user already started navigating to a new entry.
     const lockedEntryId = currentEntry?.id
-    const scheduleSave = () => {
+    const modeKey = getReaderPositionMode(viewMode)
+    latestScrollTopRef.current = el.scrollTop
+    const scheduleSave = (top: number) => {
+      if (lockedEntryId && top > 10) writeLiveReaderTop(lockedEntryId, modeKey, top)
       if (saveTimer) clearTimeout(saveTimer)
       saveTimer = setTimeout(() => {
-        const top = Math.round(el.scrollTop)
         if (top <= 10 || !lockedEntryId) return
-        const modeKey: 'pdf' | 'ocr' = viewMode === 'ocr' ? 'ocr' : 'pdf'
         useLibraryStore.getState().updatePdfMetaByEntryId(lockedEntryId, meta => ({
           ...meta,
           lastReadScrollTopByMode: { ...(meta.lastReadScrollTopByMode || {}), [modeKey]: top },
           lastReadViewMode: modeKey,
         })).catch(() => {})
-      }, 1500)
+      }, 800)
+    }
+    const preserveCurrentScroll = () => {
+      const currentTop = latestScrollTopRef.current
+      if (currentTop <= 10) return
+      const restore = () => {
+        if (el.scrollTop <= 10 && latestScrollTopRef.current > 10) {
+          el.scrollTop = latestScrollTopRef.current
+        }
+      }
+      requestAnimationFrame(restore)
+      window.setTimeout(restore, 80)
+      window.setTimeout(restore, 220)
+    }
+    const restoreCapturedAnchor = (anchor: ReaderAnchor) => {
+      const restore = () => {
+        restoreReaderAnchor(el, anchor)
+        latestScrollTopRef.current = Math.round(el.scrollTop)
+      }
+      requestAnimationFrame(restore)
+      window.setTimeout(restore, 80)
+      window.setTimeout(restore, 220)
+      window.setTimeout(() => { layoutAnchorRef.current = null }, 360)
     }
     const recompute = () => {
       raf = null
@@ -2162,7 +2985,19 @@ export default function PdfViewer() {
       useUiStore.getState().setCurrentVisiblePage(virtualPage)
     }
     const onScroll = () => {
-      scheduleSave()
+      const top = Math.round(el.scrollTop)
+      latestScrollTopRef.current = top
+      scheduleSave(top)
+      if (raf !== null) return
+      raf = requestAnimationFrame(recompute)
+    }
+    const onBeforeLayoutChange = () => {
+      layoutAnchorRef.current = captureReaderAnchor(el)
+    }
+    const onLayoutChange = () => {
+      const anchor = layoutAnchorRef.current
+      if (anchor) restoreCapturedAnchor(anchor)
+      else preserveCurrentScroll()
       if (raf !== null) return
       raf = requestAnimationFrame(recompute)
     }
@@ -2171,10 +3006,11 @@ export default function PdfViewer() {
     // accept the saved value (browser silently clamps to max). We retry at
     // 300 / 800 / 2000 ms; once we've successfully placed scrollTop within
     // a small tolerance of the target we stop.
-    const modeKey: 'pdf' | 'ocr' = viewMode === 'ocr' ? 'ocr' : 'pdf'
     const meta0 = useLibraryStore.getState().currentPdfMeta
     const perMode = meta0?.lastReadScrollTopByMode?.[modeKey]
-    const saved = (typeof perMode === 'number' ? perMode : undefined)
+    const liveTop = lockedEntryId ? readLiveReaderTop(lockedEntryId, modeKey) : null
+    const saved = liveTop
+      ?? (typeof perMode === 'number' ? perMode : undefined)
       ?? (meta0?.lastReadViewMode === modeKey ? meta0?.lastReadScrollTop : undefined)
     const restoreTimers: ReturnType<typeof setTimeout>[] = []
     if (typeof saved === 'number' && saved > 10) {
@@ -2202,6 +3038,9 @@ export default function PdfViewer() {
       restoreTimers.push(setTimeout(showAgain, 2500))
     }
     el.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('resize', onLayoutChange)
+    window.addEventListener('shijuan-before-layout-change', onBeforeLayoutChange)
+    window.addEventListener('shijuan-layout-change', onLayoutChange)
     // Also recompute when the container resizes (panel toggle, etc.) so the
     // midpoint stays accurate.
     const ro = new ResizeObserver(() => { if (raf === null) raf = requestAnimationFrame(recompute) })
@@ -2211,12 +3050,19 @@ export default function PdfViewer() {
     const settleTimer2 = setTimeout(recompute, 1200)  // second pass for slow PDFs
     return () => {
       el.removeEventListener('scroll', onScroll)
+      window.removeEventListener('resize', onLayoutChange)
+      window.removeEventListener('shijuan-before-layout-change', onBeforeLayoutChange)
+      window.removeEventListener('shijuan-layout-change', onLayoutChange)
       ro.disconnect()
       if (raf !== null) cancelAnimationFrame(raf)
       if (saveTimer) clearTimeout(saveTimer)
       clearTimeout(settleTimer)
       clearTimeout(settleTimer2)
       restoreTimers.forEach(clearTimeout)
+      // Important: if we clear the restore timers during a fast document/view
+      // switch, also undo the temporary visibility:hidden. Otherwise the next
+      // OCR/PDF surface can stay visually blank even after content is ready.
+      el.style.visibility = ''
       // FLUSH on unmount / dep change: if the user scrolled within the last
       // 1.5s and we're now switching docs / view, the debounced save would
       // be lost. CRITICAL: use updatePdfMetaByEntryId locked to the entry
@@ -2225,7 +3071,8 @@ export default function PdfViewer() {
       // saved position with our outgoing-doc scrollTop).
       const top = Math.round(el.scrollTop)
       if (top > 10 && lockedEntryId) {
-        const modeKey: 'pdf' | 'ocr' = viewMode === 'ocr' ? 'ocr' : 'pdf'
+        latestScrollTopRef.current = top
+        writeLiveReaderTop(lockedEntryId, modeKey, top)
         useLibraryStore.getState().updatePdfMetaByEntryId(lockedEntryId, meta => ({
           ...meta,
           lastReadScrollTopByMode: { ...(meta.lastReadScrollTopByMode || {}), [modeKey]: top },
@@ -2235,7 +3082,7 @@ export default function PdfViewer() {
     }
     // viewMode is in deps so switching PDF↔OCR rebinds the listener AND
     // re-runs the restore (each mode reads its own saved scrollTop).
-  }, [numPages, viewMode, currentEntry?.id])
+  }, [viewMode, currentEntry?.id])
 
   // Translate modal — opened either from the floating toolbar ("选中" preset)
   // or from the main toolbar ("全文/按页" preset). Modal reads selected text,
@@ -2306,7 +3153,11 @@ export default function PdfViewer() {
   const annotations = currentPdfMeta?.annotations
   const marks = currentPdfMeta?.marks
   const memoizedAnnotations = useMemo(() => {
-    return (annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))
+    return (annotations || []).map(a => ({
+      id: a.id,
+      selectedText: a.anchor.selectedText,
+      hasGuide: annotationHasGuide(a),
+    }))
   }, [annotations])
 
   const memoizedMarks = useMemo(() => {
@@ -2373,8 +3224,14 @@ export default function PdfViewer() {
     setViewMode('pdf')
     setOcrProgress(null)
     setRereadingReminder(null)
+    setReaderBusy(null)
+    if (scrollRef.current) {
+      scrollRef.current.style.visibility = ''
+      scrollRef.current.scrollTop = 0
+    }
 
     if (!currentEntry) return
+    setReaderBusy({ entryId: currentEntry.id, phase: '准备文献' })
 
     // Re-reading detection: if this doc was opened before and has annotations,
     // show the re-reading greeting. Has two layers:
@@ -2487,33 +3344,23 @@ export default function PdfViewer() {
     }
 
     const ext = currentEntry.absPath.split('.').pop()?.toLowerCase() || ''
-    const fileUrl = 'file:///' + currentEntry.absPath.replace(/\\/g, '/')
+    const hasKnownOcr = ext === 'pdf' && (
+      currentEntry.ocrStatus === 'complete'
+      || !!currentEntry.ocrFilePath
+      || !!currentPdfMeta?.pages?.some(p => !!p.ocrText?.trim())
+    )
+    const knownOcrFilePath = currentEntry.ocrFilePath
 
     // Only set PDF URL for PDF files
     if (ext === 'pdf') {
-      setPdfFileUrl(fileUrl)
-    }
-
-    // Restore scroll position. We retry up to 10 times over 3s because large PDFs / OCR
-    // documents keep growing in height as pages/content render in. If we set scrollTop too
-    // early, the container is shorter than the target and the jump silently fails.
-    let restoreAttempts = 0
-    // BUG-FIX R8#8 · NaN 防御:坏数据时 savedScroll=0 → 不跳(预期行为)
-    const savedScroll = readNumber(`sj-scroll-${currentEntry.id}`, 0)
-    if (savedScroll > 0) {
-      const tryRestore = () => {
-        const el = scrollRef.current
-        if (!el) return
-        // Only jump if container is tall enough — otherwise retry
-        if (el.scrollHeight >= savedScroll + el.clientHeight) {
-          el.scrollTop = savedScroll
-          return
-        }
-        if (restoreAttempts++ < 10) setTimeout(tryRestore, 300)
+      if (hasKnownOcr) {
+        setViewMode('ocr')
+        setReaderBusy({ entryId: currentEntry.id, phase: '读取 OCR 文本' })
+      } else {
+        setViewMode('pdf')
+        setReaderBusy({ entryId: currentEntry.id, phase: '解析 PDF' })
       }
-      setTimeout(tryRestore, 200)
-    } else if (scrollRef.current) {
-      scrollRef.current.scrollTop = 0
+      void loadPdfFromEntry(currentEntry)
     }
 
     // Load HTML content for HTML files
@@ -2528,29 +3375,55 @@ export default function PdfViewer() {
     const setDocText = useUiStore.getState().setCurrentDocText
     setDocText(null)
     const ocrEntryId = currentEntry.id
-    window.electronAPI.readOcrText(currentEntry.absPath).then((result) => {
+    window.electronAPI.readOcrText(currentEntry.absPath).then(async (result) => {
       if (useLibraryStore.getState().currentEntry?.id !== ocrEntryId) return
-      if (result.exists && result.text) {
-        const normalized = normalizeMixedChineseToSimplified(result.text)
+      let ocrResult = result
+      if ((!ocrResult.exists || !ocrResult.text) && ext === 'pdf' && knownOcrFilePath) {
+        try {
+          const buf = await window.electronAPI.readFileBuffer(knownOcrFilePath)
+          const text = new TextDecoder('utf-8').decode(buf)
+          if (text.trim()) ocrResult = { exists: true, text, path: knownOcrFilePath }
+        } catch {}
+      }
+      if ((!ocrResult.exists || !ocrResult.text) && ext === 'pdf') {
+        const metaText = currentPdfMeta?.pages
+          ?.map(p => p.ocrText || '')
+          .filter(Boolean)
+          .join('\n\n')
+        if (metaText?.trim()) ocrResult = { exists: true, text: metaText, path: knownOcrFilePath || '' }
+      }
+      if (ocrResult.exists && ocrResult.text) {
+        const normalized = normalizeMixedChineseToSimplified(ocrResult.text)
         setOcrFullText(normalized)
-        setOcrFilePath(result.path)
+        setOcrFilePath(ocrResult.path)
         setDocText(normalized)
         const latestEntry = useLibraryStore.getState().library?.entries.find(e => e.id === ocrEntryId)
-        if (latestEntry && (latestEntry.ocrStatus !== 'complete' || latestEntry.ocrFilePath !== result.path)) {
+        if (latestEntry && (latestEntry.ocrStatus !== 'complete' || latestEntry.ocrFilePath !== ocrResult.path)) {
           updateEntry(ocrEntryId, {
             ocrStatus: 'complete',
-            ocrFilePath: result.path,
+            ocrFilePath: ocrResult.path,
             ocrStatusUpdatedAt: new Date().toISOString(),
             ocrError: undefined,
           }).catch(() => {})
         }
         if (ext === 'pdf') setViewMode('ocr')
         else setViewMode('pdf')
+        window.setTimeout(() => {
+          if (useLibraryStore.getState().currentEntry?.id === ocrEntryId) setReaderBusy(null)
+        }, 120)
       } else {
         setOcrFullText(null)
         setOcrFilePath(null)
-        setViewMode('pdf')
+        if (ext === 'pdf' && hasKnownOcr) {
+          setViewMode('ocr')
+          setReaderBusy(null)
+        } else {
+          setViewMode('pdf')
+          if (ext !== 'pdf') setReaderBusy(null)
+        }
       }
+    }).catch(() => {
+      if (useLibraryStore.getState().currentEntry?.id === ocrEntryId && ext !== 'pdf') setReaderBusy(null)
     })
 
     // Also load text for non-PDF formats
@@ -2559,7 +3432,8 @@ export default function PdfViewer() {
         const content = normalizeMixedChineseToSimplified(new TextDecoder('utf-8').decode(buf))
         setDocText(content)
         setTxtContent(content)
-      }).catch(() => {})
+        setReaderBusy(null)
+      }).catch(() => setReaderBusy(null))
     } else if (['docx', 'doc'].includes(ext)) {
       import('mammoth').then(async mammoth => {
         const buf = await window.electronAPI.readFileBuffer(currentEntry.absPath)
@@ -2569,32 +3443,26 @@ export default function PdfViewer() {
         ])
         setDocText(normalizeMixedChineseToSimplified(rawResult.value))
         setDocxHtml(normalizeMixedChineseToSimplified(htmlResult.value))
-      }).catch(() => {})
+        setReaderBusy(null)
+      }).catch(() => setReaderBusy(null))
     } else if (['html', 'htm'].includes(ext)) {
       window.electronAPI.readFileBuffer(currentEntry.absPath).then(buf => {
         const html = normalizeMixedChineseToSimplified(new TextDecoder('utf-8').decode(buf))
         const tmp = document.createElement('div')
         tmp.innerHTML = html
         setDocText(normalizeMixedChineseToSimplified(tmp.textContent || tmp.innerText || ''))
-      }).catch(() => {})
-    }
-  }, [currentEntry?.id])
-
-  // Save scroll position on scroll (throttled)
-  useEffect(() => {
-    const el = scrollRef.current
-    const entryId = currentEntry?.id
-    if (!el || !entryId) return
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const handler = () => {
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => {
-        try { localStorage.setItem(`sj-scroll-${entryId}`, String(el.scrollTop)) } catch {}
+        setReaderBusy(null)
+      }).catch(() => setReaderBusy(null))
+    } else if (ext === 'epub') {
+      window.setTimeout(() => {
+        if (useLibraryStore.getState().currentEntry?.id === currentEntry.id) setReaderBusy(null)
       }, 300)
     }
-    el.addEventListener('scroll', handler, { passive: true })
-    return () => { el.removeEventListener('scroll', handler); if (timer) clearTimeout(timer) }
-  }, [currentEntry?.id])
+    // Re-run the full reader boot sequence when the user switches entries.
+    // Keeping this effect mount-only leaves stale TXT/HTML/EPUB state in place
+    // and makes the next PDF appear to hang because its file URL is never reset.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentEntry?.id, currentEntry?.absPath])
 
   const onDocumentLoadSuccess = useCallback(async (pdf: any) => {
     const entryIdAtLoad = currentEntry?.id
@@ -2602,17 +3470,20 @@ export default function PdfViewer() {
     setNumPages(pdf.numPages)
     setLoadProgress(100)
     setLoadError(null)
+    setReaderBusy(null)
     setPageRenderRange({ start: 1, end: Math.min(3, pdf.numPages || 3) })
     pdfDocRef.current = pdf
     // Try to read the PDF's internal outline (TOC). Many scanned / generated PDFs
     // don't have one — in that case we just silently skip.
     try {
       const o = await pdf.getOutline()
+      if (useLibraryStore.getState().currentEntry?.id !== entryIdAtLoad) return
       setOutline(Array.isArray(o) && o.length > 0 ? o : null)
     } catch {
+      if (useLibraryStore.getState().currentEntry?.id !== entryIdAtLoad) return
       setOutline(null)
     }
-  }, [])
+  }, [currentEntry?.id])
 
   // Reset outline state when switching entries
   useEffect(() => {
@@ -2659,6 +3530,7 @@ export default function PdfViewer() {
     const entryIdAtError = currentEntry?.id
     if (!entryIdAtError || useLibraryStore.getState().currentEntry?.id !== entryIdAtError) return
     setLoadError('PDF 解析失败: ' + err.message)
+    setReaderBusy(null)
   }, [currentEntry?.id])
 
   // Compute total pages — for PDF use numPages; for OCR count "=== 第 N 页 ===" markers
@@ -2827,6 +3699,11 @@ export default function PdfViewer() {
     const hasRange = typeof choice.startPage === 'number' && typeof choice.endPage === 'number'
     const rangeLabel = hasRange ? `第 ${choice.startPage}-${choice.endPage} 页` : '整本'
     const selectedEngine = choice.engine || ocrEngine
+    if (selectedEngine === 'rapidocr') {
+      setOcrEngine('glm')
+      alert('本地 RapidOCR 暂时锁定，请先使用 GLM OCR。')
+      return
+    }
     if (selectedEngine === 'glm' && glmApiKeyStatus !== 'set') {
       alert('GLM OCR 需要先在设置中填入 GLM API KEY，或切换为本地 RapidOCR。')
       return
@@ -2957,6 +3834,21 @@ export default function PdfViewer() {
   toolbarRef.current = toolbar  // always keep ref in sync
   const [toolbarMode, setToolbarMode] = useState<'main' | 'mark' | 'append-list'>('main')
   const [editingMarkId, setEditingMarkId] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!toolbar) return
+    const closeStaleToolbar = () => {
+      setToolbar(null)
+      setEditingMarkId(null)
+      window.getSelection()?.removeAllRanges()
+    }
+    window.addEventListener('resize', closeStaleToolbar)
+    window.addEventListener('shijuan-layout-change', closeStaleToolbar)
+    return () => {
+      window.removeEventListener('resize', closeStaleToolbar)
+      window.removeEventListener('shijuan-layout-change', closeStaleToolbar)
+    }
+  }, [toolbar])
   const [selectedMarkColor, setSelectedMarkColorState] = useState(() => {
     try {
       const saved = localStorage.getItem(MARK_COLOR_STORAGE_KEY) || 'yellow'
@@ -3051,10 +3943,10 @@ export default function PdfViewer() {
 
     // Position toolbar above selection
     const range = selection.getRangeAt(0)
-    const rect = range.getBoundingClientRect()
+    const point = getToolbarPointFromRange(range, e)
 
     // 2026-04-28 CLEAN · 沉浸式分支已删,固定走"非沉浸式"路径(toolbar 在选区上方)
-    setToolbar({ x: rect.left + rect.width / 2, y: rect.top - 8, text, pageNumber: pageNumber || 1 })
+    setToolbar({ x: point.x, y: point.y, text, pageNumber: pageNumber || 1 })
     setToolbarMode('main')
     setEditingMarkId(null)
   }, [currentPdfMeta?.annotations, findRenderedMarkAtPoint, openMarkEditor, setTextSelection])
@@ -3096,6 +3988,110 @@ export default function PdfViewer() {
   // 2026-04-28 CLEAN · handleImmersiveTextSelect 已删(沉浸式 ImmersiveOcrReader 不再调用)
 
   // Toolbar action: append to existing annotation
+  const handleToolbarGuide = useCallback(async () => {
+    const tb = toolbarRef.current
+    if (!tb || !currentEntry || !currentPdfMeta) return
+
+    const selectedText = tb.text.trim()
+    if (selectedText.length < 2) return
+
+    const aiModel = useUiStore.getState().selectedAiModel
+    const contextWindow = useUiStore.getState().aiContextWindow
+    const fallbackDocText = isHtml && htmlContent
+      ? htmlContent.replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+      : null
+    const surroundingContext = buildSelectionSurroundingContext(
+      useUiStore.getState().currentDocText || fallbackDocText,
+      selectedText,
+      contextWindow,
+    )
+    const now = new Date().toISOString()
+    const historyEntryId = uuid()
+    const placeholder: HistoryEntry = {
+      id: historyEntryId,
+      type: 'ai_guide',
+      content: '',
+      userQuery: '导读',
+      contextSent: selectedText,
+      author: 'ai',
+      modelLabel: getModelLabel(aiModel),
+      createdAt: now,
+      aiStatus: 'running',
+    }
+
+    const selectedAnchor = normalizeMarkText(selectedText)
+    let targetAnnotationId =
+      currentPdfMeta.annotations.find(a => normalizeMarkText(a.anchor.selectedText) === selectedAnchor)?.id
+      || uuid()
+
+    await updatePdfMeta(meta => {
+      const existing = meta.annotations.find(a => normalizeMarkText(a.anchor.selectedText) === selectedAnchor)
+      if (existing) {
+        targetAnnotationId = existing.id
+        return {
+          ...meta,
+          annotations: meta.annotations.map(a =>
+            a.id === existing.id
+              ? { ...a, historyChain: [...a.historyChain, placeholder], updatedAt: now }
+              : a
+          ),
+        }
+      }
+
+      const newAnnotation: Annotation = {
+        id: targetAnnotationId,
+        anchor: {
+          pageNumber: tb.pageNumber,
+          startOffset: 0,
+          endOffset: selectedText.length,
+          selectedText,
+        },
+        historyChain: [placeholder],
+        style: { color: 'blue' },
+        createdAt: now,
+        updatedAt: now,
+      }
+      return { ...meta, annotations: [...meta.annotations, newAnnotation] }
+    })
+
+    setActiveAnnotation(targetAnnotationId)
+    setToolbar(null)
+    setEditingMarkId(null)
+    window.getSelection()?.removeAllRanges()
+
+    const updateStore = useLibraryStore.getState()
+    void useAnnotationAiJobsStore.getState().startJob({
+      entryId: currentEntry.id,
+      annotationId: targetAnnotationId,
+      historyEntryId,
+      model: aiModel,
+      modelLabel: getModelLabel(aiModel),
+      messages: buildGuidedReadingMessages({
+        documentTitle: currentEntry.title,
+        selectedText,
+        surroundingContext,
+      }),
+      updater: async (entryId, annotationId, entryHistoryId, patch) => {
+        await updateStore.updatePdfMetaByEntryId(entryId, (meta) => ({
+          ...meta,
+          annotations: meta.annotations.map(a =>
+            a.id === annotationId
+              ? {
+                  ...a,
+                  historyChain: a.historyChain.map(h =>
+                    h.id === entryHistoryId ? { ...h, ...patch } : h
+                  ),
+                  updatedAt: new Date().toISOString(),
+                }
+              : a
+          ),
+        }))
+      },
+    })
+  }, [currentEntry, currentPdfMeta, htmlContent, isHtml, setActiveAnnotation, updatePdfMeta])
+
   const handleToolbarAppend = useCallback((annotationId: string) => {
     // Pass the selected text as supplementary context for the target annotation
     if (toolbar) {
@@ -3380,9 +4376,12 @@ export default function PdfViewer() {
 
   // Active search-highlight banner (only shown when current entry matches target)
   const activeSearchQuery = searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight?.query : null
+  const activeReaderBusy = readerBusy?.entryId === currentEntry?.id ? readerBusy : null
+  const visibleLoadProgress = Math.max(0, Math.min(100, Math.round(loadProgress || 0)))
+  const readerSafeInset = !annotationPanelCollapsed && (rightPanel === 'annotation' || rightPanel === 'agent')
 
   return (
-    <div className="pdf-area">
+    <div className={`pdf-area${readerSafeInset ? ' reader-safe-inset' : ''}`}>
       {/* Search highlight banner — visible right below toolbar when user came from a search result */}
       {activeSearchQuery && (
         <div style={{
@@ -3708,6 +4707,43 @@ export default function PdfViewer() {
             组件 / 全部分支均已清理。 */}
       </div>
 
+      {activeReaderBusy && !loadError && (
+        <div style={{
+          padding: '8px 18px',
+          borderBottom: '1px solid var(--border-light)',
+          background: 'color-mix(in srgb, var(--bg-warm) 88%, var(--accent-soft) 12%)',
+          color: 'var(--text-secondary)',
+          fontSize: 12,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          flexShrink: 0,
+        }}>
+          <span className="loading-spinner" style={{ width: 12, height: 12, flexShrink: 0 }} />
+          <span style={{ whiteSpace: 'nowrap' }}>{activeReaderBusy.phase}...</span>
+          <div style={{
+            width: 120,
+            height: 3,
+            borderRadius: 999,
+            overflow: 'hidden',
+            background: 'var(--border)',
+            flexShrink: 0,
+          }}>
+            <div style={{
+              width: visibleLoadProgress > 0 ? `${visibleLoadProgress}%` : '34%',
+              height: '100%',
+              borderRadius: 999,
+              background: 'var(--accent)',
+              opacity: visibleLoadProgress > 0 ? 1 : 0.65,
+              transition: 'width 0.2s ease',
+            }} />
+          </div>
+          {visibleLoadProgress > 0 && visibleLoadProgress < 100 && (
+            <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{visibleLoadProgress}%</span>
+          )}
+        </div>
+      )}
+
       {/* Re-reading greeting. Two display modes:
           - AI voice available: render the sentence in serif italic (quote-like),
             with a subtle "— 同伴" attribution below. Feels like a whispered
@@ -3852,71 +4888,74 @@ export default function PdfViewer() {
                   // 2026-04-28 · 重试:重置 loadError + 重置 pdfFileUrl,
                   //   触发 effect 重跑(用 currentEntry?.id 当 key 强制 remount)
                   setLoadError(null)
-                  if (currentEntry?.absPath) {
-                    setPdfFileUrl(null)
-                    setTimeout(() => {
-                      setPdfFileUrl('file:///' + currentEntry.absPath.replace(/\\/g, '/'))
-                    }, 50)
-                  }
+                  setLoadProgress(0)
+                  if (currentEntry?.absPath) void loadPdfFromEntry(currentEntry)
                 }}>重试</button>
             </div>
           ) : !pdfFileUrl ? (
             // 2026-04-28 · 卡在"加载中..." 通常是 ext 检测失败 / 路径异常。
             //   附上当前文件路径让用户能立刻判断,8s 后给重试按钮。
-            <StuckLoadingHint absPath={currentEntry?.absPath || ''} onRetry={() => {
+            <PdfLoadingState absPath={currentEntry?.absPath || ''} progress={loadProgress} phase="准备 PDF" onRetry={() => {
               if (currentEntry?.absPath) {
-                setPdfFileUrl('file:///' + currentEntry.absPath.replace(/\\/g, '/'))
+                setLoadProgress(0)
+                void loadPdfFromEntry(currentEntry)
               }
             }} />
           ) : (
-            <Document
-              key={`${currentEntry?.id}-single`}
-              file={pdfFileUrl}
-              onLoadSuccess={onDocumentLoadSuccess}
-              onLoadError={onDocumentLoadError}
-              onLoadProgress={({ loaded, total }: { loaded: number; total: number }) => {
-                if (total > 0) setLoadProgress(Math.round((loaded / total) * 100))
-              }}
-              loading={
-                <div className="empty-state">
-                  <span className="loading-spinner" />
-                  <span style={{ marginTop: 10 }}>
-                    解析 PDF{loadProgress > 0 ? ` · ${loadProgress}%` : '...'}
-                  </span>
-                  {loadProgress > 0 && loadProgress < 100 && (
-                    <div style={{ width: 180, height: 3, background: 'var(--border)', borderRadius: 2, marginTop: 10, overflow: 'hidden' }}>
-                      <div style={{ width: `${loadProgress}%`, height: '100%', background: 'var(--accent)', transition: 'width 0.2s' }} />
-                    </div>
-                  )}
-                </div>
-              }
-              error={<div className="empty-state"><span>PDF 解析失败</span></div>}
-            >
-              {/* 2026-04-28 CLEAN · 沉浸式 dual-page 分支已删,固定走单列滚动布局 */}
-              {Array.from({ length: numPages }, (_, i) => {
-                const pageNum = i + 1
-                // Render real <Page> only for pages near the current range
-                // (±2 around pageRenderRange), placeholder for others. This
-                // prevents react-pdf from instantiating every Page canvas
-                // for huge PDFs, which was the main source of load+resize lag.
-                const inRange = pageNum >= pageRenderRange.start - 2 && pageNum <= pageRenderRange.end + 2
-                return (
-                  <LazyPdfPage
-                    key={`${currentEntry?.id || 'pdf'}-${pageNum}`}
-                    pageNum={pageNum}
-                    scale={debouncedScale}
-                    inRange={inRange}
-                    docKey={currentEntry?.id || pdfFileUrl || 'pdf'}
-                    onVisible={(n) => {
-                      setPageRenderRange(prev => ({
-                        start: Math.min(prev.start, n),
-                        end: Math.max(prev.end, n),
-                      }))
-                    }}
-                  />
-                )
-              })}
-            </Document>
+            <>
+              {numPages === 0 && (
+                <PdfLoadingState
+                  absPath={currentEntry?.absPath || ''}
+                  progress={loadProgress}
+                  phase="解析 PDF"
+                  onRetry={() => {
+                    if (!currentEntry?.absPath) return
+                    setLoadError(null)
+                    setLoadProgress(0)
+                    setNumPages(0)
+                    void loadPdfFromEntry(currentEntry)
+                  }}
+                />
+              )}
+              <Document
+                key={`${currentEntry?.id}-single`}
+                className="pdf-document-stack"
+                file={pdfDocumentFile}
+                onLoadSuccess={onDocumentLoadSuccess}
+                onLoadError={onDocumentLoadError}
+                onLoadProgress={({ loaded, total }: { loaded: number; total: number }) => {
+                  if (total > 0) setLoadProgress(Math.round((loaded / total) * 100))
+                  else if (loaded > 0) setLoadProgress(prev => Math.max(prev, 12))
+                }}
+                loading={null}
+                error={<div className="empty-state"><span>PDF 解析失败</span></div>}
+              >
+                {/* 2026-04-28 CLEAN · 沉浸式 dual-page 分支已删,固定走单列滚动布局 */}
+                {Array.from({ length: numPages }, (_, i) => {
+                  const pageNum = i + 1
+                  // Render real <Page> only for pages near the current range
+                  // (±2 around pageRenderRange), placeholder for others. This
+                  // prevents react-pdf from instantiating every Page canvas
+                  // for huge PDFs, which was the main source of load+resize lag.
+                  const inRange = pageNum >= pageRenderRange.start - 2 && pageNum <= pageRenderRange.end + 2
+                  return (
+                    <LazyPdfPage
+                      key={`${currentEntry?.id || 'pdf'}-${pageNum}`}
+                      pageNum={pageNum}
+                      scale={debouncedScale}
+                      inRange={inRange}
+                      docKey={currentEntry?.id || 'pdf'}
+                      onVisible={(n) => {
+                        setPageRenderRange(prev => ({
+                          start: Math.min(prev.start, n),
+                          end: Math.max(prev.end, n),
+                        }))
+                      }}
+                    />
+                  )
+                })}
+              </Document>
+            </>
           )}
         </div>
         </div>
@@ -3926,7 +4965,9 @@ export default function PdfViewer() {
       {viewMode === 'pdf' && isHtml && (
         <div className="pdf-scroll-area" style={{ padding: 0, background: getReaderSurfaceColor(ocrBgHue, ocrBgSat, ocrBgLight) }}>
           <HtmlViewer key={currentEntry?.id} absPath={absPath} onTextSelect={setTextSelection}
+            entryId={currentEntry?.id}
             annotations={memoizedAnnotations}
+            onAnnotationClick={(id) => setActiveAnnotation(id)}
             marks={memoizedMarks}
             onRemoveMark={handleRemoveMark}
             onMarkEdit={handleExistingMarkEdit}
@@ -3960,6 +5001,7 @@ export default function PdfViewer() {
           <EpubViewer
             key={currentEntry?.id}
             absPath={absPath}
+            entryId={currentEntry?.id}
             onTextSelect={setTextSelection}
             annotations={memoizedAnnotations}
             onAnnotationClick={(id) => setActiveAnnotation(id)}
@@ -3984,14 +5026,14 @@ export default function PdfViewer() {
       {/* ===== DOCX View ===== */}
       {/* 2026-04-28 CLEAN · 沉浸式 dual-column 分支已删,固定走单列 */}
       {viewMode === 'pdf' && ['docx', 'doc'].includes(fileExt) && (
-        <div className="pdf-scroll-area" style={{
+        <div ref={scrollRef} className="pdf-scroll-area" style={{
           alignItems: 'stretch', padding: 0,
           background: getReaderSurfaceColor(ocrBgHue, ocrBgSat, ocrBgLight),
           fontSize: ocrFontSize, fontWeight: ocrFontWeight,
           color: ocrBgLight < 50 ? `hsl(40, 15%, ${60 + (100 - ocrColorDepth) / 3}%)` : `hsl(30, 20%, ${100 - ocrColorDepth}%)`,
         }} onMouseUp={handleMouseUp}>
           <DocxViewer key={currentEntry?.id} absPath={absPath} onTextSelect={setTextSelection}
-            annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
+            annotations={memoizedAnnotations}
             onAnnotationClick={(id) => setActiveAnnotation(id)}
             marks={memoizedMarks}
             onRemoveMark={handleRemoveMark}
@@ -4004,7 +5046,7 @@ export default function PdfViewer() {
       {/* ===== Text View ===== */}
       {/* 2026-04-28 CLEAN · 沉浸式 dual-page TXT/MD 分支已删,固定走单列 */}
       {viewMode === 'pdf' && isText && (
-        <div className="pdf-scroll-area" style={{
+        <div ref={scrollRef} className="pdf-scroll-area" style={{
           alignItems: 'stretch', padding: 0,
           background: getReaderSurfaceColor(ocrBgHue, ocrBgSat, ocrBgLight),
         }} onMouseUp={handleMouseUp}>
@@ -4015,7 +5057,7 @@ export default function PdfViewer() {
             <TextFileContent
               key={currentEntry?.id}
               absPath={absPath}
-              annotations={(currentPdfMeta?.annotations || []).map(a => ({ id: a.id, selectedText: a.anchor.selectedText }))}
+              annotations={memoizedAnnotations}
               onAnnotationClick={(id) => setActiveAnnotation(id)}
               marks={currentPdfMeta?.marks?.map(m => ({ id: m.id, type: m.type, color: m.color, selectedText: m.selectedText })) || []}
               onRemoveMark={handleRemoveMark}
@@ -4067,15 +5109,22 @@ export default function PdfViewer() {
               </div>
             </div>
 
-            <OcrContent
-              text={ocrFullText || ''}
-              annotations={memoizedAnnotations}
-              onAnnotationClick={(id) => setActiveAnnotation(id)}
-              activeSelectionText={toolbar?.text || textSelection?.text || undefined}
-              marks={memoizedMarks}
-              onRemoveMark={handleRemoveMark}
-              searchHighlight={searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight.query : null}
-            />
+            {ocrFullText?.trim() ? (
+              <OcrContent
+                text={ocrFullText}
+                annotations={memoizedAnnotations}
+                onAnnotationClick={(id) => setActiveAnnotation(id)}
+                activeSelectionText={toolbar?.text || textSelection?.text || undefined}
+                marks={memoizedMarks}
+                onRemoveMark={handleRemoveMark}
+                searchHighlight={searchHighlight?.targetEntryId === currentEntry?.id ? searchHighlight.query : null}
+              />
+            ) : (
+              <div className="empty-state" style={{ minHeight: 260 }}>
+                <span className="loading-spinner" />
+                <span style={{ marginTop: 10 }}>正在读取 OCR 文本...</span>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -4092,6 +5141,11 @@ export default function PdfViewer() {
               <button onClick={() => handleToolbarAnnotate('yellow')} title="注释（默认黄色标记）">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
                 <span>注释</span>
+              </button>
+              <span className="ft-divider" />
+              <button onClick={handleToolbarGuide} title="为选中文段生成导读，并保存到注释栏">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 19.5V5a2 2 0 0 1 2-2h7l5 5v11.5"/><path d="M13 3v5h5"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
+                <span>导读</span>
               </button>
               <span className="ft-divider" />
               <button onClick={() => setToolbarMode('append-list')} title="追加到已有注释">

@@ -25,38 +25,65 @@ import './styles/globals.css'
 // Shared position state for the floating toggle (persists across show/hide via ref)
 const floatingTogglePosRef = { current: { x: -1, y: -1 } }
 
+function clampFloatingTogglePos(pos: { x: number; y: number }) {
+  if (pos.x < 0) return pos
+  return {
+    x: Math.max(0, Math.min(window.innerWidth - 40, pos.x)),
+    y: Math.max(36, Math.min(window.innerHeight - 40, pos.y)),
+  }
+}
+
 function DraggableToggle({ onClick }: { onClick: () => void }) {
   const [pos, setPos] = useState(() => ({ ...floatingTogglePosRef.current }))
   const dragging = useRef(false)
   const moved = useRef(false)
   const startPos = useRef({ x: 0, y: 0, bx: 0, by: 0 })
+  const posRef = useRef(pos)
+  const bodyUserSelectRef = useRef('')
   // Hold the currently-registered drag listeners so an unmount (e.g. user
   // toggles the panel open mid-drag, which re-renders App and drops this
   // button) doesn't leave them stuck on `document`.
-  const activeListenersRef = useRef<{ move: (ev: MouseEvent) => void; up: () => void } | null>(null)
+  const activeListenersRef = useRef<{ move: (ev: MouseEvent) => void; up: (ev?: MouseEvent) => void } | null>(null)
+
+  useEffect(() => {
+    posRef.current = pos
+  }, [pos])
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
     dragging.current = true
     moved.current = false
     const rect = e.currentTarget.getBoundingClientRect()
     startPos.current = { x: e.clientX, y: e.clientY, bx: rect.left, by: rect.top }
+    bodyUserSelectRef.current = document.body.style.userSelect
+    document.body.style.userSelect = 'none'
 
     const onMove = (ev: MouseEvent) => {
       if (!dragging.current) return
+      ev.preventDefault()
       const dx = ev.clientX - startPos.current.x
       const dy = ev.clientY - startPos.current.y
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved.current = true
-      const nx = Math.max(0, Math.min(window.innerWidth - 40, startPos.current.bx + dx))
-      const ny = Math.max(36, Math.min(window.innerHeight - 40, startPos.current.by + dy))
-      setPos({ x: nx, y: ny })
-      floatingTogglePosRef.current = { x: nx, y: ny }
+      if (!moved.current && Math.hypot(dx, dy) < 6) return
+      moved.current = true
+      const next = clampFloatingTogglePos({
+        x: startPos.current.bx + dx,
+        y: startPos.current.by + dy,
+      })
+      posRef.current = next
+      floatingTogglePosRef.current = next
+      setPos(next)
     }
-    const onUp = () => {
+    const onUp = (ev?: MouseEvent) => {
+      ev?.preventDefault()
+      const shouldOpen = !moved.current
       dragging.current = false
-      if (!moved.current) onClick()
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = bodyUserSelectRef.current
       activeListenersRef.current = null
+      if (shouldOpen) onClick()
     }
     activeListenersRef.current = { move: onMove, up: onUp }
     document.addEventListener('mousemove', onMove)
@@ -74,19 +101,39 @@ function DraggableToggle({ onClick }: { onClick: () => void }) {
         document.removeEventListener('mouseup', listeners.up)
         activeListenersRef.current = null
       }
+      document.body.style.userSelect = bodyUserSelectRef.current
+    }
+  }, [])
+
+  useEffect(() => {
+    const clamp = () => {
+      if (dragging.current) return
+      const next = clampFloatingTogglePos(posRef.current)
+      posRef.current = next
+      floatingTogglePosRef.current = next
+      setPos(next)
+    }
+    window.addEventListener('resize', clamp)
+    window.addEventListener('shijuan-layout-change', clamp)
+    return () => {
+      window.removeEventListener('resize', clamp)
+      window.removeEventListener('shijuan-layout-change', clamp)
     }
   }, [])
 
   const style: React.CSSProperties = pos.x >= 0
-    ? { position: 'fixed', left: pos.x, top: pos.y, right: 'auto', zIndex: 50, width: 36, height: 36, borderRadius: '50%', border: '1px solid var(--border)', background: 'var(--bg-warm)', color: 'var(--text)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'grab', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }
+    ? { position: 'fixed', left: pos.x, top: pos.y, right: 'auto', zIndex: 50, width: 36, height: 36, borderRadius: '50%', border: '1px solid var(--border)', background: 'var(--bg-warm)', color: 'var(--text)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'grab', boxShadow: '0 2px 8px rgba(0,0,0,0.1)', touchAction: 'none', userSelect: 'none' }
     : {}
 
   return (
     <button
+      type="button"
       className="floating-toggle"
       style={style}
       onMouseDown={handleMouseDown}
-      title="打开注释面板（可拖拽移动）"
+      onDragStart={(e) => e.preventDefault()}
+      aria-label="打开注释栏"
+      title="打开注释栏，可拖动位置"
     >
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>

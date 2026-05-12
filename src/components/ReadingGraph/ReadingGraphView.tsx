@@ -1022,16 +1022,26 @@ function GraphTitleSwitcher({ graphs, activeGraph, busy, onCreate, onSwitch, onR
           </div>
 
           <div style={graphSwitcherCreateStyle}>
-            <input
-              value={newName}
-              onChange={event => setNewName(event.target.value)}
-              placeholder="新图谱名称"
-              style={smallInputStyle}
-              onKeyDown={event => {
-                if (event.key === 'Enter') void createGraph()
-              }}
-            />
-            <button className="btn btn-sm btn-primary" disabled={busy} onClick={() => void createGraph()}>新建</button>
+            <div style={graphCreateFieldStyle}>
+              <span style={graphCreateIconStyle} aria-hidden="true">+</span>
+              <input
+                value={newName}
+                onChange={event => setNewName(event.target.value)}
+                placeholder="新图谱名称"
+                style={graphCreateInputStyle}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') void createGraph()
+                }}
+              />
+            </div>
+            <button
+              type="button"
+              style={{ ...graphCreateButtonStyle, opacity: busy ? 0.55 : 1, cursor: busy ? 'not-allowed' : 'pointer' }}
+              disabled={busy}
+              onClick={() => void createGraph()}
+            >
+              新建
+            </button>
           </div>
 
           <div style={graphSwitcherListStyle}>
@@ -1127,7 +1137,7 @@ function GraphNodeGlyph({
 }) {
   const isEntry = node.type === 'entry'
   const size = Math.min(34, Math.max(20, 20 + Math.sqrt(Math.max(node.totalMs, 0) / 60000) * 1.5))
-  const labelOnRight = node.x < 460
+  const labelOnRight = node.x >= 460
   const labelLeft = labelOnRight ? size + 10 : -190
   const labelAlign: CSSProperties['textAlign'] = labelOnRight ? 'left' : 'right'
   return (
@@ -1814,26 +1824,83 @@ const graphSwitcherMenuStyle: CSSProperties = {
   position: 'absolute',
   left: 0,
   top: 'calc(100% + 8px)',
-  width: 360,
+  width: 390,
   maxWidth: 'calc(100vw - 40px)',
-  padding: 8,
+  padding: 10,
   border: '1px solid var(--border)',
-  borderRadius: 10,
-  background: 'color-mix(in srgb, var(--bg) 94%, var(--bg-warm))',
-  boxShadow: '0 18px 46px rgba(45,35,24,0.18)',
+  borderRadius: 12,
+  background: 'color-mix(in srgb, var(--bg) 92%, var(--bg-warm))',
+  boxShadow: '0 18px 46px rgba(45,35,24,0.20)',
   backdropFilter: 'blur(12px)',
 }
 
 const graphSwitcherMenuHeaderStyle: CSSProperties = {
-  padding: '8px 9px 9px',
+  padding: '6px 6px 9px',
   borderBottom: '1px solid var(--border-light)',
-  marginBottom: 8,
+  marginBottom: 10,
 }
 
 const graphSwitcherCreateStyle: CSSProperties = {
   display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  margin: '0 0 10px',
+}
+
+const graphCreateFieldStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  height: 36,
+  display: 'flex',
+  alignItems: 'center',
   gap: 7,
-  margin: '0 2px 8px',
+  padding: '0 10px',
+  border: '1px solid var(--border-light)',
+  borderRadius: 10,
+  background: 'color-mix(in srgb, var(--bg) 72%, transparent)',
+  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.24)',
+}
+
+const graphCreateIconStyle: CSSProperties = {
+  width: 18,
+  height: 18,
+  borderRadius: '50%',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  flexShrink: 0,
+  background: 'var(--accent-soft)',
+  color: 'var(--accent-hover)',
+  fontSize: 14,
+  fontWeight: 700,
+  lineHeight: 1,
+}
+
+const graphCreateInputStyle: CSSProperties = {
+  minWidth: 0,
+  flex: 1,
+  height: '100%',
+  border: 0,
+  background: 'transparent',
+  color: 'var(--text)',
+  outline: 'none',
+  fontSize: 12.5,
+  fontFamily: 'inherit',
+}
+
+const graphCreateButtonStyle: CSSProperties = {
+  height: 36,
+  minWidth: 64,
+  padding: '0 13px',
+  border: '1px solid color-mix(in srgb, var(--accent) 62%, var(--border))',
+  borderRadius: 10,
+  background: 'linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, #fff 12%), var(--accent))',
+  color: '#fff',
+  boxShadow: '0 7px 18px rgba(120,82,48,0.18)',
+  cursor: 'pointer',
+  fontSize: 12.5,
+  fontWeight: 700,
+  fontFamily: 'inherit',
 }
 
 const graphSwitcherListStyle: CSSProperties = {
