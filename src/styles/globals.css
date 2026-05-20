@@ -533,6 +533,11 @@ html, body, #root {
   background: #F1F7F4;
   border-left: 3px solid #5B8E82;
 }
+.history-entry.ai-persona {
+  background: #F8F2FF;
+  border-left: 3px solid #9b59b6;
+  box-shadow: inset 0 0 0 1px rgba(155, 89, 182, 0.10);
+}
 :root.dark-mode .history-entry.user-note { background: #302a22; border-left-color: var(--accent); }
 :root.dark-mode .history-entry.user-question { background: #302c1a; border-left-color: #D4A84B; }
 :root.dark-mode .history-entry.user-stance { background: #2a2535; border-left-color: #8B6CC1; }
@@ -541,6 +546,11 @@ html, body, #root {
 :root.dark-mode .history-entry.ai-qa { background: #302c1a; border-left-color: var(--warning); }
 :root.dark-mode .history-entry.ai-feedback { background: #252c28; border-left-color: #9DB5B2; }
 :root.dark-mode .history-entry.ai-guide { background: #202d2b; border-left-color: #5B8E82; }
+:root.dark-mode .history-entry.ai-persona {
+  background: #2d2436;
+  border-left-color: #b77ce8;
+  box-shadow: inset 0 0 0 1px rgba(183, 124, 232, 0.16);
+}
 
 /* 2026-04-28 · header 在窄面板里布局修复:
    - 允许 wrap(原来固定 flex 一行,挤窄就模型名/日期/按钮三处都换行)

@@ -1269,7 +1269,8 @@ export default function MemoEditor() {
             autoFocus
             style={{
               flex: 1, fontSize: 15, fontWeight: 600, border: '1px solid var(--accent)',
-              borderRadius: 4, padding: '2px 8px', outline: 'none', background: 'var(--bg)'
+              borderRadius: 4, padding: '2px 8px', outline: 'none', background: 'var(--bg)',
+              color: 'var(--text)', caretColor: 'var(--accent)',
             }}
           />
         ) : (

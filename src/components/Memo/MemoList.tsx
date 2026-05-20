@@ -399,7 +399,8 @@ export default function MemoList() {
             autoFocus
             style={{
               flex: 1, padding: '5px 8px', border: '1px solid var(--accent)',
-              borderRadius: 4, fontSize: 12, outline: 'none', background: 'var(--bg)'
+              borderRadius: 4, fontSize: 12, outline: 'none', background: 'var(--bg)',
+              color: 'var(--text)', caretColor: 'var(--accent)',
             }}
           />
         </div>
@@ -418,7 +419,8 @@ export default function MemoList() {
             autoFocus
             style={{
               width: '100%', padding: '6px 10px', border: '1px solid var(--accent)',
-              borderRadius: 4, fontSize: 12, outline: 'none', background: 'var(--bg)'
+              borderRadius: 4, fontSize: 12, outline: 'none', background: 'var(--bg)',
+              color: 'var(--text)', caretColor: 'var(--accent)',
             }}
           />
         </div>
