@@ -3,6 +3,30 @@ import { useUiStore } from '../../store/uiStore'
 import { useLibraryStore } from '../../store/libraryStore'
 import { normalizeMixedChineseToSimplified } from '../../utils/chineseText'
 
+function buildPagedOcrText(pageTexts: string[] | undefined, fallbackText: string, startPage = 1) {
+  const normalizedFallback = normalizeMixedChineseToSimplified(fallbackText || '')
+  const normalizedPages = (pageTexts || []).map(t => normalizeMixedChineseToSimplified(t || ''))
+  const timestamp = new Date().toISOString()
+  const pages = normalizedPages.map((ocrText, i) => ({
+    pageNumber: startPage + i,
+    ocrText,
+    ocrTimestamp: timestamp,
+  }))
+
+  if (pages.length > 1) {
+    return {
+      text: pages.map(p => `=== 第 ${p.pageNumber} 页 ===\n\n${p.ocrText}`).join('\n\n'),
+      pages,
+    }
+  }
+
+  if (pages.length === 1) {
+    return { text: pages[0].ocrText || normalizedFallback, pages }
+  }
+
+  return { text: normalizedFallback, pages }
+}
+
 /**
  * BatchOcrRunner (headless) — drives the sequential OCR queue.
  *
@@ -21,10 +45,17 @@ export default function BatchOcrRunner() {
   const advanceOcrQueue = useUiStore(s => s.advanceOcrQueue)
   const setOcrChunkProgress = useUiStore(s => s.setOcrChunkProgress)
   const updateEntry = useLibraryStore(s => s.updateEntry)
+  const updatePdfMetaByEntryId = useLibraryStore(s => s.updatePdfMetaByEntryId)
 
   // Track which (currentIndex) we've already kicked off, so React re-renders
   // don't retrigger the same OCR request twice.
   const activeIdxRef = useRef<number>(-1)
+
+  useEffect(() => {
+    if (ocrQueue.status !== 'running') {
+      activeIdxRef.current = -1
+    }
+  }, [ocrQueue.status])
 
   // Subscribe to per-chunk OCR progress from the main process. Filtered by entryId
   // so stale events from a previously-running OCR don't bleed in.
@@ -81,7 +112,15 @@ export default function BatchOcrRunner() {
         if (stopped) return
 
         if (result.success && result.text) {
-          const savedPath = await api.saveOcrText(item.absPath, normalizeMixedChineseToSimplified(result.text))
+          const paged = buildPagedOcrText(result.pageTexts, result.text, result.actualStartPage || 1)
+          const savedPath = await api.saveOcrText(item.absPath, paged.text)
+          if (paged.pages.length > 0) {
+            await updatePdfMetaByEntryId(item.entryId, meta => ({
+              ...meta,
+              pages: paged.pages,
+              updatedAt: new Date().toISOString(),
+            }))
+          }
           await updateEntry(item.entryId, {
             ocrStatus: 'complete',
             ocrFilePath: savedPath,
@@ -118,7 +157,7 @@ export default function BatchOcrRunner() {
     })()
 
     return () => { stopped = true }
-  }, [ocrQueue.status, ocrQueue.currentIndex, ocrQueue.cancelled, ocrQueue.items, ocrEngine, advanceOcrQueue, updateEntry])
+  }, [ocrQueue.status, ocrQueue.currentIndex, ocrQueue.cancelled, ocrQueue.items, ocrEngine, advanceOcrQueue, updateEntry, updatePdfMetaByEntryId])
 
   return null
 }

@@ -28,6 +28,13 @@ export interface OcrQueueState {
   currentChunk: { chunkIndex: number; totalChunks: number } | null
 }
 
+export interface AnnotationDraftIntent {
+  kind: 'guide'
+  documentTitle?: string
+  selectedText: string
+  surroundingContext?: string
+}
+
 interface UiState {
   // Panels
   sidebarCollapsed: boolean
@@ -76,6 +83,7 @@ interface UiState {
   // Annotation color (for next annotation to be created)
   annotationColor: string
   annotationDraftInput: string | null
+  annotationDraftIntent: AnnotationDraftIntent | null
 
   // Agent
   rightPanel: 'annotation' | 'agent'
@@ -139,6 +147,7 @@ interface UiState {
   setOcrEngine: (engine: OcrEngine) => void
   setAnnotationColor: (color: string) => void
   setAnnotationDraftInput: (input: string | null) => void
+  setAnnotationDraftIntent: (intent: AnnotationDraftIntent | null) => void
   setRightPanel: (panel: 'annotation' | 'agent') => void
   setHermesHasInsight: (has: boolean) => void
   toggleDarkMode: () => void
@@ -217,6 +226,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   })(),
   annotationColor: 'yellow',
   annotationDraftInput: null,
+  annotationDraftIntent: null,
   rightPanel: 'annotation',
   hermesHasInsight: false,
   darkMode: (() => { try { return localStorage.getItem('sj-darkMode') === 'true' } catch { return false } })(),
@@ -277,6 +287,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   }),
   setAnnotationColor: (color) => set({ annotationColor: color }),
   setAnnotationDraftInput: (input) => set({ annotationDraftInput: input }),
+  setAnnotationDraftIntent: (intent) => set({ annotationDraftIntent: intent }),
   // 2026-04-28 CLEAN · setImmersiveMode + setDualPageMode 已删(沉浸式阅读下线)。
   setCurrentVisiblePage: (page) => {
     const cur = get().currentVisiblePage

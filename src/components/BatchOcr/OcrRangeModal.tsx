@@ -21,11 +21,22 @@ export interface OcrRangeChoice {
   engine?: OcrEngine
 }
 
+export interface OcrCoverageInfo {
+  totalPages: number
+  completedPages: number
+  missingPages: number
+  missingRanges: Array<{ start: number; end: number }>
+  suggestedRange: { start: number; end: number } | null
+}
+
 export interface OcrRangeModalProps {
   open: boolean
-  totalPages: number       // PDF 总页数
-  currentPage: number      // 用户当前可见页（用于"当前页附近"默认值）
+  totalPages: number
+  currentPage: number
   defaultMode?: OcrMode
+  defaultStartPage?: number
+  defaultEndPage?: number
+  ocrCoverage?: OcrCoverageInfo
   ocrEngine?: OcrEngine
   glmApiKeyStatus?: 'set' | 'not-set' | 'checking'
   onEngineChange?: (engine: OcrEngine) => void
@@ -33,11 +44,24 @@ export interface OcrRangeModalProps {
   onCancel: () => void
 }
 
+function formatPageRange(range: { start: number; end: number }): string {
+  return range.start === range.end ? `第 ${range.start} 页` : `第 ${range.start}-${range.end} 页`
+}
+
+function formatPageRanges(ranges: Array<{ start: number; end: number }>): string {
+  if (ranges.length === 0) return ''
+  const visible = ranges.slice(0, 4).map(formatPageRange).join('、')
+  return ranges.length > 4 ? `${visible} 等 ${ranges.length} 段` : visible
+}
+
 export default function OcrRangeModal({
   open,
   totalPages,
   currentPage,
   defaultMode = 'full',
+  defaultStartPage,
+  defaultEndPage,
+  ocrCoverage,
   ocrEngine = 'glm',
   glmApiKeyStatus = 'checking',
   onEngineChange,
@@ -50,18 +74,20 @@ export default function OcrRangeModal({
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [rapidStatus, setRapidStatus] = useState<{ checking: boolean; available: boolean; message: string; installCommand?: string } | null>(null)
   const confirmBtnRef = useRef<HTMLButtonElement>(null)
+  const suggestedStart = defaultStartPage ?? ocrCoverage?.suggestedRange?.start
+  const suggestedEnd = defaultEndPage ?? ocrCoverage?.suggestedRange?.end
 
   // 重置默认值（每次打开 modal 时）
   useEffect(() => {
     if (!open) return
     if (RAPID_OCR_LOCKED && ocrEngine === 'rapidocr') onEngineChange?.('glm')
     setMode(defaultMode)
-    setStartStr('1')
-    setEndStr(String(totalPages || 1))
+    setStartStr(String(suggestedStart || 1))
+    setEndStr(String(suggestedEnd || totalPages || 1))
     setErrorMsg(null)
     const t = setTimeout(() => confirmBtnRef.current?.focus(), 30)
     return () => clearTimeout(t)
-  }, [open, defaultMode, totalPages, ocrEngine, onEngineChange])
+  }, [open, defaultMode, totalPages, ocrEngine, onEngineChange, suggestedStart, suggestedEnd])
 
   useEffect(() => {
     if (!open || RAPID_OCR_LOCKED || ocrEngine !== 'rapidocr') return
@@ -110,9 +136,12 @@ export default function OcrRangeModal({
       const e = Math.min(totalPages || center, center + 25)
       setStartStr(String(s))
       setEndStr(String(e))
+    } else if (mode === 'range' && suggestedStart && suggestedEnd) {
+      setStartStr(String(suggestedStart))
+      setEndStr(String(suggestedEnd))
     }
     // mode === 'range' 保留用户已输入值
-  }, [mode, currentPage, totalPages])
+  }, [mode, currentPage, totalPages, suggestedStart, suggestedEnd])
 
   // Esc 取消 / Enter 确认
   useEffect(() => {
@@ -240,6 +269,31 @@ export default function OcrRangeModal({
         }}>
           PDF 共 {totalPages || '?'} 页。你可以只 OCR 一部分（大文件全本 OCR 慢且费 quota）。
         </div>
+
+        {ocrCoverage && ocrCoverage.totalPages > 0 && ocrCoverage.completedPages > 0 && (
+          <div style={{
+            fontSize: 11.5,
+            color: 'var(--text-secondary)',
+            marginBottom: 18,
+            padding: '9px 12px',
+            background: 'rgba(91, 142, 130, 0.10)',
+            border: '1px solid rgba(91, 142, 130, 0.22)',
+            borderRadius: 6,
+            lineHeight: 1.55,
+          }}>
+            <div>
+              已 OCR <strong style={{ color: 'var(--accent)' }}>{ocrCoverage.completedPages}</strong> / {ocrCoverage.totalPages} 页，
+              还剩 <strong style={{ color: 'var(--accent)' }}>{ocrCoverage.missingPages}</strong> 页。
+            </div>
+            {ocrCoverage.missingPages > 0 ? (
+              <div style={{ marginTop: 3 }}>
+                缺页：{formatPageRanges(ocrCoverage.missingRanges)}。默认补齐 {ocrCoverage.suggestedRange ? formatPageRange(ocrCoverage.suggestedRange) : '下一段'}；与旧 OCR 重叠的页会自动覆盖旧文本。
+              </div>
+            ) : (
+              <div style={{ marginTop: 3 }}>所有页面已有 OCR；重新识别指定范围会覆盖对应旧页。</div>
+            )}
+          </div>
+        )}
 
         <div style={{ marginBottom: 18 }}>
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>OCR 引擎</div>

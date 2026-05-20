@@ -243,11 +243,19 @@ html, body, #root {
 .pdf-toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 18px;
+  gap: 7px;
+  min-height: 44px;
+  padding: 5px 16px;
   background: var(--bg-warm);
   border-bottom: 1px solid var(--border-light);
   font-size: 13px;
+  box-shadow: inset 0 -1px 0 rgba(61, 53, 41, 0.025);
+}
+
+.pdf-toolbar .btn-sm {
+  min-height: 28px;
+  padding: 3px 9px;
+  border-radius: 6px;
 }
 
 .pdf-scroll-area {
@@ -589,6 +597,37 @@ html, body, #root {
   white-space: nowrap;
   flex-shrink: 0;
 }
+.history-entry-actions .annotation-stop-button {
+  height: 24px;
+  padding: 3px 9px 3px 7px;
+  gap: 5px;
+  border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--border-light));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--danger) 9%, var(--bg) 91%);
+  color: color-mix(in srgb, var(--danger) 88%, #6f2f2f 12%);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.24);
+}
+.history-entry-actions .annotation-stop-button svg {
+  flex-shrink: 0;
+}
+.history-entry-actions .annotation-stop-button:hover {
+  border-color: color-mix(in srgb, var(--danger) 62%, var(--border));
+  background: color-mix(in srgb, var(--danger) 15%, var(--bg) 85%);
+  color: #A94F4F;
+}
+:root.dark-mode .history-entry-actions .annotation-stop-button {
+  background: color-mix(in srgb, var(--danger) 18%, var(--bg) 82%);
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  color: #E59D9D;
+  box-shadow: none;
+}
+:root.dark-mode .history-entry-actions .annotation-stop-button:hover {
+  background: color-mix(in srgb, var(--danger) 26%, var(--bg) 74%);
+  color: #F0B2B2;
+}
 
 /* Chat input */
 /* Markdown in annotation entries */
@@ -600,6 +639,56 @@ html, body, #root {
 .annotation-markdown ul, .annotation-markdown ol { padding-left: 18px; margin-bottom: 8px; }
 .annotation-markdown li { margin-bottom: 2px; }
 .annotation-markdown code { background: var(--bg-warm); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+.annotation-markdown pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--bg-warm) 82%, var(--bg) 18%);
+  border: 1px solid var(--border-light);
+  overflow-x: auto;
+}
+.annotation-markdown pre code {
+  display: block;
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre;
+}
+.annotation-table-scroll {
+  max-width: 100%;
+  margin: 8px 0 10px;
+  overflow-x: auto;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--bg) 68%, var(--bg-warm) 32%);
+}
+.annotation-table-scroll table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.annotation-table-scroll th,
+.annotation-table-scroll td {
+  padding: 7px 9px;
+  border-right: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--border-light);
+  vertical-align: top;
+  white-space: normal;
+  word-break: break-word;
+}
+.annotation-table-scroll th {
+  background: var(--bg-warm);
+  color: var(--text);
+  font-weight: 650;
+}
+.annotation-table-scroll tr:last-child td { border-bottom: none; }
+.annotation-table-scroll th:last-child,
+.annotation-table-scroll td:last-child { border-right: none; }
 .annotation-markdown blockquote {
   border-left: 3px solid var(--border); padding-left: 10px;
   margin: 6px 0; color: var(--text-secondary); font-style: italic;
@@ -1363,6 +1452,15 @@ html, body, #root {
 
 .ocr-markdown-content table {
   border-collapse: collapse; margin: 14px 0; width: 100%; font-size: 14px;
+}
+.ocr-markdown-content .ocr-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+  margin: 14px 0;
+}
+.ocr-markdown-content .ocr-table-scroll table {
+  margin: 0;
+  min-width: 100%;
 }
 .ocr-markdown-content th, .ocr-markdown-content td {
   border: 1px solid var(--border); padding: 8px 12px; text-align: left;

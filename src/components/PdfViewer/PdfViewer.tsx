@@ -19,11 +19,10 @@ import 'react-pdf/dist/esm/Page/AnnotationLayer.css'
 import 'katex/dist/katex.min.css'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useUiStore } from '../../store/uiStore'
-import { useAnnotationAiJobsStore } from '../../store/annotationAiJobsStore'
-import type { Annotation, HistoryEntry, LibraryEntry } from '../../types/library'
+import type { Annotation, LibraryEntry, PageData } from '../../types/library'
 import { cleanOcrText } from './cleanOcrText'
 import { collectTextNodes } from './highlights'
-import { buildGuidedReadingMessages } from './guidedReadingSkill'
+import { buildGuidedReadingUserPrompt } from './guidedReadingSkill'
 import TranslateModal, { type TranslateModalProps } from './TranslateModal'
 import { useTranslationJobsStore } from '../../store/translationJobsStore'
 // 2026-04-28 · 局部 OCR 范围选择 modal 重新接入
@@ -112,19 +111,78 @@ function getTextMarkClassName(type: TextMarkType, color?: string): string {
     : `ocr-mark mark-underline-${safeColor}`
 }
 
-function getModelLabel(modelSpec: string): string {
-  const [, modelId] = modelSpec.includes(':') ? modelSpec.split(':', 2) : ['', modelSpec]
-  return modelId
-    .replace(/^glm-/, 'GLM-')
-    .replace(/^gpt-/, 'GPT-')
-    .replace(/^claude-/, 'Claude ')
-    .replace(/^gemini-/, 'Gemini ')
-    .replace(/^moonshot-/, 'Moonshot ')
-    .replace(/^deepseek-/, 'DeepSeek ')
-    .replace(/^doubao-/, '豆包 ')
-    .replace(/^kimi-/, 'Kimi ')
-    .replace(/^qwen3?\.?6?-?/, 'Qwen ')
-    .replace(/-\d{8,}$/, '')
+type StoredOcrPage = { pageNumber: number; ocrText: string; ocrTimestamp: string }
+type PageRange = { start: number; end: number }
+
+function normalizeStoredOcrPages(pages?: PageData[] | null): StoredOcrPage[] {
+  return (pages || [])
+    .filter(p => Number.isFinite(p.pageNumber) && p.pageNumber > 0 && p.ocrText != null)
+    .map(p => ({
+      pageNumber: p.pageNumber,
+      ocrText: p.ocrText || '',
+      ocrTimestamp: p.ocrTimestamp || new Date().toISOString(),
+    }))
+    .sort((a, b) => a.pageNumber - b.pageNumber)
+}
+
+function parseMarkedOcrPages(text?: string | null, totalPages = 0): StoredOcrPage[] {
+  const raw = text || ''
+  const markerRe = /===\s*(?:第|Page)?\s*(\d+)\s*(?:页)?\s*===/gi
+  const matches = [...raw.matchAll(markerRe)]
+  const now = new Date().toISOString()
+
+  if (matches.length === 0) {
+    return totalPages === 1 && raw.trim()
+      ? [{ pageNumber: 1, ocrText: raw.trim(), ocrTimestamp: now }]
+      : []
+  }
+
+  return matches
+    .map((match, i) => {
+      const pageNumber = Number(match[1])
+      const start = (match.index || 0) + match[0].length
+      const end = i + 1 < matches.length ? (matches[i + 1].index || raw.length) : raw.length
+      return {
+        pageNumber,
+        ocrText: raw.slice(start, end).trim(),
+        ocrTimestamp: now,
+      }
+    })
+    .filter(p => Number.isFinite(p.pageNumber) && p.pageNumber > 0)
+}
+
+function getKnownOcrPages(metaPages?: PageData[] | null, fullText?: string | null, totalPages = 0): StoredOcrPage[] {
+  const merged = new Map<number, StoredOcrPage>()
+  for (const page of normalizeStoredOcrPages(metaPages)) merged.set(page.pageNumber, page)
+  // .ocr.txt may be newer than currentPdfMeta.pages, especially after older
+  // full-book OCR runs. Let parsed file pages override stale meta pages.
+  for (const page of parseMarkedOcrPages(fullText, totalPages)) merged.set(page.pageNumber, page)
+  return [...merged.values()].sort((a, b) => a.pageNumber - b.pageNumber)
+}
+
+function buildMergedOcrText(pages: StoredOcrPage[], fallbackText = ''): string {
+  const sorted = [...pages].sort((a, b) => a.pageNumber - b.pageNumber)
+  if (sorted.length > 1) {
+    return sorted.map(p => `=== 第 ${p.pageNumber} 页 ===\n\n${p.ocrText}`).join('\n\n')
+  }
+  if (sorted.length === 1) return sorted[0].ocrText
+  return fallbackText
+}
+
+function getMissingOcrRanges(pages: StoredOcrPage[], totalPages: number): PageRange[] {
+  if (totalPages <= 0) return []
+  const done = new Set(pages.map(p => p.pageNumber).filter(n => n >= 1 && n <= totalPages))
+  const ranges: PageRange[] = []
+  let start: number | null = null
+  for (let page = 1; page <= totalPages; page++) {
+    if (!done.has(page) && start == null) start = page
+    if ((done.has(page) || page === totalPages) && start != null) {
+      const end = done.has(page) ? page - 1 : page
+      ranges.push({ start, end })
+      start = null
+    }
+  }
+  return ranges
 }
 
 function annotationHasGuide(annotation: Pick<Annotation, 'historyChain'>): boolean {
@@ -1248,8 +1306,13 @@ function OcrContent({ text, annotations, onAnnotationClick, activeSelectionText,
             )}
             <Markdown
               remarkPlugins={[remarkMath]}
-              rehypePlugins={[rehypeKatex]}
+              rehypePlugins={[rehypeRaw, rehypeKatex]}
               components={{
+                table: ({ node, ...props }) => (
+                  <div className="ocr-table-scroll">
+                    <table {...props} />
+                  </div>
+                ),
                 img: ({ src, alt }) => {
                   // Hide bbox image references
                   if (src && (src.includes('bbox') || src.includes('page='))) return null
@@ -2851,9 +2914,10 @@ export default function PdfViewer() {
       setReaderBusy(null)
     }
   }, [])
-  const pdfDocumentFile = useMemo(() => (
-    pdfFileUrl ? pdfFileUrl.slice(0) : null
-  ), [pdfFileUrl])
+  const pdfDocumentFile = useMemo(() => {
+    if (!pdfFileUrl || viewMode !== 'pdf') return null
+    return { data: new Uint8Array(pdfFileUrl).slice() }
+  }, [pdfFileUrl, viewMode])
   // When a doc opens, switch to whatever view the user was last in (so the
   // saved scrollTop applies to the right layout). Only auto-switches once
   // per doc-open — user can still toggle freely.
@@ -3544,6 +3608,21 @@ export default function PdfViewer() {
     return 0
   }, [numPages, viewMode, ocrFullText])
 
+  const ocrCoverage = useMemo(() => {
+    const total = numPages || totalPages || 0
+    const pages = getKnownOcrPages(currentPdfMeta?.pages, ocrFullText, total)
+    const completedSet = new Set(pages.map(p => p.pageNumber).filter(n => total <= 0 || (n >= 1 && n <= total)))
+    const missingRanges = getMissingOcrRanges(pages, total)
+    const missingPages = total > 0 ? Math.max(0, total - completedSet.size) : 0
+    return {
+      totalPages: total,
+      completedPages: completedSet.size,
+      missingPages,
+      missingRanges,
+      suggestedRange: missingRanges[0] || null,
+    }
+  }, [currentPdfMeta?.pages, numPages, ocrFullText, totalPages])
+
   // Page-jump submission handler (for toolbar input).
   // Clamps user input to [1, totalPages] — entering a number larger than the max
   // snaps to the last page (and updates the visible input so the user sees the clamp).
@@ -3679,7 +3758,7 @@ export default function PdfViewer() {
   const handleOcr = useCallback(async () => {
     if (!currentPdfMeta || !currentEntry) return
     if (!isPdf) { alert('OCR 仅支持 PDF 文件'); return }
-    if (!ocrFullText && await reuseExistingOcrText({ switchToOcr: true, silent: true })) return
+    if (!ocrFullText) await reuseExistingOcrText({ silent: true })
     setOcrRangeOpen(true)
   }, [currentEntry, currentPdfMeta, isPdf, ocrFullText, reuseExistingOcrText])
 
@@ -3742,42 +3821,31 @@ export default function PdfViewer() {
         const newStartPage = (result as any).actualStartPage
           || (hasRange ? choice.startPage! : 1)
 
-        const incomingPages = incomingPageTexts.map((t, i) => ({
+        const now = new Date().toISOString()
+        let incomingPages: StoredOcrPage[] = incomingPageTexts.map((t, i) => ({
           pageNumber: newStartPage + i,
           ocrText: t,
-          ocrTimestamp: new Date().toISOString(),
+          ocrTimestamp: now,
         }))
+        if (incomingPages.length === 0) {
+          incomingPages = parseMarkedOcrPages(resultText, numPages || totalPages || 0)
+        }
+        if (hasRange && incomingPages.length === 0) {
+          throw new Error('OCR 返回结果缺少分页信息，无法精准合并到已有 OCR 文本。')
+        }
 
         // Merge: 新覆盖旧,按 pageNumber 排序
-        const existingPages = currentPdfMeta.pages || []
-        const merged = new Map<number, { pageNumber: number; ocrText: string; ocrTimestamp: string }>()
-        for (const p of existingPages) {
-          if (p.ocrText != null) {
-            merged.set(p.pageNumber, {
-              pageNumber: p.pageNumber,
-              ocrText: p.ocrText,
-              ocrTimestamp: p.ocrTimestamp || new Date().toISOString(),
-            })
-          }
-        }
+        const latestMeta = useLibraryStore.getState().currentPdfMeta || currentPdfMeta
+        const existingPages = hasRange
+          ? getKnownOcrPages(latestMeta.pages, ocrFullText, numPages || totalPages || 0)
+          : []
+        const merged = new Map<number, StoredOcrPage>()
+        for (const p of existingPages) merged.set(p.pageNumber, p)
         for (const p of incomingPages) {
           merged.set(p.pageNumber, p)
         }
         const sortedPages = [...merged.values()].sort((a, b) => a.pageNumber - b.pageNumber)
-
-        // 重建完整 ocr text:多页加 page markers,单页直接用文本
-        let textToSave: string
-        if (sortedPages.length > 1) {
-          textToSave = sortedPages
-            .map(p => `=== 第 ${p.pageNumber} 页 ===\n\n${p.ocrText}`)
-            .join('\n\n')
-        } else if (sortedPages.length === 1) {
-          textToSave = sortedPages[0].ocrText
-        } else {
-          // 兜底:incomingPageTexts 为空(layout_details 缺失之类),只能用整段 text
-          textToSave = resultText
-        }
-        textToSave = normalizeMixedChineseToSimplified(textToSave)
+        const textToSave = normalizeMixedChineseToSimplified(buildMergedOcrText(sortedPages, resultText))
 
         // Save OCR text to local file
         const savedPath = await window.electronAPI.saveOcrText(currentEntry.absPath, textToSave)
@@ -3787,10 +3855,12 @@ export default function PdfViewer() {
           ...meta,
           ocrStatus: 'complete' as const,
           pages: sortedPages,
+          updatedAt: new Date().toISOString(),
         }))
 
         setOcrFullText(textToSave)
         setOcrFilePath(savedPath)
+        useUiStore.getState().setCurrentDocText(textToSave)
         // Update entry OCR status
         await updateEntry(currentEntry.id, {
           ocrStatus: 'complete',
@@ -3826,7 +3896,7 @@ export default function PdfViewer() {
       setOcrProgress({ status: `错误: ${err.message}` })
       setTimeout(() => setOcrProgress(null), 5000)
     }
-  }, [currentEntry, currentPdfMeta, glmApiKeyStatus, ocrEngine, setOcrEngine, updatePdfMeta, updateEntry])
+  }, [currentEntry, currentPdfMeta, glmApiKeyStatus, numPages, ocrEngine, ocrFullText, setOcrEngine, totalPages, updatePdfMeta, updateEntry])
 
   // Floating toolbar state
   const [toolbar, setToolbar] = useState<{ x: number; y: number; text: string; pageNumber: number } | null>(null)
@@ -3995,7 +4065,6 @@ export default function PdfViewer() {
     const selectedText = tb.text.trim()
     if (selectedText.length < 2) return
 
-    const aiModel = useUiStore.getState().selectedAiModel
     const contextWindow = useUiStore.getState().aiContextWindow
     const fallbackDocText = isHtml && htmlContent
       ? htmlContent.replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -4007,90 +4076,25 @@ export default function PdfViewer() {
       selectedText,
       contextWindow,
     )
-    const now = new Date().toISOString()
-    const historyEntryId = uuid()
-    const placeholder: HistoryEntry = {
-      id: historyEntryId,
-      type: 'ai_guide',
-      content: '',
-      userQuery: '导读',
-      contextSent: selectedText,
-      author: 'ai',
-      modelLabel: getModelLabel(aiModel),
-      createdAt: now,
-      aiStatus: 'running',
+    const draftIntent = {
+      kind: 'guide' as const,
+      documentTitle: currentEntry.title,
+      selectedText,
+      surroundingContext,
     }
-
+    const draftPrompt = buildGuidedReadingUserPrompt(draftIntent)
     const selectedAnchor = normalizeMarkText(selectedText)
-    let targetAnnotationId =
-      currentPdfMeta.annotations.find(a => normalizeMarkText(a.anchor.selectedText) === selectedAnchor)?.id
-      || uuid()
+    const existingAnnotation = currentPdfMeta.annotations.find(a => normalizeMarkText(a.anchor.selectedText) === selectedAnchor)
 
-    await updatePdfMeta(meta => {
-      const existing = meta.annotations.find(a => normalizeMarkText(a.anchor.selectedText) === selectedAnchor)
-      if (existing) {
-        targetAnnotationId = existing.id
-        return {
-          ...meta,
-          annotations: meta.annotations.map(a =>
-            a.id === existing.id
-              ? { ...a, historyChain: [...a.historyChain, placeholder], updatedAt: now }
-              : a
-          ),
-        }
-      }
-
-      const newAnnotation: Annotation = {
-        id: targetAnnotationId,
-        anchor: {
-          pageNumber: tb.pageNumber,
-          startOffset: 0,
-          endOffset: selectedText.length,
-          selectedText,
-        },
-        historyChain: [placeholder],
-        style: { color: 'blue' },
-        createdAt: now,
-        updatedAt: now,
-      }
-      return { ...meta, annotations: [...meta.annotations, newAnnotation] }
-    })
-
-    setActiveAnnotation(targetAnnotationId)
+    setTextSelection({ pageNumber: tb.pageNumber, text: selectedText, startOffset: 0, endOffset: selectedText.length })
+    if (existingAnnotation) setActiveAnnotation(existingAnnotation.id)
+    const ui = useUiStore.getState()
+    ui.setAnnotationDraftIntent(draftIntent)
+    ui.setAnnotationDraftInput(draftPrompt)
     setToolbar(null)
     setEditingMarkId(null)
     window.getSelection()?.removeAllRanges()
-
-    const updateStore = useLibraryStore.getState()
-    void useAnnotationAiJobsStore.getState().startJob({
-      entryId: currentEntry.id,
-      annotationId: targetAnnotationId,
-      historyEntryId,
-      model: aiModel,
-      modelLabel: getModelLabel(aiModel),
-      messages: buildGuidedReadingMessages({
-        documentTitle: currentEntry.title,
-        selectedText,
-        surroundingContext,
-      }),
-      updater: async (entryId, annotationId, entryHistoryId, patch) => {
-        await updateStore.updatePdfMetaByEntryId(entryId, (meta) => ({
-          ...meta,
-          annotations: meta.annotations.map(a =>
-            a.id === annotationId
-              ? {
-                  ...a,
-                  historyChain: a.historyChain.map(h =>
-                    h.id === entryHistoryId ? { ...h, ...patch } : h
-                  ),
-                  updatedAt: new Date().toISOString(),
-                }
-              : a
-          ),
-        }))
-      },
-    })
-  }, [currentEntry, currentPdfMeta, htmlContent, isHtml, setActiveAnnotation, updatePdfMeta])
+  }, [currentEntry, currentPdfMeta, htmlContent, isHtml, setActiveAnnotation, setTextSelection])
 
   const handleToolbarAppend = useCallback((annotationId: string) => {
     // Pass the selected text as supplementary context for the target annotation
@@ -4430,12 +4434,16 @@ export default function PdfViewer() {
             style={{
               display: 'flex', alignItems: 'center',
               marginLeft: 8, flexShrink: 0,
-              border: '1px solid var(--border)', borderRadius: 12,
-              background: 'var(--bg-warm)', overflow: 'hidden',
-              transition: 'border-color 0.15s, box-shadow 0.15s',
+              height: 30,
+              border: '1px solid color-mix(in srgb, var(--border) 78%, var(--accent) 22%)',
+              borderRadius: 15,
+              background: 'color-mix(in srgb, var(--bg-warm) 84%, #fff 16%)',
+              overflow: 'hidden',
+              boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.32)',
+              transition: 'border-color 0.15s, box-shadow 0.15s, background 0.15s',
             }}
             onFocus={e => (e.currentTarget.style.borderColor = 'var(--accent)')}
-            onBlur={e => (e.currentTarget.style.borderColor = 'var(--border)')}
+            onBlur={e => (e.currentTarget.style.borderColor = 'color-mix(in srgb, var(--border) 78%, var(--accent) 22%)')}
           >
             <input
               ref={pageJumpRef}
@@ -4461,10 +4469,10 @@ export default function PdfViewer() {
                 ? `输入页码后按回车或点"跳转"，范围 1-${totalPages} (Ctrl+G 聚焦)`
                 : '输入页码后按回车或点"跳转" (Ctrl+G 聚焦)'}
               style={{
-                width: 48, padding: '4px 7px', fontSize: 11,
+                width: 60, height: '100%', padding: '0 10px', fontSize: 12,
                 border: 'none', background: 'transparent',
                 color: 'var(--text)', outline: 'none',
-                textAlign: 'left',
+                textAlign: 'right',
               }}
             />
             <button
@@ -4472,12 +4480,14 @@ export default function PdfViewer() {
               disabled={!pageJumpInput.trim()}
               title="跳转到该页"
               style={{
-                padding: '4px 8px',
+                width: 50,
+                height: '100%',
+                padding: 0,
                 background: pageJumpInput.trim() ? 'var(--accent)' : 'transparent',
-                color: pageJumpInput.trim() ? '#fff' : 'var(--text-muted)',
+                color: pageJumpInput.trim() ? '#fff' : 'var(--text-secondary)',
                 border: 'none', borderLeft: '1px solid var(--border)',
                 cursor: pageJumpInput.trim() ? 'pointer' : 'default',
-                fontSize: 11, lineHeight: 1,
+                fontSize: 12, fontWeight: 650, lineHeight: 1,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 transition: 'background 0.15s',
               }}
@@ -4513,18 +4523,23 @@ export default function PdfViewer() {
         {isPdf && (
           <div style={{
             display: 'flex', flexShrink: 0,
-            border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', marginRight: 8,
+            minHeight: 30,
+            border: '1px solid color-mix(in srgb, var(--border) 72%, var(--accent) 28%)',
+            borderRadius: 7,
+            overflow: 'hidden',
+            marginRight: 8,
+            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.35)',
           }}>
             <button
               className={viewMode === 'pdf' ? 'btn btn-sm btn-primary' : 'btn btn-sm'}
-              style={{ borderRadius: 0, border: 'none', whiteSpace: 'nowrap', flexShrink: 0 }}
+              style={{ borderRadius: 0, border: 'none', whiteSpace: 'nowrap', flexShrink: 0, padding: '5px 13px', fontWeight: 500 }}
               onClick={() => setViewMode('pdf')}
             >
               PDF
             </button>
             <button
               className={viewMode === 'ocr' ? 'btn btn-sm btn-primary' : 'btn btn-sm'}
-              style={{ borderRadius: 0, border: 'none', borderLeft: '1px solid var(--border)', whiteSpace: 'nowrap', flexShrink: 0 }}
+              style={{ borderRadius: 0, border: 'none', borderLeft: '1px solid var(--border)', whiteSpace: 'nowrap', flexShrink: 0, padding: '5px 13px', fontWeight: 500 }}
               onClick={handleSwitchToOcrView}
               title={ocrFullText ? '查看已识别文本' : '尝试读取同目录的 .ocr.txt'}
             >
@@ -4554,24 +4569,24 @@ export default function PdfViewer() {
         ) : (viewMode === 'ocr' || ['docx', 'doc', 'epub', 'html', 'htm'].includes(fileExt) || isText) ? (
           // flexShrink: 0 on the container + whiteSpace: nowrap on labels prevent
           // "字号/粗细/深浅" from wrapping vertically in narrow windows.
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-            <span style={{ fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap', flexShrink: 0 }}>字号</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0 }}>
+            <span style={{ fontSize: 11, fontWeight: 650, color: 'var(--text-secondary)', whiteSpace: 'nowrap', flexShrink: 0 }}>字号</span>
             <input type="range" min="12" max="24" value={ocrFontSize}
               onChange={e => setOcrFontSize(Number(e.target.value))}
-              style={{ width: 50, height: 3, accentColor: 'var(--accent)', flexShrink: 0 }} />
-            <span style={{ fontSize: 10, color: 'var(--text-muted)', minWidth: 20, whiteSpace: 'nowrap', flexShrink: 0 }}>{ocrFontSize}</span>
+              style={{ width: 56, height: 3, accentColor: 'var(--accent)', flexShrink: 0 }} />
+            <span style={{ fontSize: 10.5, color: 'var(--text-muted)', minWidth: 20, whiteSpace: 'nowrap', flexShrink: 0 }}>{ocrFontSize}</span>
 
-            <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4, whiteSpace: 'nowrap', flexShrink: 0 }}>粗细</span>
+            <span style={{ fontSize: 11, fontWeight: 650, color: 'var(--text-secondary)', marginLeft: 5, whiteSpace: 'nowrap', flexShrink: 0 }}>粗细</span>
             <input type="range" min="200" max="800" step="50" value={ocrFontWeight}
               onChange={e => setOcrFontWeight(Number(e.target.value))}
-              style={{ width: 50, height: 3, accentColor: 'var(--accent)', flexShrink: 0 }} />
+              style={{ width: 56, height: 3, accentColor: 'var(--accent)', flexShrink: 0 }} />
 
-            <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4, whiteSpace: 'nowrap', flexShrink: 0 }}>深浅</span>
+            <span style={{ fontSize: 11, fontWeight: 650, color: 'var(--text-secondary)', marginLeft: 5, whiteSpace: 'nowrap', flexShrink: 0 }}>深浅</span>
             <input type="range" min="10" max="100" value={ocrColorDepth}
               onChange={e => setOcrColorDepth(Number(e.target.value))}
-              style={{ width: 40, height: 3, accentColor: 'var(--accent)', flexShrink: 0 }} />
+              style={{ width: 48, height: 3, accentColor: 'var(--accent)', flexShrink: 0 }} />
 
-            <span style={{ width: 1, height: 14, background: 'var(--border)', marginLeft: 4 }} />
+            <span style={{ width: 1, height: 18, background: 'var(--border)', marginLeft: 4 }} />
 
             {/* Background color dropdown */}
             <div style={{ position: 'relative' }}>
@@ -4579,10 +4594,11 @@ export default function PdfViewer() {
                 onClick={() => setShowBgPicker(!showBgPicker)}
                 title="背景颜色"
                 style={{
-                  width: 22, height: 22, borderRadius: '50%', border: '1.5px solid var(--border)',
+                  width: 24, height: 24, borderRadius: '50%', border: '1.5px solid color-mix(in srgb, var(--border) 75%, var(--accent) 25%)',
                   background: `hsl(${ocrBgHue}, ${ocrBgSat}%, ${ocrBgLight}%)`,
                   cursor: 'pointer', padding: 0, flexShrink: 0,
                   outline: showBgPicker ? '2px solid var(--accent)' : 'none', outlineOffset: 1,
+                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.45)',
                 }}
               />
               {showBgPicker && (
@@ -4646,21 +4662,21 @@ export default function PdfViewer() {
             className="btn btn-sm btn-primary"
             style={{
               marginLeft: 8,
-              width: 62,
-              minWidth: 62,
-              maxWidth: 62,
-              height: 42,
-              minHeight: 42,
-              padding: '0 10px',
+              width: 58,
+              minWidth: 58,
+              maxWidth: 58,
+              height: 34,
+              minHeight: 34,
+              padding: '0 9px',
               boxSizing: 'border-box',
               display: 'inline-flex',
-              flex: '0 0 62px',
+              flex: '0 0 58px',
               flexShrink: 0,
-              flexDirection: 'column',
               alignItems: 'center',
               justifyContent: 'center',
-              gap: 2,
-              lineHeight: 1.12,
+              lineHeight: 1,
+              fontWeight: 600,
+              boxShadow: '0 2px 8px rgba(61, 53, 41, 0.10)',
               textAlign: 'center',
               whiteSpace: 'nowrap',
               wordBreak: 'keep-all',
@@ -4668,18 +4684,11 @@ export default function PdfViewer() {
             }}
             onClick={handleOcr}
             disabled={!!ocrProgress}
+            title={ocrCoverage.completedPages > 0 && ocrCoverage.missingPages > 0
+              ? `字符识别（OCR）：已识别 ${ocrCoverage.completedPages}/${ocrCoverage.totalPages} 页，还剩 ${ocrCoverage.missingPages} 页`
+              : '字符识别（OCR）'}
           >
-            {ocrFullText ? (
-              <>
-                <span style={{ whiteSpace: 'nowrap' }}>重新</span>
-                <span style={{ whiteSpace: 'nowrap' }}>OCR</span>
-              </>
-            ) : (
-              <>
-                <span style={{ whiteSpace: 'nowrap' }}>OCR</span>
-                <span style={{ whiteSpace: 'nowrap' }}>识别</span>
-              </>
-            )}
+            <span style={{ whiteSpace: 'nowrap' }}>OCR</span>
           </button>
         )}
 
@@ -5249,8 +5258,12 @@ export default function PdfViewer() {
       {/* ===== OCR 范围选择 Modal (2026-04-28 局部 OCR 重新接入) ===== */}
       <OcrRangeModal
         open={ocrRangeOpen}
-        totalPages={numPages || 0}
+        totalPages={ocrCoverage.totalPages || numPages || totalPages || 0}
         currentPage={useUiStore.getState().currentVisiblePage || 1}
+        defaultMode={ocrCoverage.completedPages > 0 && ocrCoverage.suggestedRange ? 'range' : 'full'}
+        defaultStartPage={ocrCoverage.suggestedRange?.start}
+        defaultEndPage={ocrCoverage.suggestedRange?.end}
+        ocrCoverage={ocrCoverage}
         ocrEngine={ocrEngine}
         glmApiKeyStatus={glmApiKeyStatus}
         onEngineChange={setOcrEngine}
@@ -5286,19 +5299,21 @@ function TranslateButtonWithBadge({ entryId, onClick }: { entryId: string; onCli
   })()
 
   return (
-    <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', marginLeft: 8, flex: '0 0 62px' }}>
+    <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', marginLeft: 8, flex: '0 0 58px' }}>
       <button
         className="btn btn-sm"
         style={{
-          width: 62,
-          minWidth: 62,
-          height: 42,
-          minHeight: 42,
-          padding: '0 10px',
+          width: 58,
+          minWidth: 58,
+          height: 34,
+          minHeight: 34,
+          padding: '0 9px',
           justifyContent: 'center',
           fontSize: 12,
+          fontWeight: 600,
           lineHeight: 1,
           boxSizing: 'border-box',
+          boxShadow: '0 2px 8px rgba(61, 53, 41, 0.06)',
         }}
         title={badge?.title || '翻译全文 / 按页'}
         onClick={onClick}

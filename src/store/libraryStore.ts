@@ -32,6 +32,13 @@ const updatePdfMetaByEntryId_queue: Record<string, Promise<void>> = {}
 // callbacks read fresh state from the store instead of a stale closure.
 let initPostBootTimer: ReturnType<typeof setTimeout> | null = null
 
+const IMPORT_BUILD_BATCH_SIZE = 200
+const METADATA_ENRICH_YIELD_EVERY = 24
+
+function yieldToRenderer() {
+  return new Promise<void>(resolve => setTimeout(resolve, 0))
+}
+
 function emptyReadingGraph(name = '阅读图谱'): ReadingGraph {
   const now = new Date().toISOString()
   return { id: uuid(), name, version: '1.0.0', nodes: [], edges: [], createdAt: now, updatedAt: now }
@@ -192,12 +199,15 @@ async function enrichPdfMetadataInBackground(
   setLib: (lib: Library) => void,
   save: (lib: Library) => Promise<unknown>,
 ) {
-  for (const id of newEntryIds) {
+  for (let i = 0; i < newEntryIds.length; i++) {
+    if (i > 0 && i % METADATA_ENRICH_YIELD_EVERY === 0) await yieldToRenderer()
+    const id = newEntryIds[i]
     const lib = getLib()
     if (!lib) return
     const entry = lib.entries.find(e => e.id === id)
     if (!entry || !entry.absPath.toLowerCase().endsWith('.pdf')) continue
 
+    await yieldToRenderer()
     const meta = await extractPdfMetadata(entry.absPath)
     if (!meta) continue
 
@@ -411,8 +421,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     // 改成 immutable：先收集新 entries 再一次性新建数组。
     const newIds: string[] = []
     const newEntries: LibraryEntry[] = []
-    for (const absPath of paths) {
-      if (library.entries.some(e => e.absPath === absPath)) continue
+    const existingPaths = new Set(library.entries.map(e => e.absPath))
+    const seenPaths = new Set<string>()
+    for (let i = 0; i < paths.length; i++) {
+      const absPath = paths[i]
+      if (!absPath || seenPaths.has(absPath) || existingPaths.has(absPath)) continue
+      seenPaths.add(absPath)
       const fileName = absPath.split(/[/\\]/).pop()?.replace(/\.(pdf|docx?|epub|html?|txt|md)$/i, '') || ''
       const entry: LibraryEntry = {
         id: uuid(), absPath, title: fileName, authors: [], tags: [], notes: '',
@@ -420,6 +434,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       }
       newEntries.push(entry)
       newIds.push(entry.id)
+      if (i > 0 && i % IMPORT_BUILD_BATCH_SIZE === 0) await yieldToRenderer()
     }
     const added = newEntries.length
     const updatedLibrary = { ...library, entries: [...library.entries, ...newEntries] }

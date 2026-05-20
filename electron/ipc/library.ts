@@ -245,20 +245,45 @@ export function registerLibraryIpc(): void {
   // Scan dropped paths: expand folders recursively, filter supported file types
   ipcMain.handle('scan-dropped-paths', async (_event, rawPaths: string[]) => {
     const allFiles: string[] = []
+    const seen = new Set<string>()
+    const skippedDirs = new Set(['node_modules', '.git', 'dist', 'out', 'build', '.next', '.cache'])
+    const MAX_DROPPED_FILES = 5000
+    const SCAN_YIELD_EVERY = 200
+    let scannedItems = 0
+
+    const pushFile = (full: string) => {
+      const key = path.normalize(full)
+      if (seen.has(key) || !isSupported(key)) return
+      seen.add(key)
+      allFiles.push(key)
+    }
+
+    const yieldScan = async () => {
+      scannedItems++
+      if (scannedItems % SCAN_YIELD_EVERY === 0) {
+        await new Promise(resolve => setTimeout(resolve, 0))
+      }
+    }
 
     async function scanDir(dir: string) {
-      try {
-        const entries = await fs.readdir(dir, { withFileTypes: true })
-        for (const entry of entries) {
-          if (entry.name.startsWith('.')) continue
-          const full = path.join(dir, entry.name)
-          if (entry.isDirectory()) {
-            await scanDir(full)
-          } else if (isSupported(entry.name)) {
-            allFiles.push(full)
+      const queue = [dir]
+      while (queue.length > 0 && allFiles.length < MAX_DROPPED_FILES) {
+        const current = queue.shift()!
+        try {
+          const entries = await fs.readdir(current, { withFileTypes: true })
+          for (const entry of entries) {
+            if (entry.name.startsWith('.') || skippedDirs.has(entry.name)) continue
+            const full = path.join(current, entry.name)
+            if (entry.isDirectory()) {
+              queue.push(full)
+            } else {
+              pushFile(full)
+              if (allFiles.length >= MAX_DROPPED_FILES) break
+            }
+            await yieldScan()
           }
-        }
-      } catch { /* skip inaccessible dirs */ }
+        } catch { /* skip inaccessible dirs */ }
+      }
     }
 
     for (const p of rawPaths) {
@@ -266,8 +291,8 @@ export function registerLibraryIpc(): void {
         const stat = await fs.stat(p)
         if (stat.isDirectory()) {
           await scanDir(p)
-        } else if (isSupported(p)) {
-          allFiles.push(p)
+        } else {
+          pushFile(p)
         }
       } catch { /* skip inaccessible */ }
     }

@@ -1,8 +1,9 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { v4 as uuid } from 'uuid'
 import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useLibraryStore } from '../../store/libraryStore'
-import { useUiStore } from '../../store/uiStore'
+import { useUiStore, type AnnotationDraftIntent } from '../../store/uiStore'
 import { openEntryById } from '../../utils/openEntryById'
 import type { Annotation, HistoryEntry, BlockRef } from '../../types/library'
 import { useAnnotationAiJobsStore, jobKey } from '../../store/annotationAiJobsStore'
@@ -14,10 +15,19 @@ import { readNumber } from '../../utils/safeStorageRead'
 // PERF-R8#11 · persona list 共享 cache,免每次 AnnotationPanel mount 都 IPC
 import { fetchPersonaList, subscribePersonaList } from '../../utils/personaListCache'
 import ImeInput from '../common/ImeInput'
+import { buildGuidedReadingMessages } from '../PdfViewer/guidedReadingSkill'
 
 const RIGHT_PANEL_MIN_WIDTH = 200
 const RIGHT_PANEL_MAX_WIDTH = 800
 const READER_SAFE_WIDTH = 520
+const ANNOTATION_PANEL_BOOT_AT = Date.now()
+
+type AnchorRect = {
+  top: number
+  right: number
+  bottom: number
+  left: number
+}
 
 function clampRightPanelWidth(width: number) {
   if (typeof window === 'undefined') {
@@ -37,6 +47,12 @@ function emitRightPanelLayoutChange() {
 
 function emitRightPanelLayoutWillChange() {
   // No-op for overlay panels.
+}
+
+function isStaleRunningAiEntry(entry: HistoryEntry, hasLiveJob: boolean) {
+  if (entry.author !== 'ai' || entry.aiStatus !== 'running' || hasLiveJob) return false
+  const createdAt = Date.parse(entry.createdAt)
+  return !Number.isFinite(createdAt) || createdAt < ANNOTATION_PANEL_BOOT_AT - 500
 }
 
 // ===== Hermes background learning =====
@@ -153,90 +169,6 @@ function GhostReaderCard({ suggestion, onDismiss }: { suggestion: string | null;
   )
 }
 
-// ===== Concept Tracker: detect cross-document concepts =====
-function ConceptTracker({ currentEntryId, currentText, otherEntryAnnotations }: {
-  currentEntryId?: string
-  currentText?: string
-  otherEntryAnnotations: Array<{ entryId: string; entryTitle: string; annotations: Annotation[] }>
-}) {
-  const [concepts, setConcepts] = useState<Array<{ keyword: string; entries: Array<{ title: string; count: number }> }>>([])
-  const [dismissed, setDismissed] = useState<Set<string>>(new Set())
-
-  useEffect(() => {
-    if (!currentText || currentText.length < 4 || otherEntryAnnotations.length < 2) {
-      setConcepts([])
-      return
-    }
-
-    // Extract academic concepts — filter out common words and sentence fragments
-    // Strategy: look for noun phrases that appear as standalone terms
-    const stopWords = new Set(['的','了','在','是','和','与','对','中','为','到','从','也','都','不','有','这','那','被','把','将','于','以','及','等','而','或','但','之','所','如','其','可','要','就','会','能','很','更','最','已','一','个','些','种','次','点','上','下','里','内','外','前','后','间','时','处','者','人','年','月','日','们'])
-
-    const phrases: string[] = []
-    // Match 2-6 char terms that look like concepts (contain no stop-word-only sequences)
-    const candidates = currentText.match(/[\u4e00-\u9fff]{2,8}/g) || []
-    for (const m of candidates) {
-      // Skip if it's all stop words
-      if ([...m].every(c => stopWords.has(c))) continue
-      // Skip very generic phrases
-      if (m.length <= 2 && stopWords.has(m[0])) continue
-      // Skip if it starts/ends with a stop word particle (的/了/在/是)
-      if ('的了在是和与'.includes(m[0]) || '的了在是'.includes(m[m.length - 1])) continue
-      // Prefer longer, more specific terms
-      if (!phrases.includes(m) && m.length >= 3) phrases.push(m)
-    }
-    if (phrases.length === 0) { setConcepts([]); return }
-
-    // Check which phrases appear in 2+ other entries' annotations (stricter threshold)
-    const found: Array<{ keyword: string; entries: Array<{ title: string; count: number }> }> = []
-    for (const phrase of phrases.slice(0, 8)) {
-      const matchedEntries: Array<{ title: string; count: number }> = []
-      for (const other of otherEntryAnnotations) {
-        if (other.entryId === currentEntryId) continue
-        let count = 0
-        for (const ann of other.annotations) {
-          if (ann.anchor.selectedText.includes(phrase)) count++
-          for (const h of ann.historyChain) {
-            if (h.content.includes(phrase)) count++
-          }
-        }
-        if (count >= 2) matchedEntries.push({ title: other.entryTitle, count })
-      }
-      // Require appearing in at least 1 other entry with 2+ mentions
-      if (matchedEntries.length >= 1) {
-        found.push({ keyword: phrase, entries: matchedEntries })
-      }
-    }
-    // Sort by total cross-entry mentions (most relevant first)
-    found.sort((a, b) => b.entries.reduce((s, e) => s + e.count, 0) - a.entries.reduce((s, e) => s + e.count, 0))
-    setConcepts(found.slice(0, 5))
-  }, [currentText, currentEntryId, otherEntryAnnotations])
-
-  const visible = concepts.filter(c => !dismissed.has(c.keyword))
-  if (visible.length === 0) return null
-
-  return (
-    <div style={{ margin: '4px 8px 8px', padding: '8px 12px', borderRadius: 8,
-      background: 'var(--bg-warm)', border: '1px solid var(--border)', fontSize: 11 }}>
-      <div style={{ fontWeight: 600, color: 'var(--accent)', marginBottom: 4, fontSize: 10 }}>
-        📊 概念关联发现
-      </div>
-      {visible.slice(0, 3).map(c => (
-        <div key={c.keyword} style={{ marginBottom: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <span style={{ fontWeight: 600, color: 'var(--text)' }}>「{c.keyword}」</span>
-            <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>
-              在 {c.entries.map(e => e.title.slice(0, 10)).join('、')} 中也出现
-            </span>
-          </div>
-          <button onClick={() => setDismissed(prev => new Set([...prev, c.keyword]))}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 10 }}>×</button>
-        </div>
-      ))}
-    </div>
-  )
-}
-
 // Map entry types to display info
 function getModelLabel(modelSpec: string): string {
   // "glm:glm-5.1" → "GLM-5.1", "claude:claude-opus-4-6-..." → "Claude Opus 4.6"
@@ -314,19 +246,23 @@ const HistoryEntryItem = React.memo(function HistoryEntryItem({
   onEdit,
   onDelete,
   onCite,
+  onRegenerate,
   entryDocId,
   annotationId,
 }: {
   entry: HistoryEntry
   onEdit: (id: string, content: string) => void
   onDelete: (id: string) => void
-  onCite?: (entry: HistoryEntry) => void
+  onCite?: (entry: HistoryEntry, anchorRect?: AnchorRect) => void
+  onRegenerate?: (entry: HistoryEntry, feedback: string) => Promise<void> | void
   // Needed to look up the in-flight AI job in the global store.
   entryDocId?: string
   annotationId?: string
 }) {
   const [editing, setEditing] = useState(false)
   const [editText, setEditText] = useState(entry.content)
+  const [regenerateOpen, setRegenerateOpen] = useState(false)
+  const [regenerateFeedback, setRegenerateFeedback] = useState('')
 
   // Subscribe to the global AI-job store by this entry's key. If a running
   // job exists, its streamingText takes precedence over entry.content
@@ -335,8 +271,13 @@ const HistoryEntryItem = React.memo(function HistoryEntryItem({
     entryDocId && annotationId ? s.jobs[jobKey(entryDocId, annotationId, entry.id)] : undefined
   )
 
-  const effectiveStatus: HistoryEntry['aiStatus'] = job?.status ?? entry.aiStatus
-  const effectiveContent = (job?.status === 'running' ? job.streamingText : '') || entry.content
+  const staleRunning = isStaleRunningAiEntry(entry, !!job)
+  const effectiveStatus: HistoryEntry['aiStatus'] = staleRunning
+    ? 'aborted'
+    : job?.status ?? entry.aiStatus
+  const effectiveContent = (job?.status === 'running' ? job.streamingText : '')
+    || entry.content
+    || (staleRunning ? '（页面刷新后生成已中断，可重新提问继续。）' : '')
   const isRunning = effectiveStatus === 'running'
 
   const display = getTypeDisplay(entry.type)
@@ -360,11 +301,34 @@ const HistoryEntryItem = React.memo(function HistoryEntryItem({
     setEditing(false)
   }
 
+  const createdAtLabel = (() => {
+    const d = new Date(entry.createdAt)
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    const h = String(d.getHours()).padStart(2, '0')
+    const min = String(d.getMinutes()).padStart(2, '0')
+    return `${m}/${day} ${h}:${min}`
+  })()
+
+  const handleRegenerateSubmit = async () => {
+    const feedback = regenerateFeedback.trim()
+    setRegenerateOpen(false)
+    setRegenerateFeedback('')
+    try {
+      await onRegenerate?.(entry, feedback)
+    } catch (err) {
+      console.warn('[annotation-regenerate] failed', err)
+    }
+  }
+
   return (
     <div className={`history-entry ${display.bgClass}`}>
       <div className="history-entry-header">
         <span style={{ fontSize: 12.5, fontWeight: 500, color: headerColor, display: 'inline-flex', alignItems: 'center', gap: 8, letterSpacing: '0.2px' }}>
           {headerLabel}
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400, whiteSpace: 'nowrap' }}>
+            {createdAtLabel}
+          </span>
           {/* AI job status chip: icon-in-circle + small label. Status chip
               uses 1px soft border + faint tinted bg — reads as a proper
               badge rather than a bare unicode symbol. */}
@@ -384,7 +348,7 @@ const HistoryEntryItem = React.memo(function HistoryEntryItem({
               正在生成 · {(job?.streamingText.length || 0)} 字
             </span>
           )}
-          {effectiveStatus === 'completed' && entry.author === 'ai' && (
+          {effectiveStatus === 'completed' && entry.author === 'ai' && !entry.aiViewed && (
             <span title="AI 已完成" style={{
               display: 'inline-flex', alignItems: 'center', gap: 4,
               padding: '2px 7px 2px 4px', borderRadius: 10,
@@ -431,34 +395,85 @@ const HistoryEntryItem = React.memo(function HistoryEntryItem({
           )}
         </span>
         <div className="history-entry-actions">
-          {/* 2026-04-28 · 日期紧凑化 '4月28日 15:33' → '04/28 15:33',窄面板防换行 */}
-          <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap', flexShrink: 0 }}>
-            {(() => {
-              const d = new Date(entry.createdAt)
-              const m = String(d.getMonth() + 1).padStart(2, '0')
-              const day = String(d.getDate()).padStart(2, '0')
-              const h = String(d.getHours()).padStart(2, '0')
-              const min = String(d.getMinutes()).padStart(2, '0')
-              return `${m}/${day} ${h}:${min}`
-            })()}
-          </span>
           {!editing && !isRunning && (
             <>
-              {onCite && <button className="btn btn-sm btn-icon" onClick={() => onCite(entry)} title="引用此块">引用</button>}
+              {onCite && (
+                <button
+                  className="btn btn-sm btn-icon"
+                  onClick={(e) => onCite(entry, e.currentTarget.getBoundingClientRect())}
+                  title="引用此块"
+                >引用</button>
+              )}
+              {entry.author === 'ai' && onRegenerate && (
+                <button
+                  className="btn btn-sm btn-icon"
+                  onClick={() => setRegenerateOpen(v => !v)}
+                  title="重新生成此块"
+                >重新生成</button>
+              )}
               <button className="btn btn-sm btn-icon" onClick={() => { setEditText(entry.content); setEditing(true) }}>编辑</button>
               <button className="btn btn-sm btn-icon" onClick={() => onDelete(entry.id)}>删除</button>
             </>
           )}
           {isRunning && entryDocId && annotationId && (
             <button
-              className="btn btn-sm btn-icon"
+              className="btn btn-sm annotation-stop-button"
               onClick={() => useAnnotationAiJobsStore.getState().abortJob(entryDocId, annotationId, entry.id)}
-              title="中止"
-              style={{ color: '#C97070' }}
-            >停止</button>
+              title="停止生成"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="7" y="7" width="10" height="10" rx="1.6" fill="currentColor" />
+              </svg>
+              停止
+            </button>
           )}
         </div>
       </div>
+      {regenerateOpen && !isRunning && (
+        <div style={{
+          marginBottom: 10,
+          padding: '10px 12px',
+          border: '1px solid color-mix(in srgb, var(--accent) 36%, var(--border-light))',
+          borderRadius: 7,
+          background: 'color-mix(in srgb, var(--accent-soft) 36%, var(--bg) 64%)',
+        }}>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6, fontWeight: 600 }}>
+            重新生成要求
+          </div>
+          <textarea
+            value={regenerateFeedback}
+            onChange={e => setRegenerateFeedback(e.target.value)}
+            placeholder="例如：精简一些；联系一下某某文献；语气更尖锐一点"
+            autoFocus
+            style={{
+              width: '100%',
+              minHeight: 58,
+              padding: '8px 10px',
+              border: '1px solid var(--border)',
+              borderRadius: 6,
+              background: 'var(--bg)',
+              color: 'var(--text)',
+              fontSize: 12.5,
+              lineHeight: 1.6,
+              fontFamily: 'var(--font)',
+              resize: 'vertical',
+              outline: 'none',
+            }}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && e.ctrlKey) {
+                e.preventDefault()
+                void handleRegenerateSubmit()
+              }
+            }}
+          />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 8 }}>
+            <button className="btn btn-sm" onClick={() => setRegenerateOpen(false)} style={{ fontSize: 11 }}>取消</button>
+            <button className="btn btn-sm btn-primary" onClick={() => void handleRegenerateSubmit()} style={{ fontSize: 11 }}>
+              开始重新生成
+            </button>
+          </div>
+        </div>
+      )}
       {entry.contextText && (
         <div style={{
           fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6,
@@ -527,7 +542,18 @@ const HistoryEntryItem = React.memo(function HistoryEntryItem({
             </div>
           ) : (
             <>
-              <Markdown>{effectiveContent}</Markdown>
+              <Markdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  table: ({ node, ...props }) => (
+                    <div className="annotation-table-scroll">
+                      <table {...props} />
+                    </div>
+                  ),
+                }}
+              >
+                {effectiveContent}
+              </Markdown>
               {isRunning && <span className="streaming-cursor" />}
             </>
           )}
@@ -581,11 +607,12 @@ function FeedbackBubble({ text, loading, onKeep, onDismiss, onExpand }: {
 }
 
 // ===== Block cite dropdown: cite a specific HistoryEntry to a memo =====
-function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, onDone }: {
+function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, anchorRect, onDone }: {
   historyEntry: HistoryEntry
   annotation: Annotation
   entryId: string
   entryTitle: string
+  anchorRect?: AnchorRect
   onDone: () => void
 }) {
   const library = useLibraryStore(s => s.library)
@@ -615,14 +642,25 @@ function BlockCiteDropdown({ historyEntry, annotation, entryId, entryTitle, onDo
     onDone()
   }
 
+  const anchoredStyle: React.CSSProperties | null = anchorRect && typeof window !== 'undefined'
+    ? {
+        position: 'fixed',
+        top: Math.max(8, Math.min(anchorRect.bottom + 4, window.innerHeight - 48)),
+        right: Math.max(8, window.innerWidth - anchorRect.right),
+        maxHeight: 'min(320px, calc(100vh - 24px))',
+        overflowY: 'auto',
+      }
+    : null
+
   return (
     <div
       ref={ref}
       style={{
-        position: 'absolute', right: 0, top: '100%', zIndex: 100,
+        ...(anchoredStyle || { position: 'absolute', right: 0, top: '100%', marginTop: 4 }),
+        zIndex: 100,
         background: 'var(--bg)', border: '1px solid var(--border)',
         borderRadius: 6, boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
-        padding: '4px 0', minWidth: 160, marginTop: 4,
+        padding: '4px 0', minWidth: 160,
       }}
     >
       <div style={{ padding: '4px 12px', fontSize: 10, color: 'var(--text-muted)', fontWeight: 500 }}>
@@ -837,9 +875,6 @@ export default function AnnotationPanel() {
   const activeAnnotationId = useUiStore(s => s.activeAnnotationId)
   const setTextSelection = useUiStore(s => s.setTextSelection)
   const setActiveAnnotation = useUiStore(s => s.setActiveAnnotation)
-  // Subscribe to the full AI jobs map so list-item status badges re-render
-  // when jobs transition. Cheap — jobs map rarely has more than a few entries.
-  const aiJobs = useAnnotationAiJobsStore(s => s.jobs)
   // Flat TOC labels (EPUB only) — null for other formats. AnnotationPanel
   // uses these to title page groups with actual chapter names.
   const tocLabels = useUiStore(s => s.currentDocTocLabels)
@@ -924,14 +959,19 @@ export default function AnnotationPanel() {
   const setAiModel = useUiStore(s => s.setSelectedAiModel)
   const annotationColor = useUiStore(s => s.annotationColor)
   const annotationDraftInput = useUiStore(s => s.annotationDraftInput)
+  const annotationDraftIntent = useUiStore(s => s.annotationDraftIntent)
   const setAnnotationDraftInput = useUiStore(s => s.setAnnotationDraftInput)
+  const setAnnotationDraftIntent = useUiStore(s => s.setAnnotationDraftIntent)
+  const [guideDraftIntent, setGuideDraftIntent] = useState<AnnotationDraftIntent | null>(null)
   const [configuredProviders, setConfiguredProviders] = useState<Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>>([])
 
   useEffect(() => {
     if (!annotationDraftInput) return
     setNoteInput(annotationDraftInput)
+    setGuideDraftIntent(annotationDraftIntent?.kind === 'guide' ? annotationDraftIntent : null)
     setAnnotationDraftInput(null)
-  }, [annotationDraftInput, setAnnotationDraftInput])
+    setAnnotationDraftIntent(null)
+  }, [annotationDraftInput, annotationDraftIntent, setAnnotationDraftInput, setAnnotationDraftIntent])
 
   // Persona list for "召唤名家批注" entry — loaded alongside providers below.
   const [personaListAnno, setPersonaListAnno] = useState<Array<{ id: string; name: string; canonicalName?: string; currentFitnessTotal?: number }>>([])
@@ -941,8 +981,11 @@ export default function AnnotationPanel() {
   //   该 persona 的 system_prompt 多轮对话,不再"一选就 immediate generate"。null = 学徒模式。
   //   in-memory only(切文献 reset),不持久化:用户期望"召唤态"是当前阅读会话内的临时状态。
   const [activePersona, setActivePersona] = useState<{ id: string; name: string } | null>(null)
+  useEffect(() => {
+    if (guideDraftIntent) setActivePersona(null)
+  }, [guideDraftIntent])
   // 切换文献时退出召唤态(用户在新文献里通常想从学徒模式重新开始,而不是继承上篇的 persona)
-  useEffect(() => { setActivePersona(null) }, [currentEntry?.id])
+  useEffect(() => { setActivePersona(null); setGuideDraftIntent(null) }, [currentEntry?.id])
   // P0-2: popover 外层容器 ref — 用 document click 判断点击在容器外时关闭，替代仅靠再点按钮
   const summonPopoverRef = useRef<HTMLDivElement | null>(null)
   // P0-3: 召唤失败用 in-app toast 替代 alert()，5s 自消失
@@ -993,7 +1036,7 @@ export default function AnnotationPanel() {
       document.removeEventListener('keydown', onKey)
     }
   }, [personaPopoverOpen])
-  const [citingEntry, setCitingEntry] = useState<{ historyEntry: HistoryEntry; annotation: Annotation } | null>(null)
+  const [citingEntry, setCitingEntry] = useState<{ historyEntry: HistoryEntry; annotation: Annotation; anchorRect?: AnchorRect } | null>(null)
 
   // Instant feedback state
   const [feedbackText, setFeedbackText] = useState<string | null>(null)
@@ -1049,6 +1092,40 @@ export default function AnnotationPanel() {
       )
     : null
   const displayAnnotation = activeAnnotation || selectionAnnotation
+
+  // If the page/app refreshes during a streaming annotation answer, the
+  // persisted history entry can still say "running" while the in-memory stream
+  // job is gone. Convert those orphaned entries into an interrupted state so
+  // the UI never gets stuck with a dead spinner/Stop button.
+  useEffect(() => {
+    if (!currentEntry || !currentPdfMeta) return
+    const jobs = useAnnotationAiJobsStore.getState().jobs
+    const staleIds = new Set<string>()
+
+    for (const ann of currentPdfMeta.annotations) {
+      for (const h of ann.historyChain) {
+        const liveJob = jobs[jobKey(currentEntry.id, ann.id, h.id)]
+        if (isStaleRunningAiEntry(h, !!liveJob)) staleIds.add(`${ann.id}:${h.id}`)
+      }
+    }
+    if (staleIds.size === 0) return
+
+    void updatePdfMeta(meta => ({
+      ...meta,
+      annotations: meta.annotations.map(a => ({
+        ...a,
+        historyChain: a.historyChain.map(h => {
+          if (!staleIds.has(`${a.id}:${h.id}`)) return h
+          return {
+            ...h,
+            content: h.content || '（页面刷新后生成已中断，可重新提问继续。）',
+            aiStatus: 'aborted',
+            aiError: h.aiError || '页面刷新后生成已中断',
+          }
+        }),
+      })),
+    }))
+  }, [currentEntry?.id, currentPdfMeta?.annotations, updatePdfMeta])
 
   // When the user opens an annotation, mark any terminal-state AI entries
   // as viewed — this clears the list-item badge (✓ / !) so it doesn't nag
@@ -1610,8 +1687,126 @@ export default function AnnotationPanel() {
     })
   }, [displayAnnotation, textSelection, newContextText, aiModel, activeAnnotationId, currentPdfMeta, updatePdfMeta, setActiveAnnotation])
 
+  const handleGuidedReadingWithPrompt = useCallback(async (promptText: string) => {
+    const prompt = promptText.trim()
+    if (!prompt) return
+    if (!displayAnnotation && !textSelection) return
+
+    const selectedText = guideDraftIntent?.selectedText || displayAnnotation?.anchor.selectedText || textSelection?.text || ''
+    if (!selectedText.trim()) return
+
+    setAiLoading(true)
+    setStreamingText('')
+
+    const currentEntryId = useLibraryStore.getState().currentEntry?.id
+    if (!currentEntryId) { setAiLoading(false); return }
+
+    const historyEntryId = uuid()
+    const now = new Date().toISOString()
+    const placeholder: HistoryEntry = {
+      id: historyEntryId,
+      type: 'ai_guide',
+      content: '',
+      userQuery: '导读',
+      contextSent: selectedText,
+      author: 'ai',
+      modelLabel: getModelLabel(aiModel),
+      createdAt: now,
+      aiStatus: 'running',
+      ...(newContextText ? { contextText: newContextText } : {}),
+    }
+
+    const existingAnn = displayAnnotation || (textSelection
+      ? currentPdfMeta?.annotations.find(a =>
+          a.anchor.selectedText === textSelection.text ||
+          a.anchor.selectedText === selectedText ||
+          (a.anchor.pageNumber === textSelection.pageNumber &&
+           (a.anchor.selectedText.includes(textSelection.text) || textSelection.text.includes(a.anchor.selectedText)))
+        )
+      : null)
+
+    let targetAnnotationId: string
+    if (existingAnn) {
+      targetAnnotationId = existingAnn.id
+      await updatePdfMeta(meta => ({
+        ...meta,
+        annotations: meta.annotations.map(a =>
+          a.id === existingAnn.id
+            ? { ...a, historyChain: [...a.historyChain, placeholder], updatedAt: now }
+            : a
+        ),
+      }))
+      if (!activeAnnotationId) setActiveAnnotation(existingAnn.id)
+    } else if (textSelection) {
+      const newAnnotation: Annotation = {
+        id: uuid(),
+        anchor: {
+          pageNumber: textSelection.pageNumber,
+          startOffset: textSelection.startOffset,
+          endOffset: textSelection.endOffset,
+          selectedText,
+        },
+        historyChain: [placeholder],
+        style: { color: 'blue' },
+        createdAt: now,
+        updatedAt: now,
+      }
+      targetAnnotationId = newAnnotation.id
+      await updatePdfMeta(meta => ({
+        ...meta,
+        annotations: [...meta.annotations, newAnnotation],
+      }))
+      setActiveAnnotation(newAnnotation.id)
+    } else {
+      setAiLoading(false)
+      return
+    }
+
+    setNoteInput('')
+    setGuideDraftIntent(null)
+    setAiLoading(false)
+    setStreamingText('')
+
+    const entryTitle = useLibraryStore.getState().currentEntry?.title || '未知文献'
+    feedHermes(`在「${entryTitle}」中生成导读：${selectedText.slice(0, 50)}`)
+
+    const updateStore = useLibraryStore.getState()
+    useAnnotationAiJobsStore.getState().startJob({
+      entryId: currentEntryId,
+      annotationId: targetAnnotationId,
+      historyEntryId,
+      model: aiModel,
+      modelLabel: getModelLabel(aiModel),
+      messages: buildGuidedReadingMessages({
+        documentTitle: guideDraftIntent?.documentTitle || currentEntry?.title,
+        selectedText,
+        surroundingContext: guideDraftIntent?.surroundingContext,
+      }, prompt),
+      updater: async (eid, aid, hid, patch) => {
+        await updateStore.updatePdfMetaByEntryId(eid, (meta) => ({
+          ...meta,
+          annotations: meta.annotations.map(a =>
+            a.id === aid
+              ? {
+                  ...a,
+                  historyChain: a.historyChain.map(h =>
+                    h.id === hid ? { ...h, ...patch } : h
+                  ),
+                  updatedAt: new Date().toISOString(),
+                }
+              : a
+          ),
+        }))
+      },
+    })
+  }, [displayAnnotation, textSelection, guideDraftIntent, newContextText, aiModel, activeAnnotationId, currentPdfMeta, updatePdfMeta, setActiveAnnotation, currentEntry?.title])
+
   // Convenience wrapper
   const handleAskQuestion = useCallback(() => {
+    if (guideDraftIntent) {
+      void handleGuidedReadingWithPrompt(noteInput)
+      return
+    }
     // UX-R8#26 · 召唤态分流:有 activePersona → 走 persona 路径(handleSummonAnnotate
     //   会用 noteInput 作为用户追问,持续粘性);否则学徒路径(handleAskQuestionWithText)。
     if (activePersona) {
@@ -1619,7 +1814,7 @@ export default function AnnotationPanel() {
       return
     }
     handleAskQuestionWithText(noteInput)
-  }, [noteInput, handleAskQuestionWithText, activePersona])
+  }, [noteInput, handleAskQuestionWithText, activePersona, guideDraftIntent, handleGuidedReadingWithPrompt])
 
   // Summon-mode annotate — call a distilled persona's skill as system prompt
   // and ask it to annotate the currently selected text. Result becomes an
@@ -1776,6 +1971,141 @@ export default function AnnotationPanel() {
     }
   }, [displayAnnotation, textSelection, noteInput, aiModel, currentPdfMeta, activeAnnotationId, updatePdfMeta, setActiveAnnotation])
 
+  const handleRegenerate = useCallback(async (entry: HistoryEntry, feedback: string) => {
+    if (!displayAnnotation || !currentEntry?.id || entry.author !== 'ai') return
+
+    try {
+      const annotation = displayAnnotation
+      const anchorText = entry.contextSent || entry.contextText || annotation.anchor.selectedText || ''
+      const priorAnswer = entry.content || '（原回答为空或已中断）'
+      const siblingContext = annotation.historyChain
+        .filter(h => h.id !== entry.id)
+        .slice(-8)
+        .map(h => {
+          const role = h.author === 'user' ? '用户' : 'AI'
+          const q = h.userQuery ? ` 问：${h.userQuery}` : ''
+          return `- ${role}${q}: ${h.content.slice(0, 260)}`
+        })
+        .join('\n')
+      const crossDocContext = otherEntryAnnotations
+        .slice(0, 6)
+        .map(other => {
+          const snippets = other.annotations
+            .slice(0, 3)
+            .map(ann => `  - 「${ann.anchor.selectedText.slice(0, 80)}」`)
+            .join('\n')
+          return `《${other.entryTitle}》\n${snippets}`
+        })
+        .join('\n\n')
+
+      const taskByType: Record<HistoryEntry['type'], string> = {
+        note: '',
+        question: '',
+        stance: '',
+        link: '',
+        ai_interpretation: '重新解释这段文献文本。',
+        ai_qa: `重新回答用户的问题：${entry.userQuery || '请围绕这段文本作答。'}`,
+        ai_feedback: '重新生成一段即时反馈。',
+        ai_persona: `以 ${entry.personaName || '被召唤人物'} 的视角重新生成批注。`,
+        ai_guide: '重新生成这段文本的导读。',
+      }
+
+      const regenerationRequest = `这是一次“重新生成”。旧版本会被替换，请只输出新版正文，不要解释你如何修改。
+
+文献：${currentEntry.title || '未知文献'}
+
+注释锚点：
+${anchorText}
+
+${siblingContext ? `同一注释链中的其他内容：\n${siblingContext}\n\n` : ''}${crossDocContext ? `可参考的其他文献注释片段：\n${crossDocContext}\n\n` : ''}原版本（仅供参考，新版本不要照抄）：
+${priorAnswer}
+
+用户对新版的要求：
+${feedback || '没有额外要求，请生成一版更清晰、完整、可读的版本。'}
+
+任务：${taskByType[entry.type] || '重新生成这个 AI 注释块。'}`
+
+      let messages: Array<{ role: string; content: string }>
+      if (entry.type === 'ai_persona' && entry.personaId && window.electronAPI?.personaGetSystemPrompt) {
+        const sysRes = await window.electronAPI.personaGetSystemPrompt(entry.personaId, [feedback, anchorText].filter(Boolean).join('\n'))
+        if (!sysRes?.success || !sysRes.systemPrompt) throw new Error(sysRes?.error || '无法加载人物 skill')
+        messages = [
+          { role: 'system', content: `${sysRes.systemPrompt}\n\n你正在重新生成一个已有批注块。保留人物声音，但必须回应用户这次的修改要求，只输出新版正文。` },
+          { role: 'user', content: regenerationRequest },
+        ]
+      } else {
+        messages = [
+          {
+            role: 'system',
+            content: '你是拾卷的学术阅读助手。你正在重新生成一个已有注释 AI 块。目标是替换旧版本：保持同一个块的用途，结合用户反馈给出一版更好的正文。不要输出寒暄、标题外壳或修改说明。',
+          },
+          { role: 'user', content: regenerationRequest },
+        ]
+      }
+
+      const now = new Date().toISOString()
+      await updatePdfMeta(meta => ({
+        ...meta,
+        annotations: meta.annotations.map(a =>
+          a.id === annotation.id
+            ? {
+                ...a,
+                historyChain: a.historyChain.map(h =>
+                  h.id === entry.id
+                    ? {
+                        ...h,
+                        content: '',
+                        aiStatus: 'running',
+                        aiError: undefined,
+                        aiViewed: false,
+                        incomplete: undefined,
+                        editedAt: undefined,
+                        modelLabel: getModelLabel(aiModel),
+                      }
+                    : h
+                ),
+                updatedAt: now,
+              }
+            : a
+        ),
+      }))
+
+      const updateStore = useLibraryStore.getState()
+      void useAnnotationAiJobsStore.getState().startJob({
+        entryId: currentEntry.id,
+        annotationId: annotation.id,
+        historyEntryId: entry.id,
+        model: aiModel,
+        modelLabel: getModelLabel(aiModel),
+        messages,
+        updater: async (eid, aid, hid, patch) => {
+          await updateStore.updatePdfMetaByEntryId(eid, (meta) => ({
+            ...meta,
+            annotations: meta.annotations.map(a =>
+              a.id === aid
+                ? {
+                    ...a,
+                    historyChain: a.historyChain.map(h =>
+                      h.id === hid ? { ...h, ...patch } : h
+                    ),
+                    updatedAt: new Date().toISOString(),
+                  }
+                : a
+            ),
+          }))
+        },
+      })
+    } catch (err: any) {
+      const h = humanizeAiError(err)
+      if (!h.silent) {
+        setSummonErr({
+          message: h.hint ? `重新生成失败：${h.message}，${h.hint}` : `重新生成失败：${h.message}`,
+          ctaSettings: h.ctaSettings,
+        })
+      }
+    }
+  }, [displayAnnotation, currentEntry?.id, currentEntry?.title, otherEntryAnnotations, updatePdfMeta, aiModel])
+
   // ===== Edit / Delete =====
   const handleEdit = useCallback(async (entryId: string, newContent: string) => {
     if (!displayAnnotation) return
@@ -1829,36 +2159,14 @@ export default function AnnotationPanel() {
 
   // 2026-04-25 PERF · onCite 用 useCallback 稳定，让 HistoryEntryItem 的 props
   // 引用稳定（之前 inline arrow 每次 render 新引用，memo 失效）
-  const handleCite = useCallback((he: HistoryEntry) => {
-    if (displayAnnotation) setCitingEntry({ historyEntry: he, annotation: displayAnnotation })
+  const handleCite = useCallback((he: HistoryEntry, anchorRect?: AnchorRect) => {
+    if (displayAnnotation) setCitingEntry({ historyEntry: he, annotation: displayAnnotation, anchorRect })
   }, [displayAnnotation])
 
   // ===== Annotation list helper =====
   const renderAnnotationItem = (ann: Annotation, onClick: () => void, sourceLabel?: string, entryId?: string, entryTitle?: string) => {
     const lastEntry = ann.historyChain[ann.historyChain.length - 1]
     const display = lastEntry ? getTypeDisplay(lastEntry.type) : null
-    // Aggregate AI-job status for this annotation: any running job wins;
-    // else show failed (unviewed); else completed (unviewed); else nothing.
-    // Runtime store status takes precedence over persisted entry.aiStatus
-    // (store may be slightly ahead of the debounced disk write).
-    const docIdForBadge = entryId || currentEntry?.id
-    let badgeState: 'running' | 'completed' | 'failed' | null = null
-    if (docIdForBadge) {
-      for (const h of ann.historyChain) {
-        if (h.author !== 'ai') continue
-        const k = jobKey(docIdForBadge, ann.id, h.id)
-        const st = aiJobs[k]?.status ?? h.aiStatus
-        if (st === 'running') { badgeState = 'running'; break }
-      }
-      if (!badgeState) {
-        for (const h of ann.historyChain) {
-          if (h.author !== 'ai') continue
-          const st = h.aiStatus
-          if (st === 'failed' && !h.aiViewed) { badgeState = 'failed'; break }
-          if (st === 'completed' && !h.aiViewed && badgeState !== 'failed') badgeState = 'completed'
-        }
-      }
-    }
     return (
       <div
         key={ann.id}
@@ -1893,45 +2201,7 @@ export default function AnnotationPanel() {
               {sourceLabel}
             </div>
           )}
-          <div style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 28, display: 'flex', alignItems: 'center', gap: 7 }}>
-            {badgeState === 'running' && (
-              <span title="AI 正在生成回答" style={{
-                flexShrink: 0, width: 14, height: 14, borderRadius: '50%',
-                background: 'rgba(200,149,108,0.14)', border: '1px solid rgba(200,149,108,0.5)',
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                animation: 'annList-running-pulse 1.8s ease-in-out infinite',
-              }}>
-                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="var(--accent)"
-                  strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
-                  style={{ animation: 'annList-spin 1.2s linear infinite', transformOrigin: 'center' }}>
-                  <path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-                </svg>
-              </span>
-            )}
-            {badgeState === 'completed' && (
-              <span title="AI 已完成（点击查看后隐藏）" style={{
-                flexShrink: 0, width: 14, height: 14, borderRadius: '50%',
-                background: 'rgba(139,177,116,0.14)', border: '1px solid rgba(139,177,116,0.5)',
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              }}>
-                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="var(--success)"
-                  strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="4 12 10 18 20 6"/>
-                </svg>
-              </span>
-            )}
-            {badgeState === 'failed' && (
-              <span title="AI 回答失败（点击查看后隐藏）" style={{
-                flexShrink: 0, width: 14, height: 14, borderRadius: '50%',
-                background: 'rgba(201,112,112,0.14)', border: '1px solid rgba(201,112,112,0.5)',
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              }}>
-                <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="#C97070"
-                  strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
-                </svg>
-              </span>
-            )}
+          <div style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 28, display: 'flex', alignItems: 'center' }}>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
               「{ann.anchor.selectedText.substring(0, 40)}{ann.anchor.selectedText.length > 40 ? '...' : ''}」
             </span>
@@ -1940,17 +2210,6 @@ export default function AnnotationPanel() {
             p.{ann.anchor.pageNumber} · {ann.historyChain.length} 条记录
           </div>
         </div>
-        <style>{`
-          @keyframes annList-running-pulse {
-            0%   { box-shadow: 0 0 0 0 rgba(200,149,108,0.35); }
-            70%  { box-shadow: 0 0 0 4px rgba(200,149,108,0); }
-            100% { box-shadow: 0 0 0 0 rgba(200,149,108,0); }
-          }
-          @keyframes annList-spin {
-            from { transform: rotate(0deg); }
-            to   { transform: rotate(360deg); }
-          }
-        `}</style>
         {/* Delete button only for current entry's annotations */}
         {!sourceLabel && (
           <div className="annotation-list-actions" style={{
@@ -2125,6 +2384,7 @@ export default function AnnotationPanel() {
           onEdit={handleEdit}
           onDelete={handleDelete}
           onCite={displayAnnotation ? handleCite : undefined}
+          onRegenerate={displayAnnotation ? handleRegenerate : undefined}
           entryDocId={currentEntry?.id}
           annotationId={displayAnnotation?.id}
         />
@@ -2138,6 +2398,7 @@ export default function AnnotationPanel() {
             annotation={citingEntry.annotation}
             entryId={currentEntry?.id || ''}
             entryTitle={currentEntry?.title || ''}
+            anchorRect={citingEntry.anchorRect}
             onDone={() => setCitingEntry(null)}
           />
         </div>
@@ -2251,18 +2512,33 @@ export default function AnnotationPanel() {
       {/* Ghost Reader suggestion */}
       <GhostReaderCard suggestion={ghostSuggestion} onDismiss={() => setGhostSuggestion(null)} />
 
-      {/* Concept tracker — detect cross-document concepts */}
-      <ConceptTracker
-        currentEntryId={currentEntry?.id}
-        currentText={displayAnnotation?.anchor.selectedText || textSelection?.text}
-        otherEntryAnnotations={otherEntryAnnotations}
-      />
-
       {/* Hermes contextual hint */}
       <HermesHint selectedText={displayAnnotation?.anchor.selectedText || textSelection?.text} currentTitle={currentEntry?.title} />
 
       {/* Unified input area */}
       <div className="ai-chat-input">
+        {guideDraftIntent && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '6px 10px', marginBottom: 6,
+            background: 'rgba(91, 142, 130, 0.12)',
+            border: '1px solid rgba(91, 142, 130, 0.35)',
+            borderRadius: 6, fontSize: 11.5, color: 'var(--text-secondary)',
+          }}>
+            <span style={{ flex: 1 }}>
+              导读草稿已填入，可修改 prompt、选择模型后生成
+            </span>
+            <button
+              onClick={() => setGuideDraftIntent(null)}
+              title="退出导读草稿模式"
+              style={{
+                fontSize: 11, padding: '3px 8px', border: '1px solid var(--border)',
+                background: 'transparent', borderRadius: 4, cursor: 'pointer',
+                color: 'var(--text-muted)',
+              }}
+            >取消</button>
+          </div>
+        )}
         {/* UX-R8#26 · 召唤态指示条:有 activePersona 时显示当前由谁答 + 退出按钮。
              位置在 textarea 之上让用户写问题前一眼看清"现在是 X 模式"。 */}
         {activePersona && (
@@ -2290,7 +2566,9 @@ export default function AnnotationPanel() {
         )}
         <textarea
           placeholder={
-            activePersona
+            guideDraftIntent
+              ? '调整导读 prompt 后点击「生成导读」...'
+              : activePersona
               ? `想问 ${activePersona.name} 什么？(留空也可,直接发送让其自行批注)`
               : (hasNewContext ? '针对补充选中的文本写下想法...' : '写下想法 / 向 AI 提要求...')
           }
@@ -2333,7 +2611,7 @@ export default function AnnotationPanel() {
               disabled={aiLoading || (!activePersona && !noteInput.trim())}
               style={{ fontSize: 12, padding: '6px 14px', whiteSpace: 'nowrap', flexShrink: 0 }}
             >
-              {aiLoading ? '...' : (activePersona ? `问 ${activePersona.name}` : '发送 AI')}
+              {aiLoading ? '...' : (guideDraftIntent ? '生成导读' : activePersona ? `问 ${activePersona.name}` : '发送 AI')}
             </button>
             {/* 召唤名家在批注旁留言——2026-04 放开。
                 点按钮 → 弹出 persona popover → 选一位 → handleSummonAnnotate。
@@ -2343,7 +2621,7 @@ export default function AnnotationPanel() {
               <button
                 className="btn btn-sm"
                 // P1-8: 空态不再 disabled —— click 打开空态 popover 引导用户去导入
-                disabled={aiLoading}
+                disabled={aiLoading || !!guideDraftIntent}
                 onClick={() => setPersonaPopoverOpen(v => !v)}
                 title={personaListAnno.length === 0
                   ? '还没导入思想家，点击查看'
@@ -2351,7 +2629,7 @@ export default function AnnotationPanel() {
                 style={{
                   fontSize: 12, padding: '6px 10px',
                   opacity: personaListAnno.length === 0 ? 0.7 : 1,
-                  cursor: aiLoading ? 'not-allowed' : 'pointer',
+                  cursor: (aiLoading || guideDraftIntent) ? 'not-allowed' : 'pointer',
                   display: 'inline-flex', alignItems: 'center', gap: 4,
                   whiteSpace: 'nowrap', flexShrink: 0,
                   // P1-1: 启用时图标用 accent 色（暖金星星），跟 AgentPanel 召唤 tab 视觉一致
@@ -2428,7 +2706,7 @@ export default function AnnotationPanel() {
               )}
             </div>
           </div>
-          <button className="btn btn-sm btn-primary" onClick={handleAddNote} disabled={!noteInput.trim() || (!displayAnnotation && !textSelection)}
+          <button className="btn btn-sm btn-primary" onClick={handleAddNote} disabled={!!guideDraftIntent || !noteInput.trim() || (!displayAnnotation && !textSelection)}
             title="保存笔记（Ctrl+Enter）"
             style={{ fontSize: 12, padding: '6px 14px', whiteSpace: 'nowrap', flexShrink: 0 }}>
             保存笔记

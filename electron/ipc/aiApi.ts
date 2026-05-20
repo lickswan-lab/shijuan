@@ -141,6 +141,8 @@ const PROVIDERS: AiProvider[] = [
       { id: 'glm-5.1', name: 'GLM-5.1（旗舰）' },
       { id: 'glm-5', name: 'GLM-5' },
       { id: 'glm-5-turbo', name: 'GLM-5-Turbo（Agent）' },
+      { id: 'glm-4.7', name: 'GLM-4.7' },
+      { id: 'glm-4.7-flashx', name: 'GLM-4.7-FlashX（高速）' },
       { id: 'glm-4.7-flash', name: 'GLM-4.7-Flash（免费）' },
       { id: 'glm-4-flash', name: 'GLM-4-Flash' },
     ],
@@ -171,10 +173,11 @@ const PROVIDERS: AiProvider[] = [
     chatUrl: 'https://api.openai.com/v1/chat/completions',
     models: [
       { id: 'gpt-5.5', name: 'GPT-5.5（最新 · 旗舰）' },
-      { id: 'gpt-5.5-mini', name: 'GPT-5.5 Mini' },
-      { id: 'gpt-5.5-nano', name: 'GPT-5.5 Nano（快速）' },
+      { id: 'gpt-5.5-pro', name: 'GPT-5.5 Pro（最强 · 慢）' },
       { id: 'gpt-5.4', name: 'GPT-5.4' },
+      { id: 'gpt-5.4-pro', name: 'GPT-5.4 Pro（慢）' },
       { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini' },
+      { id: 'gpt-5.4-nano', name: 'GPT-5.4 Nano（快速）' },
       { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex（编程）' },
     ],
     authHeader: (key) => ({ 'Authorization': `Bearer ${key}` }),
@@ -186,11 +189,10 @@ const PROVIDERS: AiProvider[] = [
     name: 'Claude',
     chatUrl: 'https://api.anthropic.com/v1/messages',
     models: [
-      // 2026-04-27 Batch 43 · Anthropic 官方 model id 不带日期后缀（按 platform.claude.com 文档）
       { id: 'claude-opus-4-7', name: 'Claude Opus 4.7（最新 · 最强）' },
       { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
       { id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
-      { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5（快速）' },
+      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5（快速）' },
     ],
     authHeader: (key) => ({ 'x-api-key': key, 'anthropic-version': '2023-06-01' }),
     apiKeyUrl: 'https://console.anthropic.com/settings/keys',
@@ -202,8 +204,9 @@ const PROVIDERS: AiProvider[] = [
     chatUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
     models: [
       { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro（旗舰）' },
-      { id: 'gemini-3-flash', name: 'Gemini 3 Flash' },
+      { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash（稳定）' },
       { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash-Lite（快速）' },
+      { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash（预览）' },
     ],
     authHeader: (key) => ({ 'Authorization': `Bearer ${key}` }),
     apiKeyUrl: 'https://aistudio.google.com/app/apikey',
@@ -249,6 +252,8 @@ const PROVIDERS: AiProvider[] = [
       // 官方文档：https://www.volcengine.com/docs/82379
       // 也可用 endpoint id（ep-xxxxxxxxxxxx）—— 用户在控制台创建 inference endpoint 后填进去
       { id: 'doubao-seed-2-0-pro-260215', name: '豆包 Seed 2.0 Pro（旗舰 · 256K）' },
+      { id: 'doubao-seed-2-0-lite-260215', name: '豆包 Seed 2.0 Lite（均衡）' },
+      { id: 'doubao-seed-2-0-mini-260215', name: '豆包 Seed 2.0 Mini（快速）' },
       { id: 'doubao-seed-code-preview-251028', name: '豆包 Seed Code（编程）' },
       { id: 'doubao-seed-1-8-251228', name: '豆包 Seed 1.8（多模态）' },
     ],
@@ -319,24 +324,31 @@ const PROVIDERS: AiProvider[] = [
 // 老用户重启后仍持着失效字符串发请求 → API 端 400 Model Not Exist。
 // 这里在调用前做一次 normalize，把已知废弃的 id 映射到现行替代，并打日志。
 const DEPRECATED_MODEL_MAP: Record<string, Record<string, string>> = {
+  openai: {
+    'gpt-5.5-mini': 'gpt-5.4-mini',
+    'gpt-5.5-nano': 'gpt-5.4-nano',
+  },
   deepseek: {
-    'deepseek-v4': 'deepseek-v4-pro',  // 用户曾选过的虚构 id（v4 不存在），强制映射到 v4-pro
+    'deepseek-v4': 'deepseek-v4-pro',  // 旧的泛称 id 缺少官方 Pro/Flash 后缀，映射到旗舰版
     // deepseek-chat / deepseek-reasoner 保留为合法选项（V3.2 / R1）：
     // 官方 2026-07-24 才弃用，UI 显式列出，**不在此映射**
   },
   claude: {
-    // 旧的带日期 id 全部归一化到不带日期
     'claude-opus-4-7-20260301': 'claude-opus-4-7',
     'claude-sonnet-4-7-20260301': 'claude-sonnet-4-6', // 4.7 sonnet 不存在，回退到 4.6
     'claude-opus-4-6-20250414': 'claude-opus-4-6',
     'claude-sonnet-4-6-20250414': 'claude-sonnet-4-6',
-    'claude-haiku-4-5-20241022': 'claude-haiku-4-5',
+    'claude-haiku-4-5': 'claude-haiku-4-5-20251001',
+    'claude-haiku-4-5-20241022': 'claude-haiku-4-5-20251001',
+  },
+  gemini: {
+    'gemini-3-flash': 'gemini-3.5-flash',
   },
   doubao: {
     'doubao-seed-2-pro-32k': 'doubao-seed-2-0-pro-260215',
     'doubao-seed-2-code-32k': 'doubao-seed-code-preview-251028',
-    'doubao-seed-2-lite-32k': 'doubao-seed-2-0-pro-260215',
-    'doubao-seed-2-mini-32k': 'doubao-seed-2-0-pro-260215',
+    'doubao-seed-2-lite-32k': 'doubao-seed-2-0-lite-260215',
+    'doubao-seed-2-mini-32k': 'doubao-seed-2-0-mini-260215',
     'doubao-seed-1-6-vision': 'doubao-seed-1-8-251228',
   },
 }
@@ -350,6 +362,42 @@ function normalizeModelId(providerId: string, modelId: string): string {
     return renamed
   }
   return modelId
+}
+
+function isNonStreamingOnlyModel(providerId: string, modelId: string): boolean {
+  const m = modelId.toLowerCase()
+  return providerId === 'openai' && (
+    m === 'gpt-5.5-pro' || m.startsWith('gpt-5.5-pro-') ||
+    m === 'gpt-5.4-pro' || m.startsWith('gpt-5.4-pro-')
+  )
+}
+
+function contentToText(content: any): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map((part) => {
+    if (typeof part === 'string') return part
+    if (typeof part?.text === 'string') return part.text
+    if (typeof part?.content === 'string') return part.content
+    return ''
+  }).join('')
+}
+
+function extractChatMessageText(data: any): string {
+  return contentToText(data?.choices?.[0]?.message?.content)
+}
+
+function extractChatDeltaText(data: any): string {
+  return contentToText(data?.choices?.[0]?.delta?.content)
+}
+
+function extractClaudeMessageText(data: any): string {
+  const blocks = data?.content
+  if (!Array.isArray(blocks)) return ''
+  return blocks
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('')
 }
 
 // 2026-04-27 Batch 43 · Effort（思考强度）支持
@@ -366,18 +414,17 @@ function normalizeModelId(providerId: string, modelId: string): string {
 //     旧 `budget_tokens` 在 4.6 deprecated 仍可用，4.7 不能用
 //
 //   Gemini 3.x（OpenAI-compat 端点）
-//     顶层：`extra_body: { thinking_config: { thinking_level: 'LOW'|'MEDIUM'|'HIGH' } }`
-//     （旧 thinking_budget 数字仍可用作向后兼容）
+//     顶层：`reasoning_effort: 'low'|'medium'|'high'`
 //
 //   DeepSeek V4-Pro / V4-Flash
-//     顶层 `reasoning_effort: 'high'|'max'` + `extra_body: { thinking: { type: 'enabled' } }`
+//     顶层 `reasoning_effort: 'high'|'max'` + `thinking: { type: 'enabled' }`
 //     （low/medium 会被自动映射到 high，所以 UI 选 low 实际仍是高思考）
 //
 //   通义 Qwen3-Max-Preview
-//     顶层 `extra_body: { enable_thinking: true }` + 思考内容通过 reasoning_content 返回
+//     顶层 `enable_thinking: true` + 思考内容通过 reasoning_content 返回
 //
-//   GLM 5 / Kimi K2.6
-//     顶层 `thinking: { type: 'enabled' }`（GLM）/ `enable_thinking: true`（Kimi）
+//   GLM 5/4.7 / Kimi K2.6/K2.5
+//     顶层 `thinking: { type: 'enabled' | 'disabled' }`
 //     —— 这俩是布尔开关而非 effort 档位；high → 开，low/medium → 关
 //
 // UI 抽象成 'low' | 'medium' | 'high' 三档；不支持的 provider/model 直接忽略 effort（无副作用）。
@@ -390,13 +437,13 @@ export function modelSupportsEffort(providerId: string, modelId: string): boolea
   if (providerId === 'openai') {
     return m.startsWith('o') || m.includes('gpt-5')
   }
-  // Claude: Opus 4.6 / 4.7 + Sonnet 4.6 / 4.7 支持 adaptive thinking + effort
-  // Haiku 4.5 等更早型号不支持
+  // Claude: 这里只返回支持 adaptive thinking + output_config.effort 的模型。
+  // Haiku 4.5 支持 extended thinking，但不是 adaptive，先不把 UI effort 映射过去。
   if (providerId === 'claude') {
     return m.includes('opus-4-7') || m.includes('opus-4-6')
         || m.includes('sonnet-4-7') || m.includes('sonnet-4-6')
   }
-  // Gemini 3 / 2.5 系列支持 thinking_level
+  // Gemini 3 / 2.5 系列通过 OpenAI-compatible reasoning_effort 控制思考强度
   if (providerId === 'gemini') {
     return m.includes('gemini-3') || m.includes('gemini-2.5')
   }
@@ -404,28 +451,23 @@ export function modelSupportsEffort(providerId: string, modelId: string): boolea
   if (providerId === 'deepseek') {
     return m.includes('v4') || m.includes('reasoner') || m.includes('-r1')
   }
-  // Qwen Max-Preview 系列支持 enable_thinking
+  // Qwen3 系列支持 enable_thinking；非 Qwen3 长文档/旧 VL 模型先不强行注入。
   if (providerId === 'qwen') {
-    return m.includes('max') || m.includes('thinking')
+    return m.startsWith('qwen3') || m.includes('thinking')
   }
   // Tencent TokenHub exposes Hunyuan thinking controls through OpenAI-compatible
-  // reasoning_effort / thinking fields on Hy3 and HY 2.0 Think.
+  // reasoning_effort on Hy3 and HY 2.0 Think.
   if (providerId === 'hunyuan') {
     return m.includes('hy3') || m.includes('thinking')
   }
-  // GLM-5 / Kimi K2.6 可开 thinking 但只是布尔开关，UI 上把 effort=high 视为"开"
+  // GLM-5 / GLM-4.7 / Kimi K2.6/K2.5 可开 thinking 但只是布尔开关，UI 上把 effort=high 视为"开"
   if (providerId === 'glm') {
-    return m.includes('glm-5')
+    return m.includes('glm-5') || m.includes('glm-4.7')
   }
   if (providerId === 'kimi') {
-    return m.includes('k2')
+    return m === 'kimi-k2.6' || m === 'kimi-k2.5'
   }
   return false
-}
-
-// 映射 UI 三档 → Gemini 大写枚举
-function effortToGeminiLevel(effort: EffortLevel): 'LOW' | 'MEDIUM' | 'HIGH' {
-  return effort.toUpperCase() as 'LOW' | 'MEDIUM' | 'HIGH'
 }
 
 // Inject effort field into the request body in-place.
@@ -434,7 +476,7 @@ function effortToGeminiLevel(effort: EffortLevel): 'LOW' | 'MEDIUM' | 'HIGH' {
 // Claude 的 effort 注入在 callClaudeStream / callClaude 内部按 adaptive 模板做。
 //
 // Batch 43 · hasWebSearch 入参用于检测 thinking + web_search 冲突。
-// Kimi K2.6 的 $web_search builtin function **与 thinking 模式不兼容**——
+// Kimi K2.6/K2.5 的 $web_search builtin function **与 thinking 模式不兼容**——
 // 同时开会 400/失败。其他 provider 暂未发现此类冲突，但保留参数以备未来扩展。
 function injectEffort(body: any, providerId: string, modelId: string, effort?: EffortLevel, hasWebSearch?: boolean) {
   if (!effort) return
@@ -442,18 +484,13 @@ function injectEffort(body: any, providerId: string, modelId: string, effort?: E
   if (providerId === 'openai') {
     body.reasoning_effort = effort
   } else if (providerId === 'gemini') {
-    body.extra_body = body.extra_body || {}
-    body.extra_body.thinking_config = { thinking_level: effortToGeminiLevel(effort) }
+    body.reasoning_effort = effort
   } else if (providerId === 'deepseek') {
-    // DeepSeek V4 官方 OpenAI 格式：顶层 reasoning_effort + extra_body.thinking
-    body.reasoning_effort = effort === 'high' ? 'high' : (effort === 'medium' ? 'high' : 'high')
-    // ↑ 实际 DeepSeek 只承认 'high' / 'max'，low/medium 自动映射 high；
-    //   显式映射避免 API 端隐含行为
-    body.extra_body = body.extra_body || {}
-    body.extra_body.thinking = { type: 'enabled' }
+    // DeepSeek V4 官方 OpenAI 格式：顶层 reasoning_effort + thinking。
+    body.reasoning_effort = 'high'
+    body.thinking = { type: 'enabled' }
   } else if (providerId === 'qwen') {
-    body.extra_body = body.extra_body || {}
-    body.extra_body.enable_thinking = effort === 'high' || effort === 'medium'
+    body.enable_thinking = effort === 'high' || effort === 'medium'
   } else if (providerId === 'hunyuan') {
     // BUG-FIX R8#23 · 腾讯混元 TokenHub 是 OpenAI 兼容接口,thinking 控制只确定接受
     //   顶级 reasoning_effort(OpenAI 标准字段)。原代码同时塞了 body.thinking =
@@ -465,16 +502,16 @@ function injectEffort(body: any, providerId: string, modelId: string, effort?: E
     //   再补(常见候选:extra_body.enable_thinking 同 Qwen / chat_options.thinking)。
     body.reasoning_effort = effort
   } else if (providerId === 'glm') {
-    // GLM-5 thinking 是布尔开关：high → 开，low/medium → 关
-    if (effort === 'high') body.thinking = { type: 'enabled' }
+    // GLM thinking 是布尔开关：high → 开，low/medium → 关。
+    body.thinking = { type: effort === 'high' ? 'enabled' : 'disabled' }
   } else if (providerId === 'kimi') {
-    // Kimi K2.6: $web_search builtin function 与 thinking 不兼容（官方文档明确）。
+    // Kimi K2.6/K2.5: $web_search builtin function 与 thinking 不兼容（官方文档明确）。
     // 用户两个都想要时，**webSearch 优先**，强制关 thinking 避免 API 报错。
     if (hasWebSearch) {
-      body.enable_thinking = false
+      body.thinking = { type: 'disabled' }
       console.log('[aiApi] Kimi web_search 与 thinking 不兼容，本次请求禁用 thinking')
     } else {
-      body.enable_thinking = effort === 'high'
+      body.thinking = { type: effort === 'high' ? 'enabled' : 'disabled' }
     }
   }
 }
@@ -735,7 +772,7 @@ export async function callChat(
     }
 
     const data = await response.json()
-    return data.choices?.[0]?.message?.content || ''
+    return extractChatMessageText(data)
   }, { priority: opts?.priority, label: `callChat:${providerId}` })
 }
 
@@ -779,7 +816,7 @@ async function callClaude(key: string, model: string, messages: Array<{ role: st
   }
 
   const data = await response.json()
-  return data.content?.[0]?.text || ''
+  return extractClaudeMessageText(data)
 }
 
 // ===== Streaming Chat =====
@@ -844,6 +881,34 @@ export async function callChatStream(
     if (webSearch && isManualFunctionCallingProvider(providerId)) {
       return callWithManualSearchLoop(provider, key, model, messages, onChunk, signal)
     }
+
+    if (isNonStreamingOnlyModel(providerId, model)) {
+      const body: any = { model, messages, max_tokens: 16384 }
+      injectEffort(body, providerId, model, opts?.effort)
+      const response = await fetch(provider.chatUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...provider.authHeader(key),
+        },
+        body: JSON.stringify(body),
+        signal,
+      })
+
+      if (!response.ok) {
+        const text = await response.text()
+        if (isRateLimitError(`${response.status} ${text}`)) {
+          bumpProviderInterval(providerId, parseRetryAfterHeader(response.headers))
+        }
+        throw new Error(`${provider.name} API error ${response.status}: ${text.substring(0, 200)}`)
+      }
+
+      const data = await response.json()
+      const text = extractChatMessageText(data)
+      if (text) onChunk(text)
+      return text
+    }
+
     let tools: any[] | undefined
     if (webSearch) {
       if (providerHasNativeWebSearch(providerId)) {
@@ -888,7 +953,7 @@ export async function callChatStream(
     }
 
     return parseSSEStream(response, onChunk, (data) => {
-      return data.choices?.[0]?.delta?.content || ''
+      return extractChatDeltaText(data)
     })
   }, { priority, label: `callChatStream:${providerId}` })
 }
@@ -1194,7 +1259,7 @@ async function callWithManualSearchLoop(
     }
 
     // 路径 2：DSML 协议（DeepSeek V4 偏好）—— content 里 <｜DSML｜tool_calls> 块
-    const contentStr = typeof msg?.content === 'string' ? msg.content : ''
+    const contentStr = contentToText(msg?.content)
     if (toolCalls.length === 0 && contentStr) {
       const { invocations, cleanedText } = parseDsmlToolCalls(contentStr)
       if (invocations.length > 0) {
@@ -1233,7 +1298,8 @@ async function callWithManualSearchLoop(
   }
 
   // After loop: stream the final answer (no more tools)
-  const finalBody: any = { model, messages: conversation, stream: true, max_tokens: 16384 }
+  const nonStreamingFinal = isNonStreamingOnlyModel(provider.id, model)
+  const finalBody: any = { model, messages: conversation, stream: !nonStreamingFinal, max_tokens: 16384 }
   if (isKimiWebSearch) {
     finalBody.thinking = { type: 'disabled' }
   }
@@ -1250,6 +1316,13 @@ async function callWithManualSearchLoop(
     }
     throw new Error(`${provider.name} API error ${finalRes.status}: ${t.substring(0, 200)}`)
   }
+  if (nonStreamingFinal) {
+    const data: any = await finalRes.json()
+    const text = extractChatMessageText(data)
+    if (text) onChunk(text)
+    return text
+  }
+
   // Batch 43 · 最终流式答复也可能包 DSML（V4 在生成最终 text 时也偶尔输出 DSML 标签
   // 作为格式残留）。用 wrapper 边流边过滤，把 DSML 标签从输出里抽掉。
   let dsmlBuffer = ''
@@ -1264,7 +1337,7 @@ async function callWithManualSearchLoop(
       onChunk(dsmlBuffer)
       dsmlBuffer = ''
     }
-  }, (data) => data.choices?.[0]?.delta?.content || '')
+  }, (data) => extractChatDeltaText(data))
     .then((full) => {
       // 流结束后清理 buffer 里残留的 DSML 标签
       if (dsmlBuffer) {

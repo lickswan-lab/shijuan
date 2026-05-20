@@ -162,7 +162,9 @@ export default function App() {
   const rightPanel = useUiStore(s => s.rightPanel)
   // 2026-04-28 CLEAN · immersiveMode + dualPageMode 已删(沉浸式阅读下线)
   const [dropActive, setDropActive] = useState(false)
+  const [dropImportStatus, setDropImportStatus] = useState<null | { phase: 'scanning' | 'importing'; detail: string }>(null)
   const dropCounter = useRef(0)  // track nested drag enter/leave
+  const dropImportingRef = useRef(false)
 
   useEffect(() => {
     if (!library || !currentEntryId) return
@@ -298,32 +300,36 @@ export default function App() {
     e.preventDefault()
     dropCounter.current = 0
     setDropActive(false)
+    if (dropImportingRef.current) return
 
     const files = e.dataTransfer.files
     if (!files || files.length === 0) return
+    dropImportingRef.current = true
+    setDropImportStatus({ phase: 'scanning', detail: '正在读取拖入的文件...' })
 
     // Get file paths using Electron's webUtils API (File.path is deprecated in Electron 28+)
     const rawPaths: string[] = []
-    for (let i = 0; i < files.length; i++) {
-      try {
-        const p = window.electronAPI.getPathForFile(files[i])
-        if (p) rawPaths.push(p)
-      } catch {
-        // Fallback: try legacy .path property
-        const p = (files[i] as any).path
-        if (p) rawPaths.push(p)
-      }
-    }
-
-    if (rawPaths.length === 0) return
-
     try {
+      for (let i = 0; i < files.length; i++) {
+        try {
+          const p = window.electronAPI.getPathForFile(files[i])
+          if (p) rawPaths.push(p)
+        } catch {
+          // Fallback: try legacy .path property
+          const p = (files[i] as any).path
+          if (p) rawPaths.push(p)
+        }
+      }
+
+      if (rawPaths.length === 0) return
+
       // Expand folders + filter supported types via main process
       const resolved = window.electronAPI?.scanDroppedPaths
         ? await window.electronAPI.scanDroppedPaths(rawPaths)
         : rawPaths.filter(p => /\.(pdf|docx?|epub|html?|txt|md)$/i.test(p))
 
       if (resolved.length > 0) {
+        setDropImportStatus({ phase: 'importing', detail: `正在导入 ${resolved.length} 个文件...` })
         const added = await importByPaths(resolved)
         if (added > 0) {
           // Switch to library tab to show imported files
@@ -332,6 +338,9 @@ export default function App() {
       }
     } catch (err) {
       console.error('[drag-drop] error:', err)
+    } finally {
+      dropImportingRef.current = false
+      setDropImportStatus(null)
     }
   }, [importByPaths])
 
@@ -498,13 +507,17 @@ export default function App() {
       onDrop={handleDrop}
     >
       {/* Drop overlay */}
-      {dropActive && (
+      {(dropActive || dropImportStatus) && (
         <div className="drop-overlay">
           <div className="drop-overlay-content">
+            {dropImportStatus ? (
+              <span className="loading-spinner" style={{ width: 34, height: 34, borderWidth: 3 }} />
+            ) : (
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
             </svg>
-            <span>松开以导入文献</span>
+            )}
+            <span>{dropImportStatus ? dropImportStatus.detail : '松开以导入文献'}</span>
             <span style={{ fontSize: 12, opacity: 0.6 }}>支持 PDF、DOCX、EPUB、HTML、TXT、Markdown</span>
           </div>
         </div>
