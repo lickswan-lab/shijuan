@@ -3970,19 +3970,43 @@ export default function PdfViewer() {
     try { localStorage.setItem(MARK_TYPE_STORAGE_KEY, type) } catch {}
   }, [])
 
-  const findRenderedMarkAtPoint = useCallback((x: number, y: number) => {
-    const els = Array.from(document.querySelectorAll('.ocr-mark[data-mark-id]')) as HTMLElement[]
-    for (let i = els.length - 1; i >= 0; i--) {
-      const el = els[i]
-      const rect = el.getBoundingClientRect()
-      if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) continue
-      const markId = el.dataset.markId
-      if (!markId) continue
-      const mark = currentPdfMeta?.marks?.find(m => m.id === markId)
-      if (mark) return mark
-    }
-    return null
+  const getMarkById = useCallback((markId?: string | null) => {
+    if (!markId) return null
+    return currentPdfMeta?.marks?.find(m => m.id === markId) || null
   }, [currentPdfMeta?.marks])
+
+  const getMarkFromEventTarget = useCallback((target: EventTarget | null) => {
+    if (!(target instanceof Element)) return null
+    const el = target.closest('.ocr-mark[data-mark-id]') as HTMLElement | null
+    return getMarkById(el?.dataset.markId)
+  }, [getMarkById])
+
+  const findRenderedMarkAtPoint = useCallback((x: number, y: number, root?: ParentNode | null) => {
+    const scope = root || document
+    const els = Array.from(scope.querySelectorAll('.ocr-mark[data-mark-id]')) as HTMLElement[]
+    let best: { mark: import('../../types/library').TextMark; score: number; index: number } | null = null
+
+    for (let i = 0; i < els.length; i++) {
+      const el = els[i]
+      const mark = getMarkById(el.dataset.markId)
+      if (!mark) continue
+
+      const rects = Array.from(el.getClientRects()).filter(rect => rect.width > 0 && rect.height > 0)
+      for (const rect of rects) {
+        const padX = 1
+        const padY = 3
+        if (x < rect.left - padX || x > rect.right + padX || y < rect.top - padY || y > rect.bottom + padY) continue
+        const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0
+        const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0
+        const score = dy * 100 + dx + Math.abs(y - (rect.top + rect.bottom) / 2) * 0.01
+        if (!best || score < best.score || (score === best.score && i > best.index)) {
+          best = { mark, score, index: i }
+        }
+      }
+    }
+
+    return best?.mark || null
+  }, [getMarkById])
 
   const openMarkEditor = useCallback((mark: import('../../types/library').TextMark, x: number, y: number) => {
     const type = mark.type as TextMarkType
@@ -4009,7 +4033,12 @@ export default function PdfViewer() {
   const handleMouseUp = useCallback((e: React.MouseEvent | any) => {
     const selection = window.getSelection()
     if (!selection || selection.isCollapsed) {
-      const clickedMark = findRenderedMarkAtPoint(e.clientX || 0, e.clientY || 0)
+      const directlyClickedMark = getMarkFromEventTarget(e.target || null)
+      const clickedMark = directlyClickedMark || findRenderedMarkAtPoint(
+        e.clientX || 0,
+        e.clientY || 0,
+        (e.currentTarget as ParentNode | null) || scrollRef.current,
+      )
       if (clickedMark) {
         openMarkEditor(clickedMark, e.clientX || 0, e.clientY || 0)
         return
@@ -4044,7 +4073,7 @@ export default function PdfViewer() {
     setToolbar({ x: point.x, y: point.y, text, pageNumber: pageNumber || 1 })
     setToolbarMode('main')
     setEditingMarkId(null)
-  }, [currentPdfMeta?.annotations, findRenderedMarkAtPoint, openMarkEditor, setTextSelection])
+  }, [currentPdfMeta?.annotations, findRenderedMarkAtPoint, getMarkFromEventTarget, openMarkEditor, setTextSelection])
 
   // Dismiss toolbar on click outside (but not when clicking immersive annotation box)
   useEffect(() => {
