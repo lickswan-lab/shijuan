@@ -1422,7 +1422,16 @@ body { max-width: var(--reader-max-width, 920px); min-height: 100vh; margin: 0 a
       body > * { filter: var(--reader-content-filter, sepia(0.03) saturate(0.97) brightness(0.975) contrast(0.99)); }
       p { margin: 0 0 var(--reader-paragraph-gap, 0.9em) 0; }
       ::selection { background: rgba(200, 149, 108, 0.35); }
-      .sj-ann-hl { background: rgba(200,149,108,0.2); border-bottom: 2px solid rgba(200,149,108,0.5); border-radius: 2px; }
+      .sj-ann-hl {
+        background: rgba(200,149,108,0.14);
+        border-bottom: none;
+        border-radius: 2px;
+        text-decoration: underline;
+        text-decoration-color: rgba(200,149,108,0.56);
+        text-decoration-thickness: 1.5px;
+        text-underline-offset: 0.12em;
+        text-decoration-skip-ink: none;
+      }
       .ocr-ann-marker {
         display: inline-block;
         width: 6px; height: 6px;
@@ -1445,6 +1454,11 @@ body { max-width: var(--reader-max-width, 920px); min-height: 100vh; margin: 0 a
       .mark-underline-blue { text-decoration: underline; text-decoration-color: #339AF0; text-decoration-thickness: 1px; text-underline-offset: 3px; }
       .mark-underline-purple { text-decoration: underline; text-decoration-color: #CC5DE8; text-decoration-thickness: 1px; text-underline-offset: 3px; }
       .mark-underline-orange { text-decoration: underline; text-decoration-color: #FF922B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .ocr-mark[class*="mark-underline-"] {
+        text-decoration-thickness: 1.5px;
+        text-underline-offset: 0.12em;
+        text-decoration-skip-ink: none;
+      }
       .mark-highlight-yellow { background: rgba(255,212,59,0.27); border-radius: 2px; }
       .mark-highlight-red { background: rgba(255,107,107,0.22); border-radius: 2px; }
       .mark-highlight-green { background: rgba(81,207,102,0.22); border-radius: 2px; }
@@ -1622,6 +1636,11 @@ body { max-width: var(--reader-max-width, 920px); min-height: 100vh; margin: 0 a
   .mark-underline-blue { text-decoration: underline; text-decoration-color: #339AF0; text-decoration-thickness: 1px; text-underline-offset: 3px; }
   .mark-underline-purple { text-decoration: underline; text-decoration-color: #CC5DE8; text-decoration-thickness: 1px; text-underline-offset: 3px; }
   .mark-underline-orange { text-decoration: underline; text-decoration-color: #FF922B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  .ocr-mark[class*="mark-underline-"] {
+    text-decoration-thickness: 1.5px;
+    text-underline-offset: 0.12em;
+    text-decoration-skip-ink: none;
+  }
   .mark-highlight-yellow { background: rgba(255,212,59,0.27); border-radius: 2px; }
   .mark-highlight-red { background: rgba(255,107,107,0.22); border-radius: 2px; }
   .mark-highlight-green { background: rgba(81,207,102,0.22); border-radius: 2px; }
@@ -1930,6 +1949,11 @@ padding: 36px clamp(20px, 3vw, 38px) 72px !important;
       .mark-underline-blue   { text-decoration: underline; text-decoration-color: #339AF0; text-decoration-thickness: 1px; text-underline-offset: 3px; }
       .mark-underline-purple { text-decoration: underline; text-decoration-color: #CC5DE8; text-decoration-thickness: 1px; text-underline-offset: 3px; }
       .mark-underline-orange { text-decoration: underline; text-decoration-color: #FF922B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+      .ocr-mark[class*="mark-underline-"] {
+        text-decoration-thickness: 1.5px;
+        text-underline-offset: 0.12em;
+        text-decoration-skip-ink: none;
+      }
       .mark-highlight-yellow { background: rgba(255,212,59,0.27); border-radius: 2px; }
       .mark-highlight-red    { background: rgba(255,107,107,0.22); border-radius: 2px; }
       .mark-highlight-green  { background: rgba(81,207,102,0.22); border-radius: 2px; }
@@ -1941,8 +1965,9 @@ padding: 36px clamp(20px, 3vw, 38px) 72px !important;
       .ocr-ann-underline {
         text-decoration: underline;
         text-decoration-color: rgba(200,149,108,0.5);
-        text-decoration-thickness: 1px;
-        text-underline-offset: 3px;
+        text-decoration-thickness: 1.5px;
+        text-underline-offset: 0.12em;
+        text-decoration-skip-ink: none;
         pointer-events: none;
         border-radius: 2px;
       }

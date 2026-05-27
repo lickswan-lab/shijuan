@@ -1306,8 +1306,9 @@ html, body, #root {
 .ocr-ann-underline {
   text-decoration: underline;
   text-decoration-color: rgba(200,149,108,0.5);
-  text-decoration-thickness: 1px;
-  text-underline-offset: 3px;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 0.12em;
+  text-decoration-skip-ink: none;
   pointer-events: none;
   border-radius: 2px;
 }
@@ -1536,6 +1537,11 @@ html, body, #root {
 .mark-underline-blue { text-decoration: underline; text-decoration-color: #339AF0; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .mark-underline-purple { text-decoration: underline; text-decoration-color: #CC5DE8; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .mark-underline-orange { text-decoration: underline; text-decoration-color: #FF922B; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.ocr-mark[class*="mark-underline-"] {
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 0.12em;
+  text-decoration-skip-ink: none;
+}
 
 .mark-highlight-yellow { background: rgba(255,212,59,0.27); border-radius: 2px; }
 .mark-highlight-red { background: rgba(255,107,107,0.22); border-radius: 2px; }
