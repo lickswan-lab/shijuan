@@ -51,6 +51,23 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString()
 
+// 2026-05-25 · CJK PDF 渲染修复 —
+//   像《文化与公共性》这种用 STSong-Light-GBK-EUC-H / GB-EUC-H 预定义 CMap
+//   字体(不嵌入字形,引用 Adobe 标准 CJK encoding)的 PDF,如果不告诉 PDF.js
+//   到哪里找 .bcmap 文件,worker 解码不到字符,渲染出来是空白页+乱码。
+//   standardFontDataUrl 同理,负责兜底 Times/Helvetica 这 14 个 PDF 标准字体。
+//   两个目录都由 electron.vite.config.ts 的 pdfjsAssetsPlugin 拷贝/serve。
+//   使用 new URL 拼绝对 URL,避免 PDF.js worker 把相对路径解析到错误的基址。
+const PDFJS_CMAP_URL = new URL('pdfjs-assets/cmaps/', document.baseURI).toString()
+const PDFJS_STANDARD_FONT_URL = new URL('pdfjs-assets/standard_fonts/', document.baseURI).toString()
+// 模块级常量(不依赖任何 React state),保证传给 <Document options=...> 的引用
+// 稳定 — 否则 react-pdf 会每次 render 重建 PDFDocumentProxy,大文件会卡死。
+const PDF_DOCUMENT_OPTIONS = {
+  cMapUrl: PDFJS_CMAP_URL,
+  cMapPacked: true,
+  standardFontDataUrl: PDFJS_STANDARD_FONT_URL,
+} as const
+
 // cleanOcrText and highlight utils are now in separate files
 
 type TextMarkType = 'underline' | 'bold'
@@ -4984,6 +5001,7 @@ export default function PdfViewer() {
                 key={`${currentEntry?.id}-single`}
                 className="pdf-document-stack"
                 file={pdfDocumentFile}
+                options={PDF_DOCUMENT_OPTIONS}
                 onLoadSuccess={onDocumentLoadSuccess}
                 onLoadError={onDocumentLoadError}
                 onLoadProgress={({ loaded, total }: { loaded: number; total: number }) => {

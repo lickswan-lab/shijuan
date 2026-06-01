@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-06-01 - v1.3.7 - CJK PDF assets / text-mark interaction polish
+
+Theme: release v1.3.7 from the current reader fixes.
+
+1. PDF rendering
+   - Serve and bundle PDF.js `cmaps/` and `standard_fonts/` assets for renderer builds.
+   - Fix CJK PDFs that depend on predefined CMaps such as STSong-Light-GBK-EUC-H / GB-EUC-H rendering as blank or garbled pages.
+   - Pass stable PDF.js document options to `react-pdf` to avoid unnecessary PDFDocumentProxy rebuilds.
+
+2. Text marks
+   - Smooth underline rendering by disabling ink skipping and tuning underline offset/thickness.
+   - Fix adjacent mark click targeting by preferring the actual clicked mark span and falling back to line-level `getClientRects()` hit testing.
+
+3. Release
+   - Bump app version from `1.3.6` to `1.3.7`.
+   - GitHub Actions tag release continues to build Windows zip / setup / portable, macOS Intel / Apple Silicon zip, and `app.asar` / `app.asar.gz` update assets.
+
 ## 2026-05-20 · v1.3.6 · OCR 续扫拼接 / 注释 AI 再生成 / 模型接入修复
 
 主题：**发布 v1.3.6，把这一轮阅读与注释体验修复收口为正式版本。**

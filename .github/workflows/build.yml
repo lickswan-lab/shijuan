@@ -142,15 +142,13 @@ jobs:
           overwrite_files: true
           fail_on_unmatched_files: true
           body: |
-            ## 拾卷 ${{ github.ref_name }}
+            ## ShiJuan ${{ github.ref_name }}
 
-            - OCR 支持续扫、页数检测与重叠页自动覆盖，后续识别会拼接到已有文本。
-            - 注释 AI 支持重新生成，可带反馈替换原块；刷新后的生成中状态不再卡死。
-            - 注释栏支持 Markdown 表格横向滚动，召唤人物批注与普通 AI 块都有明确区块。
-            - 优化阅读器顶部工具栏、跳转控件、深色模式输入对比度与生成中停止按钮。
-            - 新增涂尔干 skill，并按官方文档修正部分模型接入与参数字段。
+            - Bundles PDF.js CMaps and standard fonts so CJK PDFs that use predefined CMaps render correctly.
+            - Smooths underline rendering for annotations and text marks.
+            - Fixes adjacent text-mark click targeting by using the clicked mark span before geometric fallback.
 
-            Windows 与 macOS 版本均由 GitHub Actions 自动构建；macOS 分为 Apple Silicon 与 Intel 两个 zip 包。
+            Windows and macOS builds are generated automatically by GitHub Actions. Assets include Windows zip/setup/portable, macOS Intel/Apple Silicon zip, and app.asar/app.asar.gz update packages.
           files: |
             artifacts/shijuan-win-x64/shijuan-win-x64.zip
             artifacts/shijuan-win-setup/*.exe
